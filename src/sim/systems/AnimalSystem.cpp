@@ -1,6 +1,8 @@
 #include "sim/systems/AnimalSystem.h"
 
+#include "sim/Calendar.h"
 #include "sim/Perception.h"
+#include "sim/Population.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/systems/MovementSystem.h"
@@ -66,6 +68,9 @@ constexpr int kHopAttempts = 8;
 constexpr float kCarrionRange = 1500.0f;
 constexpr float kCarrionOffset = 4.0f;
 constexpr int kPerchMinMinutes = 60;   // сидит на месте, игровые минуты
+// Восполнение (этап 5.7): каждую полночь вида, которого меньше начального числа,
+// приходит одна группа — издалека, не ближе этого к людям.
+constexpr float kMigrantPeopleDistance = 600.0f;
 constexpr int kPerchMaxMinutes = 240;
 
 std::uint64_t seconds(int count) {
@@ -473,6 +478,23 @@ void updateAnimals(World& world) {
         }
     }
     updateFlocks(world, rng);
+
+    // Каждую полночь — восполнение: убитых охотниками заменяют пришедшие из
+    // дальних лесов, но не больше одной группы вида в сутки.
+    if ((tick + kStartGameTick) % kTicksPerGameDay == 0) {
+        int alive[static_cast<std::size_t>(AnimalKind::Count)] = {};
+        for (const auto [entity, animal] : registry.view<const Animal>().each()) {
+            ++alive[static_cast<std::size_t>(animal.kind)];
+        }
+        for (std::size_t k = 0; k < static_cast<std::size_t>(AnimalKind::Count); ++k) {
+            const auto kind = static_cast<AnimalKind>(k);
+            const int missing = animalTarget(world.config().animals, kind) - alive[k];
+            if (missing > 0) {
+                spawnAnimalGroup(world, kind, std::min(animalGroupSize(kind, rng), missing),
+                                 kMigrantPeopleDistance, rng);
+            }
+        }
+    }
 }
 
 } // namespace lw

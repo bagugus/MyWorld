@@ -31,7 +31,7 @@ bool isFirearm(WeaponKind kind);
 const AttackSpec& zombieAttack();
 const AttackSpec& boarAttack();
 // Шанс, что удар зомби — укус (иначе царапина).
-inline constexpr float kBiteChance = 0.12f;
+inline constexpr float kBiteChance = 0.08f;
 inline constexpr float kBiteBleeding = 0.25f; // здоровья в игровой час
 // Укус заражает (этап 5.5): столько к заражению; дальше оно растёт само (NeedsSystem).
 inline constexpr float kBiteInfection = 0.05f;

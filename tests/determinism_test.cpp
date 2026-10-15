@@ -1,7 +1,7 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
-// животные и птицы, бой, смерть и тела, инвентарь и лут.
+// животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -2766,7 +2766,7 @@ void testHordes() {
     for (int i = 0; i < 3; ++i) {
         second.push_back(field.id(still(field.zombie(9 + i))));
     }
-    lw::formHorde(field.world, second, false);
+    lw::formHorde(field.world, second, lw::HordeOrigin::Start);
     field.steps(lw::kHordeUpdateTicks);
     CHECK(registry.view<const lw::Horde>().size() == 1);
     CHECK(field.count(lw::ChronicleKind::HordeMerged) == 1);
@@ -3471,6 +3471,94 @@ void testMeatSpoils() {
     CHECK(registry.get<lw::Inventory>(building).count(lw::ItemKind::Meat) == 4);
 }
 
+
+// --- Дефицит и распределение (этап 5.7) ------------------------------------------
+
+// Выбитых зверей восполняют пришедшие издалека: по группе вида в сутки.
+void testAnimalsReturn() {
+    lw::WorldConfig config = regionConfig();
+    config.animals = 20;
+    lw::World world(11, config);
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> deer;
+    for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+        if (animal.kind == lw::AnimalKind::Deer) {
+            deer.push_back(entity);
+        }
+    }
+    CHECK(deer.size() == 10);
+    for (const entt::entity entity : deer) {
+        lw::die(world, entity, lw::DeathCause::Wounds, lw::kInvalidId);
+    }
+    const auto alive = [&] {
+        std::size_t count = 0;
+        for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+            count += animal.kind == lw::AnimalKind::Deer ? 1 : 0;
+        }
+        return count;
+    };
+    CHECK(alive() == 0);
+    const std::uint64_t end = world.tick() + 3 * lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    // Три полуночи — три стада по 2–5, но не больше начального числа.
+    CHECK(alive() >= 6 && alive() <= 10);
+}
+
+// В каждом городе есть аптека: магазин с лекарствами.
+void testPharmacies() {
+    const lw::World world(7, regionConfig());
+    const entt::registry& registry = world.registry();
+    for (const lw::Places::SettlementPlace& place : world.places().settlements()) {
+        const lw::Settlement& settlement = registry.get<lw::Settlement>(world.find(place.id));
+        if (settlement.kind != lw::SettlementKind::Town) {
+            continue;
+        }
+        bool pharmacy = false;
+        for (const lw::Places::BuildingPlace& building : place.buildings) {
+            pharmacy = pharmacy ||
+                       (building.kind == lw::BuildingKind::Shop &&
+                        registry.get<lw::Inventory>(world.find(building.id)).count(lw::ItemKind::Medicine) >= 4);
+        }
+        const bool hasShop = std::any_of(place.buildings.begin(), place.buildings.end(),
+                                         [](const lw::Places::BuildingPlace& b) {
+                                             return b.kind == lw::BuildingKind::Shop;
+                                         });
+        CHECK(pharmacy || !hasShop);
+    }
+}
+
+
+// Упокоенных зомби заменяют пришедшие издалека: в полночь — орда.
+void testZombiesArrive() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 10;
+    config.zombies = 40;
+    lw::World world(11, config);
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> zombies;
+    for (const auto [entity, zombie] : registry.view<const lw::Zombie>().each()) {
+        zombies.push_back(entity);
+    }
+    CHECK(zombies.size() == 40);
+    for (std::size_t i = 0; i < 20; ++i) {
+        lw::die(world, zombies[i], lw::DeathCause::Wounds, lw::kInvalidId);
+    }
+    const std::size_t formed = world.chronicle().countOf(lw::ChronicleKind::HordeFormed);
+    const std::uint64_t end = world.tick() + lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    const std::size_t alive = registry.view<const lw::Zombie>().size();
+    CHECK(alive >= 20 + lw::kArrivalMin - 2 && alive <= 36); // не больше 90 %; кого-то могли упокоить
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::HordeFormed) > formed);
+    const auto& events = world.chronicle().events();
+    CHECK(std::any_of(events.begin(), events.end(), [](const lw::ChronicleEvent& e) {
+        return e.kind == lw::ChronicleKind::HordeFormed && e.b == 2;
+    }));
+}
+
 } // namespace
 
 int main() {
@@ -3545,6 +3633,9 @@ int main() {
     testTreatsWound();
     testLootsBody();
     testMeatSpoils();
+    testAnimalsReturn();
+    testPharmacies();
+    testZombiesArrive();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

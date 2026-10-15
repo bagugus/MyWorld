@@ -1,7 +1,9 @@
 #include "sim/systems/ZombieSystem.h"
 
 #include "sim/Hash.h"
+#include "sim/Calendar.h"
 #include "sim/Perception.h"
+#include "sim/Population.h"
 #include "sim/Places.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -676,7 +678,7 @@ void updateHordes(World& world) {
                 std::sort(gathered.begin(), gathered.end());
                 gathered.resize(kHordeMax);
             }
-            formHorde(world, gathered, true);
+            formHorde(world, gathered, HordeOrigin::Gathered);
         }
     }
 }
@@ -773,7 +775,7 @@ void raiseZombie(World& world, entt::entity entity, Cell cell, Rng& rng) {
     registry.emplace<Zombie>(entity, zombie);
 }
 
-EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered) {
+EntityId formHorde(World& world, std::vector<EntityId> members, HordeOrigin origin) {
     entt::registry& registry = world.registry();
     std::sort(members.begin(), members.end());
     const entt::entity entity = world.create();
@@ -786,9 +788,13 @@ EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered) {
     horde.x = at.x;
     horde.y = at.y;
     // Сбежавшиеся на шум стоят там, где собрались; орды с начала мира
-    // трогаются вразнобой.
-    const int wait = gathered ? kRestMinMinutes
-                              : static_cast<int>(world.rng(RngStream::Zombies).below(kFirstMoveMaxMinutes));
+    // трогаются вразнобой; пришедшие издалека идут дальше сразу.
+    int wait = 0;
+    if (origin == HordeOrigin::Gathered) {
+        wait = kRestMinMinutes;
+    } else if (origin == HordeOrigin::Start) {
+        wait = static_cast<int>(world.rng(RngStream::Zombies).below(kFirstMoveMaxMinutes));
+    }
     horde.until = world.tick() + gameMinutes(wait);
     horde.settlement = settlementAt(world, at.x, at.y);
     for (const EntityId member : members) {
@@ -798,7 +804,7 @@ EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered) {
     horde.members = std::move(members);
     const auto size = static_cast<std::int32_t>(horde.members.size());
     registry.emplace<Horde>(entity, std::move(horde));
-    world.record(ChronicleKind::HordeFormed, id, kInvalidId, size, gathered ? 1 : 0);
+    world.record(ChronicleKind::HordeFormed, id, kInvalidId, size, static_cast<std::int32_t>(origin));
     return id;
 }
 
@@ -817,6 +823,14 @@ void updateZombies(World& world) {
     }
     if (tick % kHordeUpdateTicks == 0) {
         updateHordes(world);
+    }
+    // Приток: упокоенных заменяют пришедшие издалека, не больше орды в сутки.
+    if ((tick + kStartGameTick) % kTicksPerGameDay == 0) {
+        const int target = static_cast<int>(kArrivalBelow * static_cast<float>(world.config().zombies));
+        const int missing = target - static_cast<int>(world.registry().view<const Zombie>().size());
+        if (missing > 0) {
+            spawnZombieGroup(world, std::min(missing, rng.rangeInt(kArrivalMin, kArrivalMax)), rng);
+        }
     }
 }
 

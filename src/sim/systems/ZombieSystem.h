@@ -57,9 +57,19 @@ entt::entity createZombie(World& world, Cell cell, Rng& rng);
 // Сделать зомби из существующей сущности (тело укушенного встаёт, этап 5.5):
 // поведение зомби, родные места — anchor. Позиция у сущности уже есть.
 void raiseZombie(World& world, entt::entity entity, Cell anchor, Rng& rng);
-// Собрать орду из зомби (любой порядок; вожак — с меньшим id). gathered —
-// сбежались на шум, иначе орда с начала мира. Возвращает id орды.
-EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered);
+// Откуда орда (летопись HordeFormed, b): с начала мира — трогается вразнобой,
+// сбежались на шум — стоят, где собрались, пришли издалека (этап 5.7) — сразу
+// идут к поселениям.
+enum class HordeOrigin : std::uint8_t { Start, Gathered, Arrived };
+// Собрать орду из зомби (любой порядок; вожак — с меньшим id). Возвращает id орды.
+EntityId formHorde(World& world, std::vector<EntityId> members, HordeOrigin origin);
+
+// Приток (этап 5.7): каждую полночь, если зомби меньше kArrivalBelow от
+// WorldConfig::zombies, издалека приходит орда из kArrivalMin..kArrivalMax —
+// вдали от людей и поселений.
+inline constexpr int kArrivalMin = 4;
+inline constexpr int kArrivalMax = 8;
+inline constexpr float kArrivalBelow = 0.9f;
 
 void updateZombies(World& world);
 

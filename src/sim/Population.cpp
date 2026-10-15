@@ -38,6 +38,9 @@ constexpr float kHordePeopleDistance = 250.0f;
 constexpr float kHordeSettlementDistance = 300.0f;
 constexpr float kHordeSpawnRadius = 8.0f; // зомби орды — вокруг её центра
 constexpr int kZombieSpawnAttempts = 200;
+// Приток зомби (этап 5.7): орда приходит вдали от людей и поселений, метры.
+constexpr float kArrivalPeopleDistance = 800.0f;
+constexpr float kArrivalSettlementDistance = 400.0f;
 
 // Животные: доли оленей и кабанов (остальные — зайцы), проценты; размеры групп.
 constexpr int kDeerSharePercent = 50;
@@ -131,6 +134,18 @@ std::vector<LootRoll> lootTable(BuildingKind kind) {
     return {};
 }
 
+// Распределение (этап 5.7): в городах снаряжение встречается чаще, в каждом
+// городе есть аптека (первый по id магазин), в части деревень — дом охотника
+// (первый по id дом) с винтовкой.
+constexpr float kTownGearFactor = 1.25f;
+constexpr int kPharmacyMedicineMin = 4;
+constexpr int kPharmacyMedicineMax = 10;
+constexpr int kPharmacyBandagesMin = 6;
+constexpr int kPharmacyBandagesMax = 15;
+constexpr float kHunterChance = 0.5f;
+constexpr int kHunterAmmoMin = 8;
+constexpr int kHunterAmmoMax = 16;
+
 // Бинт при себе у человека с начала мира — с такой вероятностью.
 constexpr float kStartBandageChance = 0.4f;
 
@@ -190,12 +205,39 @@ void spawnLoot(World& world) {
         inventory.set(ItemKind::Water, rng.rangeInt(range.waterMin, range.waterMax));
         registry.emplace<Inventory>(entity, inventory);
     }
+    const auto inTown = [&](const Building& building) {
+        const entt::entity settlement = world.find(building.settlement);
+        return settlement != entt::null &&
+               registry.get<Settlement>(settlement).kind == SettlementKind::Town;
+    };
     for (const auto& [id, entity] : buildings) {
         Inventory& inventory = registry.get<Inventory>(entity);
-        for (const LootRoll& roll : lootTable(registry.get<Building>(entity).kind)) {
-            if (rng.chance(roll.chance)) {
+        const Building& building = registry.get<Building>(entity);
+        const float factor = inTown(building) ? kTownGearFactor : 1.0f;
+        for (const LootRoll& roll : lootTable(building.kind)) {
+            if (rng.chance(std::min(1.0f, roll.chance * factor))) {
                 inventory.add(roll.item, rng.rangeInt(roll.min, roll.max));
             }
+        }
+    }
+    // Особые места: аптека в каждом городе, дом охотника в части деревень.
+    // Поселения — по id, здания в них — по id.
+    for (const Places::SettlementPlace& place : world.places().settlements()) {
+        const entt::entity settlement = world.find(place.id);
+        const bool town = registry.get<Settlement>(settlement).kind == SettlementKind::Town;
+        const BuildingKind wanted = town ? BuildingKind::Shop : BuildingKind::House;
+        const auto special = std::find_if(place.buildings.begin(), place.buildings.end(),
+                                          [&](const Places::BuildingPlace& b) { return b.kind == wanted; });
+        if (special == place.buildings.end()) {
+            continue;
+        }
+        Inventory& inventory = registry.get<Inventory>(world.find(special->id));
+        if (town) {
+            inventory.add(ItemKind::Medicine, rng.rangeInt(kPharmacyMedicineMin, kPharmacyMedicineMax));
+            inventory.add(ItemKind::Bandage, rng.rangeInt(kPharmacyBandagesMin, kPharmacyBandagesMax));
+        } else if (rng.chance(kHunterChance)) {
+            inventory.add(ItemKind::Rifle, 1);
+            inventory.add(ItemKind::RifleAmmo, rng.rangeInt(kHunterAmmoMin, kHunterAmmoMax));
         }
     }
 }
@@ -349,7 +391,7 @@ void spawnZombies(World& world, int count) {
             }
             members.push_back(registry.get<Id>(createZombie(world, cell, rng)).value);
         }
-        formHorde(world, std::move(members), false);
+        formHorde(world, std::move(members), HordeOrigin::Start);
         spawned += size;
     }
 
@@ -375,6 +417,106 @@ void spawnZombies(World& world, int count) {
     }
 }
 
+int spawnZombieGroup(World& world, int size, Rng& rng) {
+    if (size <= 0) {
+        return 0;
+    }
+    const NavGrid& nav = world.nav();
+    const NavGrid::Region mainland = mainlandOf(world);
+    std::optional<Cell> center;
+    for (int attempt = 0; attempt < kZombieSpawnAttempts && !center; ++attempt) {
+        const Cell cell{static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.width()))),
+                        static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.height())))};
+        if (nav.passable(cell) && (mainland == NavGrid::kNoRegion || nav.region(cell) == mainland) &&
+            !nearSettlement(world, cell, kArrivalSettlementDistance) &&
+            !nearPeople(world, cell, kArrivalPeopleDistance)) {
+            center = cell;
+        }
+    }
+    if (!center) {
+        return 0;
+    }
+    entt::registry& registry = world.registry();
+    std::vector<EntityId> members;
+    const int reach = static_cast<int>(kHordeSpawnRadius / Map::kCellSize);
+    for (int i = 0; i < size; ++i) {
+        Cell cell = *center;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            const Cell candidate{center->x + rng.rangeInt(-reach, reach),
+                                 center->y + rng.rangeInt(-reach, reach)};
+            if (nav.passable(candidate) && nav.connected(*center, candidate)) {
+                cell = candidate;
+                break;
+            }
+        }
+        members.push_back(registry.get<Id>(createZombie(world, cell, rng)).value);
+    }
+    if (members.size() >= 2) {
+        formHorde(world, std::move(members), HordeOrigin::Arrived);
+    }
+    return size;
+}
+
+int animalTarget(int count, AnimalKind kind) {
+    const int deer = count * kDeerSharePercent / 100;
+    const int boar = count * kBoarSharePercent / 100;
+    switch (kind) {
+    case AnimalKind::Deer:
+        return deer;
+    case AnimalKind::Boar:
+        return boar;
+    default:
+        return count - deer - boar;
+    }
+}
+
+int animalGroupSize(AnimalKind kind, Rng& rng) {
+    if (kind == AnimalKind::Deer) {
+        return rng.rangeInt(kDeerHerdMin, kDeerHerdMax);
+    }
+    if (kind == AnimalKind::Boar) {
+        return rng.rangeInt(1, kBoarGroupMax);
+    }
+    return 1;
+}
+
+int spawnAnimalGroup(World& world, AnimalKind kind, int size, float peopleDistance, Rng& rng) {
+    const NavGrid& nav = world.nav();
+    const Map& map = world.map();
+    const NavGrid::Region mainland = mainlandOf(world);
+    const AnimalSpec& spec = animalSpec(kind);
+    std::optional<Cell> anchor;
+    for (int attempt = 0; attempt < kAnimalSpawnAttempts && !anchor; ++attempt) {
+        const Cell cell{static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.width()))),
+                        static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.height())))};
+        if (!nav.passable(cell) || map.water.at(cell.x, cell.y) != Water::None ||
+            (mainland != NavGrid::kNoRegion && nav.region(cell) != mainland)) {
+            continue;
+        }
+        if ((map.cover.at(cell.x, cell.y) == Cover::Forest) == spec.forest &&
+            !nearSettlement(world, cell, kAnimalSettlementDistance) &&
+            !nearPeople(world, cell, peopleDistance)) {
+            anchor = cell;
+        }
+    }
+    if (!anchor) {
+        return 0;
+    }
+    for (int i = 0; i < size; ++i) {
+        Cell cell = *anchor;
+        for (int attempt = 0; attempt < 8; ++attempt) {
+            const Cell candidate{anchor->x + rng.rangeInt(-3, 3), anchor->y + rng.rangeInt(-3, 3)};
+            if (nav.passable(candidate) && map.water.at(candidate.x, candidate.y) == Water::None &&
+                nav.connected(*anchor, candidate)) {
+                cell = candidate;
+                break;
+            }
+        }
+        createAnimal(world, kind, cell, rng);
+    }
+    return size;
+}
+
 void spawnAnimals(World& world, int count, int flocks) {
     Rng& rng = world.rng(RngStream::Animals);
     const NavGrid& nav = world.nav();
@@ -390,47 +532,13 @@ void spawnAnimals(World& world, int count, int flocks) {
         return cell;
     };
 
-    const int shares[] = {count * kDeerSharePercent / 100, count * kBoarSharePercent / 100,
-                          count - count * kDeerSharePercent / 100 - count * kBoarSharePercent / 100};
-    for (std::size_t k = 0; k < std::size(shares); ++k) {
+    for (std::size_t k = 0; k < static_cast<std::size_t>(AnimalKind::Count); ++k) {
         const auto kind = static_cast<AnimalKind>(k);
-        const AnimalSpec& spec = animalSpec(kind);
-        int left = shares[k];
+        int left = animalTarget(count, kind);
         while (left > 0) {
-            int size = 1;
-            if (kind == AnimalKind::Deer) {
-                size = rng.rangeInt(kDeerHerdMin, kDeerHerdMax);
-            } else if (kind == AnimalKind::Boar) {
-                size = rng.rangeInt(1, kBoarGroupMax);
-            }
-            size = std::min(size, left);
+            const int size = std::min(animalGroupSize(kind, rng), left);
             left -= size;
-            std::optional<Cell> anchor;
-            for (int attempt = 0; attempt < kAnimalSpawnAttempts && !anchor; ++attempt) {
-                const auto cell = randomLand();
-                if (cell && (map.cover.at(cell->x, cell->y) == Cover::Forest) == spec.forest &&
-                    !nearSettlement(world, *cell, kAnimalSettlementDistance) &&
-                    !nearPeople(world, *cell, kAnimalPeopleDistance)) {
-                    anchor = cell;
-                }
-            }
-            if (!anchor) {
-                continue;
-            }
-            for (int i = 0; i < size; ++i) {
-                Cell cell = *anchor;
-                for (int attempt = 0; attempt < 8; ++attempt) {
-                    const Cell candidate{anchor->x + rng.rangeInt(-3, 3),
-                                         anchor->y + rng.rangeInt(-3, 3)};
-                    if (nav.passable(candidate) &&
-                        map.water.at(candidate.x, candidate.y) == Water::None &&
-                        nav.connected(*anchor, candidate)) {
-                        cell = candidate;
-                        break;
-                    }
-                }
-                createAnimal(world, kind, cell, rng);
-            }
+            spawnAnimalGroup(world, kind, size, kAnimalPeopleDistance, rng);
         }
     }
 

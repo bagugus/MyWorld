@@ -6,6 +6,7 @@
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
 //   lw_headless --seed 42 --zombies 0                    мир без зомби
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
+//   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -399,6 +400,58 @@ void printClimate(std::uint64_t seed) {
 }
 
 
+// Строка на игровые сутки: сколько кого, смерти по причинам, еда и патроны.
+// По таким строкам подбирается баланс дефицита (этап 5.7).
+void printDailyHeader() {
+    std::printf("day season | people (hungry thirsty) | zombies hordes | animals | died: wounds "
+                "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
+                "forest | ammo\n");
+}
+
+void printDaily(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    const lw::CalendarTime time = lw::calendarAt(world.tick());
+    std::size_t people = 0;
+    std::size_t hungry = 0;
+    std::size_t thirsty = 0;
+    for (const auto [entity, person, needs] : registry.view<const lw::Person, const lw::Needs>().each()) {
+        ++people;
+        hungry += needs.hunger >= 0.8f ? 1 : 0;
+        thirsty += needs.thirst >= 0.8f ? 1 : 0;
+    }
+    std::size_t died[static_cast<std::size_t>(lw::DeathCause::Count)] = {};
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Died) {
+            ++died[static_cast<std::size_t>(event.a)];
+        }
+    }
+    long long food = 0;
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        food += inventory.food();
+    }
+    long long carried = 0;
+    for (const auto [entity, person, inventory] :
+         registry.view<const lw::Person, const lw::Inventory>().each()) {
+        carried += inventory.food();
+    }
+    long long ammo = 0;
+    for (const auto [entity, person, weapon] : registry.view<const lw::Person, const lw::Weapon>().each()) {
+        ammo += weapon.ammo;
+    }
+    const lw::Chronicle& chronicle = world.chronicle();
+    std::printf("%3d %d | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld\n",
+                time.day, static_cast<int>(time.season), people, hungry, thirsty,
+                registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
+                registry.view<const lw::Animal>().size(), died[0], died[1], died[2], died[3],
+                died[4], died[5], chronicle.countOf(lw::ChronicleKind::Turned),
+                chronicle.countOf(lw::ChronicleKind::KilledZombie),
+                chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
+                world.resources().forestTotal(), ammo);
+    std::fflush(stdout);
+}
+
 using Clock = std::chrono::steady_clock;
 
 double millisSince(Clock::time_point start) {
@@ -558,6 +611,7 @@ int main(int argc, char** argv) {
     bool climate = false;
     int paths = 0;
     bool compare = false;
+    bool daily = false;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -572,6 +626,8 @@ int main(int argc, char** argv) {
             paths = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--optimal") == 0) {
             compare = true;
+        } else if (std::strcmp(argv[i], "--daily") == 0) {
+            daily = true;
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
@@ -582,7 +638,7 @@ int main(int argc, char** argv) {
             config.flocks = std::atoi(argv[++i]);
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
-                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]]\n");
+                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily]\n");
             return 2;
         }
     }
@@ -601,8 +657,14 @@ int main(int argc, char** argv) {
     }
 
     const auto start = std::chrono::steady_clock::now();
+    if (daily) {
+        printDailyHeader();
+    }
     for (std::uint64_t i = 0; i < ticks; ++i) {
         world.step();
+        if (daily && world.tick() % lw::kTicksPerGameDay == 0) {
+            printDaily(world);
+        }
     }
     const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
 

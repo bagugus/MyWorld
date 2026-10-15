@@ -63,9 +63,12 @@ constexpr float kForageMeal = 0.25f;   // найденное в лесу и съ
 // вес (kCarryCapacity): не всё, что найдено, нужно унести.
 constexpr int kCarryFoodMax = 8;
 constexpr int kCarryWaterMax = 6;
-// Снаряжение (этап 5.6): бинтов и лекарств при себе — не больше этого.
-constexpr int kBandageWant = 4;
-constexpr int kMedicineWant = 3;
+// Снаряжение (этап 5.6): бинтов и лекарств при себе — не больше этого; сколько
+// именно, решает запасливость (этап 5.7): от kBandageMin до kBandageMin + kBandageSpread.
+constexpr int kBandageMin = 1;
+constexpr float kBandageSpread = 3.0f;
+constexpr int kMedicineMin = 1;
+constexpr float kMedicineSpread = 2.0f;
 // Перевязаться — при кровотечении сильнее этого; лекарство — при здоровье ниже.
 constexpr float kTreatBleeding = 0.03f;
 constexpr float kMedicineBelow = 0.6f;
@@ -1479,7 +1482,7 @@ private:
     }
 
     // Снаряжение: оружие сильнее того, что в руках, патроны к своему оружию,
-    // бинты и лекарства (до kBandageWant и kMedicineWant). Оружие в руках у
+    // бинты и лекарства (запасливый — больше). Оружие в руках у
     // погибшего — тоже добыча. Новое оружие — в руки, прежнее остаётся на месте.
     void takeGear(Inventory& stock, Inventory& carry, entt::entity body) {
         if (body != entt::null) {
@@ -1527,8 +1530,12 @@ private:
                 move(ammoFor(kind), 0xFFFF);
             }
         }
-        move(ItemKind::Bandage, kBandageWant - carry.count(ItemKind::Bandage));
-        move(ItemKind::Medicine, kMedicineWant - carry.count(ItemKind::Medicine));
+        const Traits* traits = registry_.try_get<Traits>(entity_);
+        const float prudence = traits != nullptr ? traits->prudence : 0.5f;
+        const int bandages = kBandageMin + static_cast<int>(std::lround(kBandageSpread * prudence));
+        const int medicine = kMedicineMin + static_cast<int>(std::lround(kMedicineSpread * prudence));
+        move(ItemKind::Bandage, bandages - carry.count(ItemKind::Bandage));
+        move(ItemKind::Medicine, medicine - carry.count(ItemKind::Medicine));
         const WeaponKind before = weapon.kind;
         if (equipBest(weapon, carry)) {
             world_.record(ChronicleKind::FoundWeapon, id_, mind_.target,

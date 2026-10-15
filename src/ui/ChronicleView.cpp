@@ -78,7 +78,9 @@ Phrase phraseOf(const ChronicleEvent& event) {
     case ChronicleKind::HordeFormed:
         phrase.verb = "— орда собралась:";
         std::snprintf(phrase.tail, sizeof(phrase.tail), "%d зомби%s", event.a,
-                      event.b != 0 ? " сбежались на шум" : "");
+                      event.b == 1   ? " сбежались на шум"
+                      : event.b == 2 ? " пришли издалека"
+                                     : "");
         break;
     case ChronicleKind::HordeMerged:
         phrase.verb = "— орда поглотила орду";
