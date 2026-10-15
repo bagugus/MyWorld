@@ -116,8 +116,9 @@ EntityId Places::nearestSettlement(float x, float y) const {
     return best;
 }
 
-std::optional<Cell> Places::nearestWater(const NavGrid& nav, Cell from, float maxDistance) const {
-    return nearestSpot(water_, nav, from, maxDistance, {});
+std::optional<Cell> Places::nearestWater(const NavGrid& nav, Cell from, float maxDistance,
+                                         const std::function<bool(Cell)>& accept) const {
+    return nearestSpot(water_, nav, from, maxDistance, accept);
 }
 
 std::optional<Cell> Places::nearestForage(const NavGrid& nav, Cell from, float maxDistance,

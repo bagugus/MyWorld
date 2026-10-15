@@ -90,6 +90,8 @@ add_library(lw_sim STATIC
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp
     src/sim/systems/WeatherSystem.h
+    src/sim/systems/ZombieSystem.cpp
+    src/sim/systems/ZombieSystem.h
 )
 target_include_directories(lw_sim PUBLIC src)
 target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite)

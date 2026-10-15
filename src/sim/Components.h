@@ -56,6 +56,9 @@ struct Person {
     EntityId home = kInvalidId;
     // Спит: нужды меняются медленнее, усталость уходит.
     bool asleep = false;
+    // Дома, в укрытии: выполняет действие у своей двери (этап 5.2). Зомби его
+    // не видят, а сам он от зомби не выбегает. Ставит Utility AI.
+    bool indoors = false;
 };
 
 // Нужды человека (NeedsSystem). Голод, жажда, усталость, страх, одиночество —
@@ -111,16 +114,25 @@ enum class Action : std::uint8_t {
     Socialize, // к людям: побыть в компании
     Wander,    // прогулка к зданию своего или соседнего поселения
     GoHome,    // домой, переждать страх
+    Flee,      // бежать от зомби (этап 5.2)
     Count
 };
 
 // Сначала идти к месту действия, потом выполнять.
 enum class ActionPhase : std::uint8_t { Travel, Perform };
 
+// Опасное место: где человек заметил зомби, и до какого тика это помнит.
+struct Danger {
+    Cell cell;
+    std::uint64_t until = 0;
+};
+
 // Решения человека: текущее действие и короткая память.
 struct Mind {
     // Сколько зданий помнится обысканными: туда за едой не идут.
     static constexpr std::size_t kSearchedMemory = 16;
+    // Сколько опасных мест помнится.
+    static constexpr std::size_t kDangerMemory = 4;
 
     Action action = Action::Idle;
     ActionPhase phase = ActionPhase::Perform;
@@ -135,6 +147,12 @@ struct Mind {
     // Обысканные здания, кольцевой буфер.
     EntityId searched[kSearchedMemory] = {};
     std::uint8_t searchedNext = 0;
+    // Когда последний раз побежал от зомби: бегство меньше чем через час после
+    // прошлого — тот же случай, в летопись не пишется.
+    std::uint64_t fledAt = 0;
+    // Где замечал зомби: туда не ходят, оттуда отходят. Новое место вытесняет
+    // то, что забудется раньше всех.
+    Danger dangers[kDangerMemory] = {};
 };
 
 // Органы чувств существа (PerceptionSystem). Есть у всех, кто воспринимает
@@ -180,12 +198,57 @@ struct Awareness {
 struct Walker {
     // Скорость по дороге, м/с; по другой местности медленнее (walkSpeedFactor).
     float speed = 1.4f;
+    // Темп — множитель скорости: человек бежит (kRunPace), зомби бредёт
+    // медленнее своей скорости погони. Выставляет тот, кто решает, куда идти.
+    float pace = 1.0f;
     // Сглаженный путь из Pathfinder: точки — центры клеток. Пусто — стоит на месте.
     std::vector<Cell> waypoints;
     // Номер точки, к которой идёт.
     std::uint32_t next = 0;
 
     bool moving() const { return next < waypoints.size(); }
+};
+
+// Что делает зомби (ZombieSystem). Значения попадают в хеш и сохранения: новые
+// добавлять только в конец (перед Count).
+enum class ZombieState : std::uint8_t {
+    Idle,        // стоит, покачиваясь
+    Roam,        // бредёт по родным местам
+    Investigate, // идёт туда, где слышал или видел добычу
+    Chase,       // преследует того, кого видит
+    Follow,      // идёт с ордой за вожаком
+    Count
+};
+
+// Зомби. Нужд и черт нет: решает по Awareness, что видит и слышит.
+struct Zombie {
+    ZombieState state = ZombieState::Idle;
+    EntityId target = kInvalidId; // кого преследует (Chase)
+    Cell goal;                    // куда идёт
+    // Родные места: одиночка бродит вокруг них (там, где обратился).
+    Cell anchor;
+    EntityId horde = kInvalidId;  // орда; kInvalidId — одиночка
+    std::uint64_t until = 0;      // до какого тика стоять (Idle, на месте шума)
+    // Тик, когда дошёл до места последнего шума: всё замеченное раньше —
+    // уже проверено.
+    std::uint64_t checked = 0;
+    // Когда последний раз видел или слышал добычу: возбуждённые одиночки,
+    // сбежавшиеся на шум, сбиваются в орду.
+    std::uint64_t alerted = 0;
+    std::uint64_t lastGroan = 0;  // когда последний раз созывал стоном
+};
+
+// Орда: зомби, бредущие вместе за вожаком. Своей позиции в индексе нет — это
+// не существо, а связь между существами; центр считается по участникам.
+struct Horde {
+    EntityId leader = kInvalidId;
+    std::vector<EntityId> members; // по возрастанию id, вожак тоже здесь
+    Cell goal;                     // куда ведёт вожак
+    bool travelling = false;       // идёт к цели (иначе стоит у неё)
+    std::uint64_t until = 0;       // до какого тика стоять у цели
+    float x = 0.0f;                // центр участников, метры
+    float y = 0.0f;
+    EntityId settlement = kInvalidId; // поселение, где орда сейчас
 };
 
 } // namespace lw

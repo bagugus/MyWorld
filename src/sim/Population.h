@@ -16,4 +16,9 @@ void spawnSupplies(World& world);
 // Нужды начальные — как у людей утром, черты — generateTraits.
 void spawnPeople(World& world, int count);
 
+// Расселить count зомби подальше от людей (индекс должен уже знать людей):
+// четверть — орды по 12–30 вдали от поселений, остальные — одиночки: больше
+// у зданий, где никто не живёт рядом, меньше на природе. Поток — RngStream::Zombies.
+void spawnZombies(World& world, int count);
+
 } // namespace lw

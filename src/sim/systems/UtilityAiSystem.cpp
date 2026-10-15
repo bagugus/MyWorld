@@ -1,9 +1,11 @@
 #include "sim/systems/UtilityAiSystem.h"
 
 #include "sim/Calendar.h"
+#include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/World.h"
 #include "sim/systems/MovementSystem.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 #include <array>
@@ -36,6 +38,12 @@ constexpr int kSocializeMaxMinutes = 60;
 constexpr int kWanderMinMinutes = 20;
 constexpr int kWanderMaxMinutes = 60;
 constexpr int kGoHomeMinutes = 30;
+// Бегство: добежав, постоять и оглядеться; в пути — решать заново каждую минуту.
+constexpr int kFleeMinMinutes = 1;
+constexpr int kFleeMaxMinutes = 2;
+constexpr int kFleeThinkMinutes = 1;
+// Бегство позже этого после прошлого — новый случай для летописи.
+constexpr int kFleeEpisodeMinutes = 60;
 
 // Ночь жаворонка — с 21:00 до 5:30; у совы сдвинута на столько минут.
 constexpr int kEarlyBedtime = 21 * 60;
@@ -100,6 +108,34 @@ constexpr float kSleepInertia = 0.35f;
 constexpr float kJitter = 0.05f;
 // Проснуться, когда усталость ниже этого и ночь кончилась.
 constexpr float kRested = 0.1f;
+
+// Бегство от зомби: оценка — угроза × (kFleeBase − kFleeBravery × смелость).
+// Бегом — от угрозы не слабее kFleeMinThreat (зомби на виду ближе ~45 м,
+// слышен ближе ~30 м, гонится); от дальнего — отходит шагом.
+constexpr float kFleeBase = 1.3f;
+constexpr float kFleeBravery = 0.6f;
+constexpr float kFleeMinThreat = 0.25f;
+// Опасные места — где видел или слышал зомби (Mind::dangers): помнятся
+// kDangerMemoryMinutes, места ближе kDangerRadius к любому из них (и пути,
+// которые подводят к нему ближе, чем человек сейчас) оцениваются в
+// kDangerPenalty раз ниже. Внутри зоны — отойти (оценка kWaryWeight у самого
+// места, к краю зоны — ноль). Зомби, замеченный ближе kDangerMergeCells к уже
+// известному месту, обновляет его, а не занимает новое.
+constexpr int kDangerMemoryMinutes = 240;
+constexpr int kDangerMergeCells = 8;
+constexpr float kDangerSlack = 5.0f;
+constexpr float kDangerPenalty = 0.15f;
+constexpr float kWaryWeight = 0.5f;
+// Бегом — во столько раз быстрее шага.
+constexpr float kRunPace = 1.8f;
+// Бежать на столько метров прочь от угроз; домой — если дом ближе
+// kFleeHomeRange и в ту же сторону (косинус угла не меньше kFleeHomeAlignment).
+constexpr float kFleeDistance = 80.0f;
+constexpr float kFleeHomeRange = 400.0f;
+constexpr float kFleeHomeAlignment = 0.5f;
+// Направления бегства: прямо прочь, затем на 40° и 80° в стороны (cos, sin).
+constexpr float kFleeTurns[][2] = {
+    {1.0f, 0.0f}, {0.766f, 0.643f}, {0.766f, -0.643f}, {0.174f, 0.985f}, {0.174f, -0.985f}};
 
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
@@ -166,6 +202,12 @@ struct Context {
     bool atHome = false;
     // Поселение, где человек ищет еду и гуляет: где дом, у бездомного — ближайшее.
     EntityId settlement = kInvalidId;
+    // Зомби, которых человек сейчас замечает.
+    Threat threat;
+    // Где недавно замечал зомби (Mind::dangers), пока помнит; метры.
+    std::array<float, Mind::kDangerMemory> dangerX{};
+    std::array<float, Mind::kDangerMemory> dangerY{};
+    std::size_t dangerCount = 0;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -192,6 +234,16 @@ Context makeContext(const World& world, entt::entity entity) {
                 time,
                 false};
     ctx.night = isPersonalNight(ctx.traits.chronotype, time.minuteOfDay);
+    ctx.threat = threatOf(world, entity);
+    if (mind != nullptr) {
+        for (const Danger& danger : mind->dangers) {
+            if (world.tick() < danger.until) {
+                ctx.dangerX[ctx.dangerCount] = cellX(danger.cell);
+                ctx.dangerY[ctx.dangerCount] = cellY(danger.cell);
+                ++ctx.dangerCount;
+            }
+        }
+    }
     if (const entt::entity home = world.find(person.home); home != entt::null) {
         const Building& building = registry.get<Building>(home);
         ctx.homeId = person.home;
@@ -204,6 +256,74 @@ Context makeContext(const World& world, entt::entity entity) {
         ctx.settlement = world.places().nearestSettlement(ctx.x, ctx.y);
     }
     return ctx;
+}
+
+// Расстояние от точки p до отрезка ab.
+float segmentDistance(float px, float py, float ax, float ay, float bx, float by) {
+    const float dx = bx - ax;
+    const float dy = by - ay;
+    const float lengthSq = dx * dx + dy * dy;
+    const float along = lengthSq > 0.0f ? ((px - ax) * dx + (py - ay) * dy) / lengthSq : 0.0f;
+    const float t = std::clamp(along, 0.0f, 1.0f);
+    return distance(px, py, ax + t * dx, ay + t * dy);
+}
+
+// Опасно ли идти в клетку spot: она у места, где недавно замечал зомби, или
+// путь по прямой подводит к такому месту ближе, чем человек сейчас. Дом —
+// укрытие: опасен только путь к нему.
+bool risky(const Context& ctx, Cell spot) {
+    const float sx = cellX(spot);
+    const float sy = cellY(spot);
+    const bool shelter = ctx.homeId != kInvalidId && spot == ctx.homeDoor;
+    for (std::size_t i = 0; i < ctx.dangerCount; ++i) {
+        const float dx = ctx.dangerX[i];
+        const float dy = ctx.dangerY[i];
+        if (!shelter && distance(sx, sy, dx, dy) < kDangerRadius) {
+            return true;
+        }
+        const float self = distance(ctx.x, ctx.y, dx, dy);
+        if (segmentDistance(dx, dy, ctx.x, ctx.y, sx, sy) <
+            std::min(kDangerRadius, self) - kDangerSlack) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Ближайшее опасное место: номер в ctx и расстояние; ctx.dangerCount — нет.
+std::size_t nearestDanger(const Context& ctx, float& nearest) {
+    std::size_t best = ctx.dangerCount;
+    for (std::size_t i = 0; i < ctx.dangerCount; ++i) {
+        const float d = distance(ctx.x, ctx.y, ctx.dangerX[i], ctx.dangerY[i]);
+        if (best == ctx.dangerCount || d < nearest) {
+            best = i;
+            nearest = d;
+        }
+    }
+    return best;
+}
+
+// Запомнить, где замечен зомби: обновить место рядом или занять то, что
+// забудется раньше всех (при равных — первое).
+void rememberDanger(Mind& mind, Cell cell, std::uint64_t tick, std::uint64_t until) {
+    std::size_t slot = 0;
+    bool found = false;
+    for (std::size_t i = 0; i < Mind::kDangerMemory && !found; ++i) {
+        const Danger& danger = mind.dangers[i];
+        if (danger.until > tick && std::abs(danger.cell.x - cell.x) <= kDangerMergeCells &&
+            std::abs(danger.cell.y - cell.y) <= kDangerMergeCells) {
+            slot = i;
+            found = true;
+        }
+    }
+    if (!found) {
+        for (std::size_t i = 1; i < Mind::kDangerMemory; ++i) {
+            if (mind.dangers[i].until < mind.dangers[slot].until) {
+                slot = i;
+            }
+        }
+    }
+    mind.dangers[slot] = {cell, until};
 }
 
 // Порог, с которого нужда зовёт к действию: запасливый ест и пьёт раньше.
@@ -276,7 +396,13 @@ Option evalDrink(const Context& ctx) {
     // К воде — только если она заметно ближе дома (или дома воды нет).
     if (best.score < need * 0.9f) {
         const World& world = ctx.world;
-        if (const auto spot = world.places().nearestWater(world.nav(), ctx.cell, kWaterSearch)) {
+        // Безопасной воды нет — от жажды и к опасной (её оценка ниже, evaluate).
+        auto spot = world.places().nearestWater(world.nav(), ctx.cell, kWaterSearch,
+                                                [&ctx](Cell cell) { return !risky(ctx, cell); });
+        if (!spot && ctx.dangerCount > 0) {
+            spot = world.places().nearestWater(world.nav(), ctx.cell, kWaterSearch);
+        }
+        if (spot) {
             const float d = distance(ctx.x, ctx.y, cellX(*spot), cellY(*spot));
             best = better(best, {need * nearness(d, kNearScale), *spot, kInvalidId});
         }
@@ -337,7 +463,7 @@ Option evalForage(const Context& ctx) {
     const Resources& resources = world.resources();
     const auto spot = world.places().nearestForage(
         world.nav(), ctx.cell, kForageSearch,
-        [&resources](Cell cell) { return resources.forestAt(cell) > 0; });
+        [&](Cell cell) { return resources.forestAt(cell) > 0 && !risky(ctx, cell); });
     if (!spot) {
         return {};
     }
@@ -392,7 +518,29 @@ Option evalGoHome(const Context& ctx) {
     return {score, ctx.homeDoor, ctx.homeId};
 }
 
-Option evaluate(const Context& ctx, Action action) {
+// Куда бежать, выберется при выполнении. Дома не бегут, а прячутся.
+Option evalFlee(const Context& ctx) {
+    if (ctx.person.indoors) {
+        return {};
+    }
+    const float timidity = kFleeBase - kFleeBravery * ctx.traits.bravery;
+    if (ctx.threat.level >= kFleeMinThreat) {
+        return here(ctx, ctx.threat.level * timidity);
+    }
+    // Зомби далеко или уже не видно, но был здесь — отойти.
+    float d = 0.0f;
+    if (nearestDanger(ctx, d) < ctx.dangerCount && d < kDangerRadius) {
+        return here(ctx, kWaryWeight * (1.0f - d / kDangerRadius) * timidity);
+    }
+    return {};
+}
+
+// Бегом, а не шагом: угроза настоящая.
+bool mustRun(const Context& ctx) {
+    return ctx.threat.level >= kFleeMinThreat;
+}
+
+Option evaluateRaw(const Context& ctx, Action action) {
     switch (action) {
     case Action::Idle:
         return evalIdle(ctx);
@@ -412,10 +560,23 @@ Option evaluate(const Context& ctx, Action action) {
         return evalWander(ctx);
     case Action::GoHome:
         return evalGoHome(ctx);
+    case Action::Flee:
+        return evalFlee(ctx);
     case Action::Count:
         break;
     }
     return {};
+}
+
+// Не идти туда, где недавно видел зомби, и не оставаться там. Без этого
+// жажда раз за разом вела к реке мимо зомби, человек убегал, через минуту шёл
+// снова и так и не напивался.
+Option evaluate(const Context& ctx, Action action) {
+    Option option = evaluateRaw(ctx, action);
+    if (action != Action::Flee && option.score > 0.0f && risky(ctx, option.spot)) {
+        option.score *= kDangerPenalty;
+    }
+    return option;
 }
 
 constexpr std::size_t kActionCount = static_cast<std::size_t>(Action::Count);
@@ -461,7 +622,8 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
     for (const Places::SettlementPlace* settlement : order) {
         candidates.clear();
         for (const Places::BuildingPlace& building : settlement->buildings) {
-            if (building.id != ctx.homeId && !remembered(mind, building.id)) {
+            if (building.id != ctx.homeId && !remembered(mind, building.id) &&
+                !risky(ctx, building.door)) {
                 candidates.push_back(&building);
             }
         }
@@ -502,8 +664,13 @@ std::optional<Cell> pickWanderTarget(const Context& ctx, Rng& rng) {
     if (settlement->buildings.empty()) {
         return std::nullopt;
     }
-    return settlement->buildings[rng.below(static_cast<std::uint32_t>(settlement->buildings.size()))]
-        .door;
+    const Cell door =
+        settlement->buildings[rng.below(static_cast<std::uint32_t>(settlement->buildings.size()))]
+            .door;
+    if (risky(ctx, door)) {
+        return std::nullopt;
+    }
+    return door;
 }
 
 // --- Выполнение ----------------------------------------------------------
@@ -522,12 +689,35 @@ public:
           needs_(registry_.get<Needs>(entity)) {}
 
     void update() {
+        // Восприятие обновилось — не появился ли рядом зомби. Ждать пересмотра
+        // через 10 минут нельзя: за это время зомби проходит сотню метров.
+        if ((tick_ + id_) % kPerceptionIntervalTicks == 0) {
+            const Threat threat = threatOf(world_, entity_);
+            if (threat.nearest != kInvalidId) {
+                rememberDanger(mind_, Map::cellAt(threat.nearestX, threat.nearestY), tick_,
+                               tick_ + minutes(kDangerMemoryMinutes));
+            }
+            if (mind_.action != Action::Flee && threat.level >= kFleeMinThreat && react()) {
+                return;
+            }
+        }
         const Walker& walker = registry_.get<Walker>(entity_);
         if (mind_.phase == ActionPhase::Travel) {
             if (!walker.moving()) {
                 arrive();
             } else if (tick_ >= mind_.nextThink) {
-                reconsider();
+                // Бегущий решает заново, только если путь стал вести к зомби:
+                // новый путь начинается с центра своей клетки, и частые
+                // перепрокладки держали бы плывущего на месте.
+                if (mind_.action == Action::Flee) {
+                    if (risky(makeContext(world_, entity_), mind_.spot)) {
+                        think();
+                    } else {
+                        mind_.nextThink = tick_ + minutes(kFleeThinkMinutes);
+                    }
+                } else {
+                    reconsider();
+                }
             }
             return;
         }
@@ -569,6 +759,59 @@ private:
             return;
         }
         fail();
+    }
+
+    // Зомби рядом: бросить дело и бежать, если бегство важнее текущего с
+    // обычной надбавкой. Надбавка сна здесь не действует — угроза будит.
+    bool react() {
+        if (person_.indoors) {
+            return false; // дома прячется
+        }
+        const Context ctx = makeContext(world_, entity_);
+        const Option flee = evalFlee(ctx);
+        float current = evaluate(ctx, mind_.action).score;
+        if (mind_.action == Action::Wander || mind_.action == Action::Idle) {
+            current = std::max(current, mind_.score);
+        }
+        if (flee.score <= current + kInertia) {
+            return false;
+        }
+        return tryStart(ctx, Action::Flee, flee);
+    }
+
+    // Куда бежать: домой, если он в той стороне, иначе прочь от зомби (или от
+    // места, где его видел) или чуть в сторону. Возвращает клетку, куда уже пошёл.
+    std::optional<Cell> startFlee(const Context& ctx) {
+        float awayX = ctx.threat.awayX;
+        float awayY = ctx.threat.awayY;
+        float d = 0.0f;
+        if (const std::size_t i = nearestDanger(ctx, d); !mustRun(ctx) && i < ctx.dangerCount) {
+            awayX = d > 1e-3f ? (ctx.x - ctx.dangerX[i]) / d : 0.0f;
+            awayY = d > 1e-3f ? (ctx.y - ctx.dangerY[i]) / d : -1.0f;
+        }
+        if (ctx.homeId != kInvalidId && !ctx.atHome && ctx.homeDistance > 1.0f &&
+            ctx.homeDistance <= kFleeHomeRange) {
+            const float hx = (cellX(ctx.homeDoor) - ctx.x) / ctx.homeDistance;
+            const float hy = (cellY(ctx.homeDoor) - ctx.y) / ctx.homeDistance;
+            if (hx * awayX + hy * awayY >= kFleeHomeAlignment &&
+                startWalk(world_, entity_, ctx.homeDoor)) {
+                return ctx.homeDoor;
+            }
+        }
+        const NavGrid& nav = world_.nav();
+        for (const auto& turn : kFleeTurns) {
+            const float dx = awayX * turn[0] - awayY * turn[1];
+            const float dy = awayX * turn[1] + awayY * turn[0];
+            const auto cell = nav.nearestPassable(
+                Map::cellAt(ctx.x + dx * kFleeDistance, ctx.y + dy * kFleeDistance), 3);
+            if (!cell || *cell == ctx.cell || !nav.connected(ctx.cell, *cell)) {
+                continue;
+            }
+            if (startWalk(world_, entity_, *cell)) {
+                return cell;
+            }
+        }
+        return std::nullopt;
     }
 
     // Пересмотр посреди действия: сменить, если другое заметно важнее. Если
@@ -648,7 +891,25 @@ private:
         }
 
         bool here = option.spot == ctx.cell;
-        if (!here && !startWalk(world_, entity_, option.spot)) {
+        bool walking = false;
+        if (action == Action::Flee) {
+            const auto spot = startFlee(ctx);
+            if (!spot) {
+                return false;
+            }
+            option.spot = *spot;
+            option.target = kInvalidId;
+            here = false;
+            walking = true;
+            if (mustRun(ctx)) {
+                if (mind_.fledAt == 0 || tick_ >= mind_.fledAt + minutes(kFleeEpisodeMinutes)) {
+                    world_.record(ChronicleKind::Fled, id_, ctx.threat.nearest,
+                                  person_.asleep ? 1 : 0);
+                }
+                mind_.fledAt = tick_;
+            }
+        }
+        if (!here && !walking && !startWalk(world_, entity_, option.spot)) {
             if (action != Action::Sleep) {
                 return false;
             }
@@ -660,6 +921,8 @@ private:
         if (here) {
             stopWalking();
         }
+        registry_.get<Walker>(entity_).pace =
+            action == Action::Flee && mustRun(ctx) ? kRunPace : 1.0f;
         person_.asleep = false;
         mind_.action = action;
         mind_.score = option.score;
@@ -670,9 +933,22 @@ private:
             perform();
         } else {
             mind_.phase = ActionPhase::Travel;
-            mind_.nextThink = tick_ + minutes(kThinkMinutes);
+            person_.indoors = false;
+            mind_.nextThink =
+                tick_ + minutes(action == Action::Flee ? kFleeThinkMinutes : kThinkMinutes);
         }
         return true;
+    }
+
+    // Дома, в укрытии: выполняет действие у своей двери.
+    void updateShelter() {
+        bool indoors = false;
+        if (mind_.phase == ActionPhase::Perform) {
+            if (const entt::entity home = world_.find(person_.home); home != entt::null) {
+                indoors = mind_.spot == registry_.get<Building>(home).door;
+            }
+        }
+        person_.indoors = indoors;
     }
 
     // Ничего не начать: постоять и подумать снова.
@@ -687,6 +963,7 @@ private:
         mind_.phase = ActionPhase::Perform;
         mind_.until = tick_ + minutes(kFailRestMinutes);
         mind_.nextThink = mind_.until;
+        updateShelter();
     }
 
     void arrive() {
@@ -717,6 +994,7 @@ private:
 
     void perform() {
         mind_.phase = ActionPhase::Perform;
+        updateShelter();
         int duration = 0;
         switch (mind_.action) {
         case Action::Idle:
@@ -754,6 +1032,9 @@ private:
             break;
         case Action::GoHome:
             duration = kGoHomeMinutes;
+            break;
+        case Action::Flee:
+            duration = rng_.rangeInt(kFleeMinMinutes, kFleeMaxMinutes);
             break;
         case Action::Count:
             break;

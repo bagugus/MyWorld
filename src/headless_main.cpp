@@ -4,6 +4,7 @@
 //   lw_headless --seed 42 --paths 500 замер поиска пути: пары дверей и пары случайных клеток суши
 //                                     (--optimal — сравнить каждый путь с оптимальным)
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
+//   lw_headless --seed 42 --zombies 0                    мир без зомби
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -111,8 +112,8 @@ void printPeople(const lw::World& world) {
     }
     std::printf("people %zu: walking %zu, at home %zu, asleep %zu\n", people, walking, atHome,
                 asleep);
-    constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",  "scavenge",
-                                        "forage", "socialize", "wander", "go home"};
+    constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
+                                        "forage", "socialize", "wander", "go home", "flee"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -183,6 +184,40 @@ void printPerception(const lw::World& world) {
                 remembered, world.sounds().size());
 }
 
+// Зомби: чем заняты, сколько в ордах, какие орды.
+void printZombies(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr const char* kStates[] = {"idle", "roam", "investigate", "chase", "follow"};
+    static_assert(std::size(kStates) == static_cast<std::size_t>(lw::ZombieState::Count));
+    std::size_t states[std::size(kStates)] = {};
+    std::size_t zombies = 0;
+    std::size_t loners = 0;
+    for (const auto [entity, zombie] : registry.view<const lw::Zombie>().each()) {
+        ++zombies;
+        ++states[static_cast<std::size_t>(zombie.state)];
+        loners += zombie.horde == lw::kInvalidId ? 1 : 0;
+    }
+    if (zombies == 0) {
+        return;
+    }
+    std::printf("zombies %zu (alone %zu):", zombies, loners);
+    for (std::size_t i = 0; i < std::size(kStates); ++i) {
+        std::printf(" %s %zu%s", kStates[i], states[i], i + 1 < std::size(kStates) ? "," : "\n");
+    }
+    std::vector<std::size_t> sizes;
+    std::size_t inSettlements = 0;
+    for (const auto [entity, horde] : registry.view<const lw::Horde>().each()) {
+        sizes.push_back(horde.members.size());
+        inSettlements += horde.settlement != lw::kInvalidId ? 1 : 0;
+    }
+    std::sort(sizes.begin(), sizes.end());
+    std::printf("  hordes %zu (in settlements %zu), sizes:", sizes.size(), inSettlements);
+    for (const std::size_t size : sizes) {
+        std::printf(" %zu", size);
+    }
+    std::printf("\n");
+}
+
 // Летопись: сколько событий каждого вида.
 void printChronicle(const lw::World& world) {
     const lw::Chronicle& chronicle = world.chronicle();
@@ -215,6 +250,7 @@ void printClimate(std::uint64_t seed) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = 0;
+    config.zombies = 0;
     lw::World world(seed, config);
 
     constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
@@ -438,8 +474,11 @@ int main(int argc, char** argv) {
             compare = true;
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
+            config.zombies = std::atoi(argv[++i]);
         } else {
-            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] [--paths N [--optimal]]\n");
+            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
+                        "[--zombies N] [--paths N [--optimal]]\n");
             return 2;
         }
     }
@@ -473,6 +512,7 @@ int main(int argc, char** argv) {
     printWeather(world);
     printPeople(world);
     printPerception(world);
+    printZombies(world);
     printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

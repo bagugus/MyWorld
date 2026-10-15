@@ -16,6 +16,8 @@ const char* settlementKindName(SettlementKind kind);
 const char* actionName(Action action);
 // Что слышно: «шаги», «обыск».
 const char* soundName(SoundKind kind);
+// Что делает зомби: «бредёт», «преследует».
+const char* zombieStateName(ZombieState state);
 
 // Полоска-индикатор 0..1 с подписью.
 void meter(const char* label, float value);

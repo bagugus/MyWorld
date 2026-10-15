@@ -25,6 +25,11 @@ enum class ChronicleKind : std::uint8_t {
     Weakened,      // здоровье упало ниже половины
     Dying,         // здоровье упало ниже пятой части
     Recovered,     // здоровье снова выше половины
+    Fled,          // побежал от зомби object; a = 1 — проснулся от него
+    HordeFormed,   // орда собралась из a зомби; b = 1 — сбежались на шум (0 — с начала мира)
+    HordeMerged,   // орда поглотила орду object, стало a зомби
+    HordeArrived,  // орда из a зомби пришла в поселение object
+    HordeScattered, // орда распалась: осталось меньше двух
     Count
 };
 

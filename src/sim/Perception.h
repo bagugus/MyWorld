@@ -58,7 +58,10 @@ inline constexpr float kForestSightPenalty = 20.0f;
 inline constexpr float kFootstepsLoudness = 12.0f; // шаги на 1,4 м/с, быстрее — громче
 inline constexpr float kRummageLoudness = 35.0f;   // обыск здания
 inline constexpr float kVoiceLoudness = 18.0f;     // разговор
-// Громче шаги не бывают: бег (этап 5) — до 2,5 м/с.
+// Зомби стонет, когда идёт на шум или преследует.
+inline constexpr float kGroanLoudness = 15.0f;     // идёт на шум
+inline constexpr float kChaseGroanLoudness = 30.0f; // преследует
+// Громче постоянные шумы не бывают: шаги бегущего (до 2,9 м/с) — около 25 м.
 inline constexpr float kMaxNoiseLoudness = kRummageLoudness;
 
 inline constexpr float kNoSight = std::numeric_limits<float>::infinity();
@@ -85,7 +88,8 @@ public:
         : senses_(registry.storage<Senses>()),
           people_(registry.storage<Person>()),
           velocities_(registry.storage<Velocity>()),
-          minds_(registry.storage<Mind>()) {}
+          minds_(registry.storage<Mind>()),
+          zombies_(registry.storage<Zombie>()) {}
 
     // Есть органы чувств — существо, его можно заметить.
     bool perceivable(entt::entity entity) const { return get(senses_, entity) != nullptr; }
@@ -94,8 +98,14 @@ public:
         const Person* person = get(people_, entity);
         return person != nullptr && person->asleep;
     }
+    // Дома, в укрытии: снаружи не видно.
+    bool indoors(entt::entity entity) const {
+        const Person* person = get(people_, entity);
+        return person != nullptr && person->indoors;
+    }
     const Velocity* velocity(entt::entity entity) const { return get(velocities_, entity); }
     const Mind* mind(entt::entity entity) const { return get(minds_, entity); }
+    const Zombie* zombie(entt::entity entity) const { return get(zombies_, entity); }
 
 private:
     template <typename Storage>
@@ -108,7 +118,14 @@ private:
     const entt::storage_for_t<Person>* people_;
     const entt::storage_for_t<Velocity>* velocities_;
     const entt::storage_for_t<Mind>* minds_;
+    const entt::storage_for_t<Zombie>* zombies_;
 };
+
+// Кого наблюдатель замечает и кто для него важнее. Зомби других зомби не
+// замечают — им нужна добыча (созывающий стон слышат, он в World::sounds()).
+// Человек ставит зомби вперёд: угрозу он заметит, даже если вокруг толпа.
+enum class Interest : std::uint8_t { Threat, Ordinary, Ignored };
+Interest interestOf(const SenseLookup& lookup, entt::entity observer, entt::entity target);
 
 bool isAsleep(const entt::registry& registry, entt::entity entity);
 
@@ -126,8 +143,9 @@ float sightCost(const Map& map, const NavGrid& nav, float ax, float ay, float bx
                 float limit = std::numeric_limits<float>::max());
 
 // Насколько заметна цель в точке (x, y): 1 — идёт по открытому месту; стоит
-// или лежит (спит) — меньше, в лесу — ещё меньше. Произведение двух частей:
-// позы (bodyVisibility) и укрытия в клетке (coverVisibility).
+// или лежит (спит) — меньше, в лесу — ещё меньше, дома — не видна (0).
+// Произведение двух частей: позы (bodyVisibility) и укрытия в клетке
+// (coverVisibility).
 float visibilityOf(const World& world, entt::entity target, float x, float y);
 float bodyVisibility(const SenseLookup& lookup, entt::entity target);
 float coverVisibility(const Map& map, float x, float y);

@@ -27,6 +27,10 @@ class World;
 
 using ActionScores = std::array<float, static_cast<std::size_t>(Action::Count)>;
 
+// Опасное место (Mind::dangers) — круг такого радиуса, метры: туда не ходят,
+// оттуда отходят.
+inline constexpr float kDangerRadius = 70.0f;
+
 // Оценки всех действий для человека сейчас, без случайного разброса и без
 // надбавки текущему действию. Ноль — действие невозможно. Для отладки и тестов.
 ActionScores evaluateActions(const World& world, entt::entity person);

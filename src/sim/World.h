@@ -32,6 +32,7 @@ enum class RngStream : std::uint8_t {
     Weather,
     Traits,   // черты характера при рождении
     Supplies, // припасы в зданиях
+    Zombies,  // зомби: расселение, решения, орды
     Count
 };
 
@@ -39,6 +40,7 @@ struct WorldConfig {
     int mapWidth = 2048;  // клетки (по Map::kCellSize метров)
     int mapHeight = 2048; // клетки
     int people = 300;     // люди; живут в жилых домах
+    int zombies = 400;    // зомби: одиночки в поселениях и на природе, орды
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.

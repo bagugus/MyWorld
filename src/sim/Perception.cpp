@@ -90,6 +90,9 @@ float sightCost(const Map& map, const NavGrid& nav, float ax, float ay, float bx
 }
 
 float bodyVisibility(const SenseLookup& lookup, entt::entity target) {
+    if (lookup.indoors(target)) {
+        return 0.0f;
+    }
     if (lookup.asleep(target)) {
         return kLyingVisibility;
     }
@@ -124,6 +127,13 @@ Noise noiseOf(const SenseLookup& lookup, entt::entity entity) {
                    std::min(kMaxNoiseLoudness, kFootstepsLoudness * std::sqrt(speedSq) / kWalkSpeed));
         }
     }
+    if (const Zombie* zombie = lookup.zombie(entity)) {
+        if (zombie->state == ZombieState::Chase) {
+            louder(SoundKind::Groan, kChaseGroanLoudness);
+        } else if (zombie->state == ZombieState::Investigate) {
+            louder(SoundKind::Groan, kGroanLoudness);
+        }
+    }
     if (const Mind* mind = lookup.mind(entity);
         mind != nullptr && mind->phase == ActionPhase::Perform) {
         if (mind->action == Action::Scavenge) {
@@ -133,6 +143,14 @@ Noise noiseOf(const SenseLookup& lookup, entt::entity entity) {
         }
     }
     return noise;
+}
+
+Interest interestOf(const SenseLookup& lookup, entt::entity observer, entt::entity target) {
+    const bool targetZombie = lookup.zombie(target) != nullptr;
+    if (lookup.zombie(observer) != nullptr) {
+        return targetZombie ? Interest::Ignored : Interest::Ordinary;
+    }
+    return targetZombie ? Interest::Threat : Interest::Ordinary;
 }
 
 Noise noiseOf(const entt::registry& registry, entt::entity entity) {

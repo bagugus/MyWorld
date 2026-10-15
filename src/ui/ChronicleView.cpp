@@ -1,4 +1,4 @@
-#include "ui/ChronicleView.h"
+﻿#include "ui/ChronicleView.h"
 
 #include "sim/Calendar.h"
 #include "sim/World.h"
@@ -70,6 +70,28 @@ Phrase phraseOf(const ChronicleEvent& event) {
         break;
     case ChronicleKind::Recovered:
         phrase.verb = "оправился";
+        break;
+    case ChronicleKind::Fled:
+        phrase.verb = event.a != 0 ? "проснулся и бежал от зомби" : "бежал от зомби";
+        phrase.withObject = event.object != kInvalidId;
+        break;
+    case ChronicleKind::HordeFormed:
+        phrase.verb = "— орда собралась:";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%d зомби%s", event.a,
+                      event.b != 0 ? " сбежались на шум" : "");
+        break;
+    case ChronicleKind::HordeMerged:
+        phrase.verb = "— орда поглотила орду";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— теперь %d зомби", event.a);
+        break;
+    case ChronicleKind::HordeArrived:
+        phrase.verb = "— орда пришла в поселение";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %d зомби", event.a);
+        break;
+    case ChronicleKind::HordeScattered:
+        phrase.verb = "— орда распалась";
         break;
     case ChronicleKind::Count:
         break;

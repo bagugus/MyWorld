@@ -8,6 +8,7 @@
 #include "sim/World.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "sim/systems/ZombieSystem.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
 
@@ -37,6 +38,11 @@ constexpr Color kHearingColor = {255, 220, 120, 70};
 constexpr Color kSeenColor = {120, 255, 120, 220};
 constexpr Color kHeardColor = {255, 210, 90, 220};
 constexpr Color kRememberedColor = {170, 170, 170, 160};
+// Орда: участники и вожак.
+constexpr Color kHordeColor = {214, 96, 80, 200};
+// Опасные места, которые помнит человек.
+constexpr Color kDangerColor = {230, 70, 60, 110};
+constexpr Color kLeaderColor = {255, 170, 120, 255};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -97,7 +103,7 @@ EntityId Inspector::pick(float x, float y, float zoom) const {
     const entt::registry& registry = world_.registry();
     const float radius = std::max(1.0f, kPickPixels / zoom);
     if (const auto person = world_.spatial().nearest(x, y, radius, [&registry](const SpatialHit& hit) {
-            return registry.all_of<Person>(hit.entity);
+            return registry.any_of<Person, Zombie>(hit.entity);
         })) {
         return person->id;
     }
@@ -135,6 +141,12 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
     } else if (const auto* building = registry.try_get<Building>(entity)) {
         const Rectangle rect = buildingRect(*building);
         camera.lookAt(rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, camera.zoom());
+    } else if (const auto* horde = registry.try_get<Horde>(entity)) {
+        // За вожаком: центр орды пересчитывается раз в минуту и прыгает.
+        if (const entt::entity leader = world_.find(horde->leader); leader != entt::null) {
+            const Vector2 at = drawnPosition(registry, leader, alpha);
+            camera.lookAt(at.x, at.y, camera.zoom());
+        }
     }
 }
 
@@ -161,6 +173,23 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
                  static_cast<float>(settlement->radius) * Map::kCellSize - line,
                  static_cast<float>(settlement->radius) * Map::kCellSize, 0.0f, 360.0f, 96,
                  kSelectionColor);
+        return;
+    }
+    if (const auto* horde = registry.try_get<Horde>(entity)) {
+        // Кольцо у каждого участника, у вожака — ярче; к цели — линия от вожака.
+        const float radius = std::max(1.2f, 6.0f * px);
+        for (const EntityId member : horde->members) {
+            const entt::entity other = world_.find(member);
+            if (other == entt::null) {
+                continue;
+            }
+            const bool leader = member == horde->leader;
+            const Vector2 at = drawnPosition(registry, other, alpha);
+            DrawRing(at, radius, radius + line, 0.0f, 360.0f, 24, leader ? kLeaderColor : kHordeColor);
+            if (leader && horde->travelling) {
+                DrawLineEx(at, cellCenter(horde->goal), line, kTargetColor);
+            }
+        }
         return;
     }
     if (!registry.all_of<Position>(entity)) {
@@ -198,6 +227,15 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             DrawLineEx(at, to, line, color);
         }
     }
+    // Опасные места — красными кругами.
+    if (const auto* mind = registry.try_get<Mind>(entity)) {
+        for (const Danger& danger : mind->dangers) {
+            if (danger.until > world_.tick()) {
+                DrawRing(cellCenter(danger.cell), kDangerRadius - line, kDangerRadius, 0.0f, 360.0f,
+                         64, kDangerColor);
+            }
+        }
+    }
     // Дом — рамкой, место текущего действия — крестиком, оставшийся путь — линией.
     if (const auto* person = registry.try_get<Person>(entity)) {
         if (const entt::entity home = world_.find(person->home); home != entt::null) {
@@ -210,6 +248,22 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             const Vector2 to = cellCenter(walker->waypoints[i]);
             DrawLineEx(from, to, line, kPathColor);
             from = to;
+        }
+    }
+    if (const auto* zombie = registry.try_get<Zombie>(entity)) {
+        // Куда идёт — крестиком, родные места — кольцом, вожак орды — линией.
+        const Vector2 spot = cellCenter(zombie->goal);
+        const float arm = std::max(Map::kCellSize * 0.5f, 5.0f * px);
+        DrawLineEx({spot.x - arm, spot.y - arm}, {spot.x + arm, spot.y + arm}, line, kTargetColor);
+        DrawLineEx({spot.x - arm, spot.y + arm}, {spot.x + arm, spot.y - arm}, line, kTargetColor);
+        if (zombie->horde == kInvalidId) {
+            const float anchor = std::max(Map::kCellSize * 0.5f, 5.0f * px);
+            DrawRing(cellCenter(zombie->anchor), anchor, anchor + line, 0.0f, 360.0f, 24, kHomeColor);
+        } else if (const entt::entity horde = world_.find(zombie->horde); horde != entt::null) {
+            const entt::entity leader = world_.find(registry.get<Horde>(horde).leader);
+            if (leader != entt::null && leader != entity) {
+                DrawLineEx(at, drawnPosition(registry, leader, alpha), line, kHordeColor);
+            }
         }
     }
     if (const auto* mind = registry.try_get<Mind>(entity)) {
@@ -247,15 +301,19 @@ void Inspector::drawPanel() {
         const entt::registry& registry = world_.registry();
         const entt::entity entity = world_.find(selected_);
         if (selected_ == kInvalidId) {
-            ImGui::TextDisabled("ЛКМ по человеку или зданию — выбрать");
+            ImGui::TextDisabled("ЛКМ по человеку, зомби или зданию — выбрать");
         } else if (entity == entt::null) {
             ImGui::Text("Объекта #%llu нет", static_cast<unsigned long long>(selected_));
         } else {
-            if (registry.any_of<Position, Building>(entity)) {
+            if (registry.any_of<Position, Building, Horde>(entity)) {
                 ImGui::Checkbox("Следить камерой", &follow_);
             }
             if (registry.all_of<Person>(entity)) {
                 drawPerson(entity);
+            } else if (registry.all_of<Zombie>(entity)) {
+                drawZombie(entity);
+            } else if (registry.all_of<Horde>(entity)) {
+                drawHorde(entity);
             } else if (registry.all_of<Building>(entity)) {
                 drawBuilding(entity);
             } else if (registry.all_of<Settlement>(entity)) {
@@ -310,8 +368,9 @@ void Inspector::drawPerson(entt::entity entity) {
 
     ImGui::Text("Человек #%llu", static_cast<unsigned long long>(selected_));
     if (const auto* mind = registry.try_get<Mind>(entity)) {
-        ImGui::Text("Сейчас: %s%s", actionName(mind->action),
-                    mind->phase == ActionPhase::Travel ? " (в пути)" : "");
+        ImGui::Text("Сейчас: %s%s%s", actionName(mind->action),
+                    mind->phase == ActionPhase::Travel ? " (в пути)" : "",
+                    registry.get<Person>(entity).indoors ? " (дома, в укрытии)" : "");
         if (mind->target != kInvalidId) {
             ImGui::SameLine();
             ImGui::TextUnformatted("цель");
@@ -340,6 +399,23 @@ void Inspector::drawPerson(entt::entity entity) {
         }
         if (mind->emptySearches > 0) {
             ImGui::Text("Обысков без еды подряд: %d", mind->emptySearches);
+        }
+        if (mind->fledAt > 0) {
+            formatGameDuration(duration, sizeof(duration), tick - mind->fledAt);
+            ImGui::Text("Бежал от зомби %s назад", duration);
+        }
+        int dangers = 0;
+        float nearest = 0.0f;
+        const Position& at = registry.get<Position>(entity);
+        for (const Danger& danger : mind->dangers) {
+            if (danger.until > tick) {
+                const float d = std::hypot(Map::cellCenter(danger.cell.x) - at.x,
+                                           Map::cellCenter(danger.cell.y) - at.y);
+                nearest = dangers++ == 0 ? d : std::min(nearest, d);
+            }
+        }
+        if (dangers > 0) {
+            ImGui::Text("Помнит опасных мест: %d, ближайшее в %.0f м", dangers, nearest);
         }
     }
 
@@ -407,30 +483,7 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
-    if (ImGui::CollapsingHeader("Движение")) {
-        const Position& position = registry.get<Position>(entity);
-        const Cell cell = Map::cellAt(position.x, position.y);
-        ImGui::Text("Позиция: %.1f, %.1f м (клетка %d, %d)", position.x, position.y, cell.x, cell.y);
-        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
-            ImGui::Text("Скорость: %.2f м/с", std::hypot(velocity->x, velocity->y));
-        }
-        if (const auto* walker = registry.try_get<Walker>(entity)) {
-            if (walker->moving()) {
-                float left = 0.0f;
-                Vector2 from = {position.x, position.y};
-                for (std::size_t i = walker->next; i < walker->waypoints.size(); ++i) {
-                    const Vector2 to = cellCenter(walker->waypoints[i]);
-                    left += std::hypot(to.x - from.x, to.y - from.y);
-                    from = to;
-                }
-                ImGui::Text("Путь: осталось %.0f м, точек %zu из %zu", left,
-                            walker->waypoints.size() - walker->next, walker->waypoints.size());
-            } else {
-                ImGui::TextUnformatted("Путь: стоит на месте");
-            }
-            ImGui::Text("Шаг по дороге: %.2f м/с", walker->speed);
-        }
-    }
+    drawMovement(entity);
 
     if (const auto* mind = registry.try_get<Mind>(entity);
         mind != nullptr && ImGui::CollapsingHeader("Память: обысканные здания")) {
@@ -453,6 +506,34 @@ void Inspector::drawPerson(entt::entity entity) {
         }
         if (shown == 0) {
             ImGui::TextDisabled("пусто");
+        }
+    }
+}
+
+void Inspector::drawMovement(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    if (ImGui::CollapsingHeader("Движение")) {
+        const Position& position = registry.get<Position>(entity);
+        const Cell cell = Map::cellAt(position.x, position.y);
+        ImGui::Text("Позиция: %.1f, %.1f м (клетка %d, %d)", position.x, position.y, cell.x, cell.y);
+        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
+            ImGui::Text("Скорость: %.2f м/с", std::hypot(velocity->x, velocity->y));
+        }
+        if (const auto* walker = registry.try_get<Walker>(entity)) {
+            if (walker->moving()) {
+                float left = 0.0f;
+                Vector2 from = {position.x, position.y};
+                for (std::size_t i = walker->next; i < walker->waypoints.size(); ++i) {
+                    const Vector2 to = cellCenter(walker->waypoints[i]);
+                    left += std::hypot(to.x - from.x, to.y - from.y);
+                    from = to;
+                }
+                ImGui::Text("Путь: осталось %.0f м, точек %zu из %zu", left,
+                            walker->waypoints.size() - walker->next, walker->waypoints.size());
+            } else {
+                ImGui::TextUnformatted("Путь: стоит на месте");
+            }
+            ImGui::Text("Шаг по дороге: %.2f м/с", walker->speed);
         }
     }
 }
@@ -514,6 +595,110 @@ bool Inspector::drawPerception(entt::entity entity) {
         return false;
     }
     return true;
+}
+
+void Inspector::drawZombie(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const std::uint64_t tick = world_.tick();
+    const Zombie& zombie = registry.get<Zombie>(entity);
+    char duration[32];
+
+    ImGui::Text("Зомби #%llu", static_cast<unsigned long long>(selected_));
+    ImGui::Text("Сейчас: %s", zombieStateName(zombie.state));
+    if (zombie.target != kInvalidId) {
+        ImGui::SameLine();
+        ImGui::TextUnformatted("добыча");
+        ImGui::SameLine();
+        if (idLink(zombie.target)) {
+            select(zombie.target);
+            return;
+        }
+    }
+    if (const entt::entity horde = world_.find(zombie.horde); horde != entt::null) {
+        ImGui::TextUnformatted("Орда:");
+        ImGui::SameLine();
+        if (idLink(zombie.horde)) {
+            select(zombie.horde);
+            return;
+        }
+        const Horde& info = registry.get<Horde>(horde);
+        ImGui::SameLine();
+        ImGui::Text("%zu зомби%s", info.members.size(), info.leader == selected_ ? ", вожак" : "");
+    } else {
+        const Position& position = registry.get<Position>(entity);
+        ImGui::Text("Одиночка, родные места в %.0f м",
+                    std::hypot(Map::cellCenter(zombie.anchor.x) - position.x,
+                               Map::cellCenter(zombie.anchor.y) - position.y));
+    }
+    if ((zombie.state == ZombieState::Idle || zombie.state == ZombieState::Investigate) &&
+        zombie.until > tick) {
+        formatGameDuration(duration, sizeof(duration), zombie.until - tick);
+        ImGui::Text("Стоит ещё %s", duration);
+    }
+    if (zombie.alerted > 0) {
+        formatGameDuration(duration, sizeof(duration), tick - zombie.alerted);
+        ImGui::Text("Добычу замечал %s назад", duration);
+    }
+    if (const auto* walker = registry.try_get<Walker>(entity)) {
+        ImGui::Text("Погоня: %.2f м/с, сейчас темп %.0f%%", walker->speed, walker->pace * 100.0f);
+    }
+    if (!drawPerception(entity)) {
+        return;
+    }
+    drawMovement(entity);
+}
+
+void Inspector::drawHorde(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const std::uint64_t tick = world_.tick();
+    const Horde& horde = registry.get<Horde>(entity);
+    char duration[32];
+
+    ImGui::Text("Орда #%llu: %zu зомби", static_cast<unsigned long long>(selected_),
+                horde.members.size());
+    ImGui::TextUnformatted("Вожак:");
+    ImGui::SameLine();
+    if (idLink(horde.leader)) {
+        select(horde.leader);
+        return;
+    }
+    if (const entt::entity leader = world_.find(horde.leader); leader != entt::null) {
+        ImGui::SameLine();
+        ImGui::TextUnformatted(zombieStateName(registry.get<Zombie>(leader).state));
+    }
+    const float toGoal = std::hypot(Map::cellCenter(horde.goal.x) - horde.x,
+                                    Map::cellCenter(horde.goal.y) - horde.y);
+    if (horde.travelling) {
+        ImGui::Text("Идёт к клетке %d, %d: %.0f м", horde.goal.x, horde.goal.y, toGoal);
+    } else if (horde.until > tick) {
+        formatGameDuration(duration, sizeof(duration), horde.until - tick);
+        ImGui::Text("Стоит ещё %s", duration);
+    } else {
+        ImGui::TextUnformatted("Сейчас тронется");
+    }
+    if (const entt::entity settlement = world_.find(horde.settlement); settlement != entt::null) {
+        ImGui::Text("В поселении %s", registry.get<Settlement>(settlement).name.c_str());
+        ImGui::SameLine();
+        if (idLink(horde.settlement)) {
+            select(horde.settlement);
+            return;
+        }
+    } else {
+        ImGui::TextUnformatted("Вне поселений");
+    }
+    ImGui::SeparatorText("Участники");
+    EntityId clicked = kInvalidId;
+    for (std::size_t i = 0; i < horde.members.size(); ++i) {
+        if (i % 6 != 0) {
+            ImGui::SameLine();
+        }
+        if (idLink(horde.members[i])) {
+            clicked = horde.members[i];
+        }
+    }
+    if (clicked != kInvalidId) {
+        select(clicked);
+    }
 }
 
 void Inspector::drawBuilding(entt::entity entity) {

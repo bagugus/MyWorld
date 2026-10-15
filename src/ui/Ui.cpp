@@ -298,8 +298,21 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         for (const auto [entity, person] : world.registry().view<const Person>().each()) {
             asleep += person.asleep ? 1 : 0;
         }
-        ImGui::Text("Людей: %zu, в пути: %zu, спят: %zu",
-                    world.registry().view<const Person>().size(), walking, asleep);
+        std::size_t fleeing = 0;
+        for (const auto [entity, mind] : world.registry().view<const Mind>().each()) {
+            fleeing += mind.action == Action::Flee ? 1 : 0;
+        }
+        ImGui::Text("Людей: %zu, в пути: %zu, спят: %zu, бегут: %zu",
+                    world.registry().view<const Person>().size(), walking, asleep, fleeing);
+        std::size_t chasing = 0;
+        std::size_t inHordes = 0;
+        for (const auto [entity, zombie] : world.registry().view<const Zombie>().each()) {
+            chasing += zombie.state == ZombieState::Chase ? 1 : 0;
+            inHordes += zombie.horde != kInvalidId ? 1 : 0;
+        }
+        ImGui::Text("Зомби: %zu, в ордах: %zu, орд: %zu, преследуют: %zu",
+                    world.registry().view<const Zombie>().size(), inHordes,
+                    world.registry().view<const Horde>().size(), chasing);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
@@ -319,16 +332,21 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         } else {
             ImGui::Text("В радиусе %.0f м: %d, ближе 1 км никого", kNeighbourRadius, neighbours);
         }
-        // Человек под курсором: не дальше нескольких пикселей.
+        // Человек или зомби под курсором: не дальше нескольких пикселей.
         constexpr float kPickPixels = 8.0f;
         const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
         if (const auto picked = world.spatial().nearest(
                 mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
-                    return world.registry().all_of<Person>(hit.entity);
+                    return world.registry().any_of<Person, Zombie>(hit.entity);
                 })) {
-            const auto* mind = world.registry().try_get<Mind>(picked->entity);
-            ImGui::Text("Человек #%llu: %s", static_cast<unsigned long long>(picked->id),
-                        mind != nullptr ? actionName(mind->action) : "—");
+            if (const auto* zombie = world.registry().try_get<Zombie>(picked->entity)) {
+                ImGui::Text("Зомби #%llu: %s", static_cast<unsigned long long>(picked->id),
+                            zombieStateName(zombie->state));
+            } else {
+                const auto* mind = world.registry().try_get<Mind>(picked->entity);
+                ImGui::Text("Человек #%llu: %s", static_cast<unsigned long long>(picked->id),
+                            mind != nullptr ? actionName(mind->action) : "—");
+            }
         }
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {

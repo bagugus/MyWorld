@@ -17,6 +17,11 @@ constexpr Color kSleepingColor = {70, 84, 140, 255};
 constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
 constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
 constexpr Color kSocialColor = {226, 128, 196, 255};
+constexpr Color kFleeingColor = {255, 255, 255, 255};
+// Зомби: спокойные — болотные, идущие на шум — жёлто-зелёные, в погоне — красные.
+constexpr Color kZombieColor = {92, 128, 64, 255};
+constexpr Color kZombieAlertColor = {170, 190, 60, 255};
+constexpr Color kZombieChaseColor = {214, 58, 46, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
@@ -37,13 +42,27 @@ Color buildingColor(BuildingKind kind) {
     return {198, 164, 124, 255};
 }
 
-// Люди в пути — жёлтые, на месте — по занятию.
+// Люди в пути — жёлтые (бегущие — белые), на месте — по занятию; зомби — по
+// состоянию.
 Color entityColor(const entt::registry& registry, entt::entity entity) {
+    if (const auto* zombie = registry.try_get<Zombie>(entity)) {
+        switch (zombie->state) {
+        case ZombieState::Chase:
+            return kZombieChaseColor;
+        case ZombieState::Investigate:
+            return kZombieAlertColor;
+        default:
+            return kZombieColor;
+        }
+    }
+    const auto* mind = registry.try_get<Mind>(entity);
+    if (mind != nullptr && mind->action == Action::Flee) {
+        return kFleeingColor;
+    }
     const auto* walker = registry.try_get<Walker>(entity);
     if (walker == nullptr || walker->moving()) {
         return kEntityColor;
     }
-    const auto* mind = registry.try_get<Mind>(entity);
     if (mind == nullptr || mind->phase == ActionPhase::Travel) {
         return kRestingColor;
     }

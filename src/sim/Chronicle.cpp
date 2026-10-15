@@ -49,7 +49,8 @@ const char* chronicleKindName(ChronicleKind kind) {
     constexpr const char* kNames[] = {"settled",    "scavenged",  "brought home", "ate last food",
                                       "drank last water", "slept outside", "starving",
                                       "dehydrated", "exhausted",  "weakened",     "dying",
-                                      "recovered"};
+                                      "recovered",  "fled",       "horde formed", "horde merged",
+                                      "horde arrived", "horde scattered"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(ChronicleKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "?";

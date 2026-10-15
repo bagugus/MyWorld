@@ -10,6 +10,7 @@
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 #include <utility>
@@ -34,6 +35,9 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     initWeather(*this);
     spawnSupplies(*this);
     spawnPeople(*this, config_.people);
+    // Зомби селятся подальше от людей: индекс должен их уже видеть.
+    spatial_.sync(registry_);
+    spawnZombies(*this, config_.zombies);
     spatial_.sync(registry_);
 }
 
@@ -68,6 +72,8 @@ void World::step() {
     tickNeeds(*this);
     // До решений и движения: восприятие видит мир на начало тика.
     updatePerception(*this);
+    // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
+    updateZombies(*this);
     updateUtilityAi(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
@@ -184,6 +190,7 @@ std::uint64_t World::stateHash() const {
             hasher.add(std::uint64_t{6});
             hasher.add(person->home);
             hasher.add(static_cast<std::uint8_t>(person->asleep));
+            hasher.add(static_cast<std::uint8_t>(person->indoors));
         }
         if (const auto* needs = registry_.try_get<Needs>(entity)) {
             hasher.add(std::uint64_t{9});
@@ -209,6 +216,7 @@ std::uint64_t World::stateHash() const {
         if (const auto* walker = registry_.try_get<Walker>(entity)) {
             hasher.add(std::uint64_t{7});
             hasher.add(walker->speed);
+            hasher.add(walker->pace);
             hasher.add(static_cast<std::uint64_t>(walker->waypoints.size()));
             for (const Cell cell : walker->waypoints) {
                 hasher.add(cell.x);
@@ -242,6 +250,12 @@ std::uint64_t World::stateHash() const {
                 hasher.add(building);
             }
             hasher.add(mind->searchedNext);
+            hasher.add(mind->fledAt);
+            for (const Danger& danger : mind->dangers) {
+                hasher.add(danger.cell.x);
+                hasher.add(danger.cell.y);
+                hasher.add(danger.until);
+            }
         }
         if (const auto* senses = registry_.try_get<Senses>(entity)) {
             hasher.add(std::uint64_t{14});
@@ -260,6 +274,35 @@ std::uint64_t World::stateHash() const {
                 hasher.add(static_cast<std::uint8_t>(contact.seen));
                 hasher.add(static_cast<std::uint8_t>(contact.heard));
             }
+        }
+        if (const auto* zombie = registry_.try_get<Zombie>(entity)) {
+            hasher.add(std::uint64_t{16});
+            hasher.add(static_cast<std::uint8_t>(zombie->state));
+            hasher.add(zombie->target);
+            hasher.add(zombie->goal.x);
+            hasher.add(zombie->goal.y);
+            hasher.add(zombie->anchor.x);
+            hasher.add(zombie->anchor.y);
+            hasher.add(zombie->horde);
+            hasher.add(zombie->until);
+            hasher.add(zombie->checked);
+            hasher.add(zombie->alerted);
+            hasher.add(zombie->lastGroan);
+        }
+        if (const auto* horde = registry_.try_get<Horde>(entity)) {
+            hasher.add(std::uint64_t{17});
+            hasher.add(horde->leader);
+            hasher.add(static_cast<std::uint64_t>(horde->members.size()));
+            for (const EntityId member : horde->members) {
+                hasher.add(member);
+            }
+            hasher.add(horde->goal.x);
+            hasher.add(horde->goal.y);
+            hasher.add(static_cast<std::uint8_t>(horde->travelling));
+            hasher.add(horde->until);
+            hasher.add(horde->x);
+            hasher.add(horde->y);
+            hasher.add(horde->settlement);
         }
     }
     return hasher.value();

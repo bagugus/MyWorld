@@ -1,6 +1,6 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие.
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -24,6 +24,7 @@
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -53,6 +54,7 @@ lw::WorldConfig smallConfig(int people) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = people;
+    config.zombies = 0; // зомби — в своих тестах
     return config;
 }
 
@@ -164,6 +166,7 @@ lw::WorldConfig regionConfig() {
     config.mapWidth = 1024;
     config.mapHeight = 1024;
     config.people = 0;
+    config.zombies = 0;
     return config;
 }
 
@@ -307,14 +310,23 @@ void testEntitiesStayInWorld() {
     config.mapWidth = 12;
     config.mapHeight = 8;
     config.people = 100;
-    lw::World world(5, config);
-    for (int i = 0; i < 5000; ++i) {
-        world.step();
-    }
-    const lw::World& readOnly = world;
-    for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
-        CHECK(position.x >= 0.0f && position.x <= world.width());
-        CHECK(position.y >= 0.0f && position.y <= world.height());
+    config.zombies = 0;
+    // Люди и, отдельно, зомби: рядом с людьми зомби не селятся.
+    lw::WorldConfig undead = config;
+    undead.people = 0;
+    undead.zombies = 30;
+    for (const lw::WorldConfig& variant : {config, undead}) {
+        lw::World world(5, variant);
+        for (int i = 0; i < 5000; ++i) {
+            world.step();
+        }
+        const lw::World& readOnly = world;
+        CHECK(readOnly.registry().view<const lw::Position>().size() ==
+              static_cast<std::size_t>(variant.people + variant.zombies));
+        for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
+            CHECK(position.x >= 0.0f && position.x <= world.width());
+            CHECK(position.y >= 0.0f && position.y <= world.height());
+        }
     }
 }
 
@@ -2254,6 +2266,7 @@ struct Pair {
     void place(entt::entity entity, int offset) {
         world.registry().get<lw::Position>(entity) = {lw::Map::cellCenter(row.x + offset),
                                                       lw::Map::cellCenter(row.y)};
+        world.registry().get<lw::Person>(entity).indoors = false; // на улице
         world.syncSpatial();
     }
 
@@ -2371,6 +2384,444 @@ void testPerceptionInWorld() {
     CHECK(pair.contact() == nullptr);
 }
 
+
+// --- Зомби (этап 5.2) ------------------------------------------------------
+
+// Мир 4 × 4 км с людьми, ряд открытых клеток для опытов и ясная погода: днём
+// на ряду видно на всю дальность.
+struct Field {
+    static constexpr int kRowLength = 30;
+
+    lw::World world;
+    lw::Cell row;
+    bool open = false;
+    lw::Rng rng{99};
+    std::vector<entt::entity> people;
+
+    explicit Field(int peopleCount) : world(7, [peopleCount] {
+                                          lw::WorldConfig config = regionConfig();
+                                          config.people = peopleCount;
+                                          return config;
+                                      }()) {
+        const lw::Map& map = world.map();
+        const lw::NavGrid& nav = world.nav();
+        for (int y = 0; y < map.height() && !open; ++y) {
+            int run = 0;
+            for (int x = 0; x < map.width() && !open; ++x) {
+                const bool clear = nav.passable({x, y}) && map.water.at(x, y) == lw::Water::None &&
+                                   map.cover.at(x, y) == lw::Cover::None;
+                run = clear ? run + 1 : 0;
+                if (run == kRowLength) {
+                    row = {x - kRowLength + 1, y};
+                    open = true;
+                }
+            }
+        }
+        lw::Weather& weather = world.weather();
+        weather.kind = lw::WeatherKind::Clear;
+        weather.minutesLeft = 100000;
+        weather.cloudCover = 0.0f;
+        weather.precipitation = 0.0f;
+        weather.fog = 0.0f;
+        for (const auto [entity, person] : world.registry().view<const lw::Person>().each()) {
+            people.push_back(entity);
+        }
+        std::sort(people.begin(), people.end(), [this](entt::entity a, entt::entity b) {
+            return id(a) < id(b);
+        });
+    }
+
+    lw::EntityId id(entt::entity entity) const {
+        return world.registry().get<lw::Id>(entity).value;
+    }
+    lw::Cell at(int offset) const { return {row.x + offset, row.y}; }
+
+    entt::entity zombie(int offset) {
+        const entt::entity entity = lw::createZombie(world, at(offset), rng);
+        world.syncSpatial();
+        return entity;
+    }
+
+    // Поставить в клетку ряда со сдвигом offset клеток.
+    void place(entt::entity entity, int offset, float dy = 0.0f) {
+        world.registry().get<lw::Position>(entity) = {lw::Map::cellCenter(row.x + offset),
+                                                      lw::Map::cellCenter(row.y) + dy};
+        lw::Walker& walker = world.registry().get<lw::Walker>(entity);
+        walker.waypoints.clear();
+        walker.next = 0;
+        if (auto* person = world.registry().try_get<lw::Person>(entity)) {
+            person->indoors = false; // на улице
+        }
+        world.syncSpatial();
+    }
+
+    // Человек без решений: стоит, где поставили (Utility AI его не трогает).
+    void freeze(entt::entity person, int offset) {
+        world.registry().remove<lw::Mind>(person);
+        world.registry().get<lw::Person>(person).asleep = false;
+        place(person, offset);
+    }
+
+    // Убрать человека подальше от ряда, чтобы не мешал.
+    void dismiss(entt::entity person) {
+        world.registry().remove<lw::Mind>(person);
+        const lw::Position& position = world.registry().get<lw::Position>(person);
+        const float far = std::hypot(position.x - lw::Map::cellCenter(row.x),
+                                     position.y - lw::Map::cellCenter(row.y));
+        if (far < 500.0f) {
+            world.registry().get<lw::Position>(person) = {
+                lw::Map::cellCenter(row.x) + (row.x < 512 ? 1500.0f : -1500.0f),
+                lw::Map::cellCenter(row.y)};
+        }
+        world.syncSpatial();
+    }
+
+    void steps(std::uint64_t count) {
+        for (std::uint64_t i = 0; i < count; ++i) {
+            world.step();
+        }
+    }
+
+    float distance(entt::entity a, entt::entity b) const {
+        const lw::Position& pa = world.registry().get<lw::Position>(a);
+        const lw::Position& pb = world.registry().get<lw::Position>(b);
+        return std::hypot(pa.x - pb.x, pa.y - pb.y);
+    }
+
+    std::size_t count(lw::ChronicleKind kind) const { return world.chronicle().countOf(kind); }
+};
+
+// Расселение: сколько просили, подальше от людей, четверть — в ордах; один
+// seed — один мир и с зомби.
+void testZombieSpawn() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 40;
+    config.zombies = 120;
+    lw::World a(11, config);
+    lw::World b(11, config);
+    const entt::registry& registry = a.registry();
+    CHECK(registry.view<const lw::Zombie>().size() == 120);
+    CHECK(registry.view<const lw::Horde>().size() >= 1);
+
+    std::size_t inHordes = 0;
+    float closest = 1e9f;
+    for (const auto [entity, zombie, position] :
+         registry.view<const lw::Zombie, const lw::Position>().each()) {
+        CHECK((registry.all_of<lw::Senses, lw::Awareness, lw::Walker, lw::Velocity>(entity)));
+        if (zombie.horde != lw::kInvalidId) {
+            ++inHordes;
+            const entt::entity horde = a.find(zombie.horde);
+            CHECK(horde != entt::null);
+            if (horde != entt::null) {
+                const auto& members = registry.get<lw::Horde>(horde).members;
+                CHECK(std::binary_search(members.begin(), members.end(),
+                                         registry.get<lw::Id>(entity).value));
+            }
+        }
+        for (const auto [other, person, at] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            closest = std::min(closest, std::hypot(at.x - position.x, at.y - position.y));
+        }
+    }
+    CHECK(inHordes >= 120 / 4 - 12 && inHordes <= 120 / 4);
+    CHECK(closest >= 150.0f - 4.0f); // в клетку от расчётного расстояния
+    for (const auto [entity, horde] : registry.view<const lw::Horde>().each()) {
+        CHECK(horde.members.size() >= 2);
+        CHECK(std::is_sorted(horde.members.begin(), horde.members.end()));
+        CHECK(horde.leader == horde.members.front());
+    }
+    CHECK(a.chronicle().countOf(lw::ChronicleKind::HordeFormed) ==
+          registry.view<const lw::Horde>().size());
+
+    CHECK(a.stateHash() == b.stateHash());
+    for (int i = 0; i < 3000; ++i) {
+        a.step();
+        b.step();
+    }
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Восприятие: зомби не замечает других зомби, человек ставит зомби вперёд.
+void testZombiePerception() {
+    Field field(2);
+    CHECK(field.open && field.people.size() == 2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    const entt::entity a = field.people[0];
+    const entt::entity b = field.people[1];
+    field.freeze(a, 0);
+    field.freeze(b, 2);
+    const entt::entity z1 = field.zombie(12);
+    const entt::entity z2 = field.zombie(13);
+    const lw::SenseConditions day{1.0f, 1.0f};
+    lw::perceive(field.world, a, day);
+    lw::perceive(field.world, z1, day);
+
+    const lw::Awareness& seen = field.world.registry().get<lw::Awareness>(a);
+    CHECK(seen.count == 3);
+    // Ближе всех — человек b, но первым идёт зомби.
+    CHECK(seen.count > 0 && seen.contacts[0].id == field.id(z1));
+    CHECK(seen.find(field.id(b)) != nullptr);
+    const lw::Awareness& hunter = field.world.registry().get<lw::Awareness>(z1);
+    CHECK(hunter.find(field.id(z2)) == nullptr);
+    CHECK(hunter.find(field.id(a)) != nullptr && hunter.find(field.id(a))->seen);
+
+    // Угроза: видит зомби в 48 м — заметная, прочь от него (на запад по ряду).
+    const lw::Threat threat = lw::threatOf(field.world, a);
+    CHECK(threat.count == 2);
+    CHECK(threat.level > 0.2f && threat.level < 0.5f);
+    CHECK(threat.awayX < -0.9f);
+    CHECK(threat.nearest == field.id(z1));
+}
+
+// Погоня: увидел — преследует, созывает стоном, догоняет и держится рядом.
+// Стон слышит другой зомби, который добычу не видит, и идёт на него.
+void testZombieChase() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    const entt::entity hunter = field.zombie(15); // 60 м
+    const entt::entity listener = field.zombie(29); // 116 м от человека, 56 м от первого
+    const entt::registry& registry = field.world.registry();
+
+    // Стон звучит kSoundLifetimeTicks: проверять сразу в тик, когда погнался.
+    for (std::uint64_t i = 0; i < lw::kZombieThinkTicks &&
+                              registry.get<lw::Zombie>(hunter).state != lw::ZombieState::Chase;
+         ++i) {
+        field.steps(1);
+    }
+    const lw::Zombie& zombie = registry.get<lw::Zombie>(hunter);
+    CHECK(zombie.state == lw::ZombieState::Chase);
+    CHECK(zombie.target == field.id(person));
+    CHECK(registry.get<lw::Walker>(hunter).moving());
+    const bool called = std::any_of(
+        field.world.sounds().begin(), field.world.sounds().end(), [&](const lw::Sound& sound) {
+            return sound.kind == lw::SoundKind::Groan && sound.source == field.id(hunter);
+        });
+    CHECK(called);
+
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(listener).state == lw::ZombieState::Investigate);
+
+    // 60 м на 1,3–1,7 м/с — меньше 50 с.
+    field.steps(50 * lw::kTicksPerSecond);
+    CHECK(field.distance(hunter, person) <= 2.0f);
+    CHECK(registry.get<lw::Zombie>(hunter).state == lw::ZombieState::Chase);
+}
+
+// Шум: слышит — идёт туда, стоит и успокаивается; повторно то же место не проверяет.
+void testZombieInvestigates() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.dismiss(person);
+    const entt::entity zombie = field.zombie(0);
+    const entt::registry& registry = field.world.registry();
+    const lw::Position start = registry.get<lw::Position>(zombie);
+    const float noiseX = lw::Map::cellCenter(field.at(10).x);
+    const float noiseY = lw::Map::cellCenter(field.at(10).y);
+    // Источник далеко и не виден: слышен только сам звук.
+    field.world.emitSound(noiseX, noiseY, 60.0f, lw::SoundKind::Voice, field.id(person));
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(zombie).state == lw::ZombieState::Investigate);
+    CHECK(registry.get<lw::Zombie>(zombie).alerted > 0);
+    CHECK(std::abs(registry.get<lw::Walker>(zombie).speed * registry.get<lw::Walker>(zombie).pace -
+                   lw::kInvestigateSpeed) < 1e-3f);
+
+    // 40 м на 0,9 м/с — 45 с, потом стоит до 40 с.
+    bool arrived = false;
+    for (int second = 0; second < 100; ++second) {
+        field.steps(lw::kTicksPerSecond);
+        const lw::Position& at = registry.get<lw::Position>(zombie);
+        arrived = arrived || std::hypot(at.x - noiseX, at.y - noiseY) <= 3.0f;
+    }
+    CHECK(arrived);
+    const lw::Zombie& calm = registry.get<lw::Zombie>(zombie);
+    CHECK(calm.state != lw::ZombieState::Investigate && calm.state != lw::ZombieState::Chase);
+    CHECK(calm.checked > 0);
+    (void)start;
+}
+
+// Человек бежит от зомби бегом, будит его угроза; запоминает опасное место
+// и потом, когда зомби не видно, просто отходит оттуда шагом.
+void testPersonFlees() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    field.place(person, 20);
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.action = lw::Action::Sleep;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.nextThink = field.world.tick() + lw::kTicksPerGameHour;
+    mind.until = ~std::uint64_t{0};
+    registry.get<lw::Person>(person).asleep = true;
+    // Спящий не видит, но зомби в 4 м видит его, гонится и стонет — это
+    // слышно и во сне.
+    const entt::entity zombie = field.zombie(19);
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Flee);
+    CHECK(!registry.get<lw::Person>(person).asleep);
+    CHECK(std::abs(registry.get<lw::Walker>(person).pace - 1.8f) < 1e-3f);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 1);
+    CHECK(std::any_of(std::begin(registry.get<lw::Mind>(person).dangers),
+                      std::end(registry.get<lw::Mind>(person).dangers),
+                      [&](const lw::Danger& danger) { return danger.until > field.world.tick(); }));
+    const auto& events = field.world.chronicle().events();
+    const auto fled =
+        std::find_if(events.begin(), events.end(), [](const lw::ChronicleEvent& event) {
+            return event.kind == lw::ChronicleKind::Fled;
+        });
+    CHECK(fled != events.end() && fled->object == field.id(zombie) && fled->a == 1);
+
+    // Бегом быстрее погони: отрыв растёт хотя бы на 0,46 м/с.
+    field.steps(20 * lw::kTicksPerSecond);
+    CHECK(field.distance(person, zombie) > 8.0f);
+
+    // Зомби нет, а место помнится: стоя там, человек хочет уйти, и идёт шагом.
+    field.world.destroy(zombie);
+    field.place(person, 15);
+    lw::Mind& wary = registry.get<lw::Mind>(person);
+    for (lw::Danger& danger : wary.dangers) {
+        danger = {};
+    }
+    wary.dangers[0] = {field.at(16), field.world.tick() + lw::kTicksPerGameHour};
+    wary.action = lw::Action::Idle;
+    wary.phase = lw::ActionPhase::Perform;
+    wary.until = field.world.tick();
+    lw::Needs& needs = registry.get<lw::Needs>(person);
+    needs = {};
+    const lw::ActionScores scores = lw::evaluateActions(field.world, person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Flee)] > 0.2f);
+    field.steps(1);
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Flee);
+    CHECK(registry.get<lw::Walker>(person).pace == 1.0f);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 1); // отход — не бегство
+}
+
+// Орда держится вожака; одиночки, сбежавшиеся на шум, сбиваются в орду;
+// близкие орды сливаются; одиночку у орды она подбирает; из одного — распадается.
+void testHordes() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    entt::registry& registry = field.world.registry();
+
+    // Сбор на шум.
+    // Пусть стоят, пока не соберутся: иначе разбредутся.
+    const auto still = [&](entt::entity zombie) {
+        registry.get<lw::Zombie>(zombie).until = field.world.tick() + 100000;
+        return zombie;
+    };
+    std::vector<lw::EntityId> gathered;
+    for (int i = 0; i < 6; ++i) {
+        const entt::entity zombie = still(field.zombie(i));
+        registry.get<lw::Zombie>(zombie).alerted = field.world.tick() + 1;
+        gathered.push_back(field.id(zombie));
+    }
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(registry.view<const lw::Horde>().size() == 1);
+    CHECK(field.count(lw::ChronicleKind::HordeFormed) == 1);
+    lw::EntityId first = lw::kInvalidId;
+    for (const auto [entity, id, horde] : registry.view<const lw::Id, const lw::Horde>().each()) {
+        first = id.value;
+        CHECK(horde.members == gathered);
+        CHECK(horde.leader == gathered.front());
+    }
+    CHECK(field.world.chronicle().events().back().b == 1);
+
+    // Вторая орда рядом — сливаются в одну.
+    std::vector<lw::EntityId> second;
+    for (int i = 0; i < 3; ++i) {
+        second.push_back(field.id(still(field.zombie(9 + i))));
+    }
+    lw::formHorde(field.world, second, false);
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(registry.view<const lw::Horde>().size() == 1);
+    CHECK(field.count(lw::ChronicleKind::HordeMerged) == 1);
+    const entt::entity horde = field.world.find(first);
+    CHECK(horde != entt::null);
+    if (horde == entt::null) {
+        return;
+    }
+    CHECK(registry.get<lw::Horde>(horde).members.size() == 9);
+
+    // Одиночка у орды пристаёт к ней (вероятность 0,3 за обновление).
+    const entt::entity loner = still(field.zombie(5));
+    for (int i = 0; i < 30 && registry.get<lw::Zombie>(loner).horde == lw::kInvalidId; ++i) {
+        field.steps(lw::kHordeUpdateTicks);
+    }
+    CHECK(registry.get<lw::Zombie>(loner).horde == first);
+
+    // Две минуты: все держатся вожака.
+    field.steps(120 * lw::kTicksPerSecond);
+    const lw::Horde& info = registry.get<lw::Horde>(horde);
+    const entt::entity leader = field.world.find(info.leader);
+    for (const lw::EntityId member : info.members) {
+        CHECK(field.distance(field.world.find(member), leader) < 30.0f);
+        CHECK(registry.get<lw::Zombie>(field.world.find(member)).state ==
+              (member == info.leader ? registry.get<lw::Zombie>(leader).state
+                                     : lw::ZombieState::Follow));
+    }
+
+    // Остался один — орда распалась.
+    const std::vector<lw::EntityId> members = info.members;
+    for (std::size_t i = 1; i < members.size(); ++i) {
+        field.world.destroy(field.world.find(members[i]));
+    }
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(field.world.find(first) == entt::null);
+    CHECK(field.count(lw::ChronicleKind::HordeScattered) == 1);
+    CHECK(registry.get<lw::Zombie>(field.world.find(members[0])).horde == lw::kInvalidId);
+}
+
+
+// Дом — укрытие: зомби у двери не видит человека, а тот не выбегает.
+void testShelter() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    CHECK(registry.get<lw::Person>(person).indoors); // утро застаёт дома
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.nextThink = field.world.tick() + lw::kTicksPerGameHour;
+    mind.until = mind.nextThink;
+    const lw::Position& at = registry.get<lw::Position>(person);
+    const auto near = field.world.nav().nearestPassable(
+        lw::Map::cellAt(at.x + 3.0f * lw::Map::kCellSize, at.y), 2);
+    CHECK(near.has_value());
+    if (!near) {
+        return;
+    }
+    const entt::entity zombie = lw::createZombie(field.world, *near, field.rng);
+    field.world.syncSpatial();
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(person)) == nullptr);
+    // Сам он зомби видит, боится, но сидит дома.
+    CHECK(registry.get<lw::Awareness>(person).find(field.id(zombie)) != nullptr);
+    CHECK(registry.get<lw::Mind>(person).action != lw::Action::Flee);
+    CHECK(registry.get<lw::Person>(person).indoors);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 0);
+}
+
 } // namespace
 
 int main() {
@@ -2418,6 +2869,13 @@ int main() {
     testSightCost();
     testPerception();
     testPerceptionInWorld();
+    testZombieSpawn();
+    testZombiePerception();
+    testZombieChase();
+    testZombieInvestigates();
+    testPersonFlees();
+    testHordes();
+    testShelter();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

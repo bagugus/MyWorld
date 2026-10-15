@@ -3,6 +3,7 @@
 #include "sim/Components.h"
 #include "sim/Traits.h"
 #include "sim/World.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 #include <optional>
@@ -21,6 +22,21 @@ constexpr int kSpawnAttempts = 200;
 // Первое решение — в течение стольких игровых минут: люди думают не в один тик.
 constexpr int kFirstThinkMinutes = 10;
 
+// Зомби: доли орд и одиночек у зданий (остальные — на природе), проценты.
+constexpr int kHordeSharePercent = 25;
+constexpr int kBuildingSharePercent = 60;
+constexpr int kSpawnHordeMin = 12;
+constexpr int kSpawnHordeMax = 30;
+// Ближе этого к людям зомби не появляются, метры: мир начинается не с погони,
+// а одиночка бродит в kRoamRadius (ZombieSystem) от места, где появился.
+constexpr float kLonerPeopleDistance = 150.0f;
+constexpr float kWildPeopleDistance = 200.0f;
+constexpr float kHordePeopleDistance = 250.0f;
+// Орды — вдали от поселений, метры от центра.
+constexpr float kHordeSettlementDistance = 300.0f;
+constexpr float kHordeSpawnRadius = 8.0f; // зомби орды — вокруг её центра
+constexpr int kZombieSpawnAttempts = 200;
+
 struct SupplyRange {
     int foodMin, foodMax, waterMin, waterMax;
 };
@@ -37,6 +53,28 @@ SupplyRange supplyRange(BuildingKind kind) {
         return {0, 15, 0, 0};
     }
     return {0, 0, 0, 0};
+}
+
+// Есть ли кто-то из людей ближе radius к центру клетки (по индексу).
+bool nearPeople(const World& world, Cell cell, float radius) {
+    const entt::registry& registry = world.registry();
+    return world.spatial()
+        .nearest(Map::cellCenter(cell.x), Map::cellCenter(cell.y), radius,
+                 [&registry](const SpatialHit& hit) { return registry.all_of<Person>(hit.entity); })
+        .has_value();
+}
+
+bool nearSettlement(const World& world, Cell cell, float radius) {
+    const float x = Map::cellCenter(cell.x);
+    const float y = Map::cellCenter(cell.y);
+    for (const Places::SettlementPlace& settlement : world.places().settlements()) {
+        const float dx = settlement.x - x;
+        const float dy = settlement.y - y;
+        if (dx * dx + dy * dy < radius * radius) {
+            return true;
+        }
+    }
+    return false;
 }
 
 } // namespace
@@ -94,6 +132,7 @@ void spawnPeople(World& world, int count) {
                 homes.begin(), homes.end(), roll,
                 [](std::uint32_t value, const Home& h) { return value < h.weightEnd; });
             person.home = home->id;
+            person.indoors = true; // утро застаёт дома
             cell = home->door;
         } else {
             for (int attempt = 0; attempt < kSpawnAttempts && !cell; ++attempt) {
@@ -135,6 +174,93 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Senses>(entity);
         registry.emplace<Awareness>(entity);
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
+    }
+}
+
+void spawnZombies(World& world, int count) {
+    if (count <= 0) {
+        return;
+    }
+    Rng& rng = world.rng(RngStream::Zombies);
+    entt::registry& registry = world.registry();
+    const NavGrid& nav = world.nav();
+
+    std::vector<std::pair<EntityId, Cell>> doors;
+    for (const auto [entity, id, building] : registry.view<const Id, const Building>().each()) {
+        doors.emplace_back(id.value, building.door);
+    }
+    std::sort(doors.begin(), doors.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    // Главная суша — область, где первое здание; без зданий — любая.
+    const NavGrid::Region mainland =
+        doors.empty() ? NavGrid::kNoRegion : nav.region(doors.front().second);
+    const auto randomLand = [&]() -> std::optional<Cell> {
+        const Cell cell{static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.width()))),
+                        static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.height())))};
+        if (!nav.passable(cell) ||
+            (mainland != NavGrid::kNoRegion && nav.region(cell) != mainland)) {
+            return std::nullopt;
+        }
+        return cell;
+    };
+
+    const int hordeZombies = count * kHordeSharePercent / 100;
+    const int buildingZombies = count * kBuildingSharePercent / 100;
+    int spawned = 0;
+
+    // Орды.
+    int left = hordeZombies;
+    while (left >= kSpawnHordeMin) {
+        const int size = std::min(left, rng.rangeInt(kSpawnHordeMin, kSpawnHordeMax));
+        left -= size;
+        std::optional<Cell> center;
+        for (int attempt = 0; attempt < kZombieSpawnAttempts && !center; ++attempt) {
+            const auto cell = randomLand();
+            if (cell && !nearSettlement(world, *cell, kHordeSettlementDistance) &&
+                !nearPeople(world, *cell, kHordePeopleDistance)) {
+                center = cell;
+            }
+        }
+        if (!center) {
+            continue;
+        }
+        std::vector<EntityId> members;
+        const int reach = static_cast<int>(kHordeSpawnRadius / Map::kCellSize);
+        for (int i = 0; i < size; ++i) {
+            Cell cell = *center;
+            for (int attempt = 0; attempt < 8; ++attempt) {
+                const Cell candidate{center->x + rng.rangeInt(-reach, reach),
+                                     center->y + rng.rangeInt(-reach, reach)};
+                if (nav.passable(candidate) && nav.connected(*center, candidate)) {
+                    cell = candidate;
+                    break;
+                }
+            }
+            members.push_back(registry.get<Id>(createZombie(world, cell, rng)).value);
+        }
+        formHorde(world, std::move(members), false);
+        spawned += size;
+    }
+
+    // Одиночки у зданий: там, где обратились жильцы, — подальше от живых.
+    for (int i = 0; i < buildingZombies && !doors.empty(); ++i) {
+        for (int attempt = 0; attempt < kZombieSpawnAttempts / 10; ++attempt) {
+            const Cell door = doors[rng.below(static_cast<std::uint32_t>(doors.size()))].second;
+            if (!nearPeople(world, door, kLonerPeopleDistance)) {
+                createZombie(world, door, rng);
+                ++spawned;
+                break;
+            }
+        }
+    }
+
+    // Остальные — на природе.
+    for (int attempts = 0; spawned < count && attempts < count * kZombieSpawnAttempts; ++attempts) {
+        const auto cell = randomLand();
+        if (cell && !nearPeople(world, *cell, kWildPeopleDistance)) {
+            createZombie(world, *cell, rng);
+            ++spawned;
+        }
     }
 }
 

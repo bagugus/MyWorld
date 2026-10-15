@@ -3,6 +3,7 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/World.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 
@@ -22,6 +23,9 @@ constexpr float kCompanyHours = 3.0f;
 constexpr float kSleepMetabolism = 0.5f;
 constexpr float kWalkThirst = 1.3f;
 constexpr float kWalkFatigue = 1.15f;
+// Бег (темп выше обычного) выматывает и сушит сильнее.
+constexpr float kRunFatigue = 4.0f;
+constexpr float kRunThirst = 2.0f;
 constexpr float kHotTemperature = 22.0f; // °C
 constexpr float kHotThirst = 1.3f;
 
@@ -32,6 +36,9 @@ constexpr float kDarkLight = 0.15f;
 constexpr float kDarkFear = 0.35f;
 // Страх от плохого здоровья: при нуле здоровья — столько.
 constexpr float kWoundFear = 0.5f;
+// Страх от зомби рядом (Threat::level = 1) и как быстро он накатывает, часы.
+constexpr float kThreatFear = 0.8f;
+constexpr float kThreatResponseHours = 0.1f;
 
 // Компания — люди не дальше этого, метры.
 constexpr float kCompanyRadius = 20.0f;
@@ -91,6 +98,7 @@ void updateNeeds(World& world, float minutes) {
         const Traits* traits = registry.try_get<Traits>(entity);
         const Traits character = traits != nullptr ? *traits : Traits{};
         const bool walking = walker.moving();
+        const bool running = walking && walker.pace > 1.0f;
         bool atHome = false;
         if (const entt::entity home = world.find(person.home); home != entt::null) {
             atHome = Map::cellAt(position.x, position.y) == registry.get<Building>(home).door;
@@ -107,13 +115,15 @@ void updateNeeds(World& world, float minutes) {
         needs.hunger = clamp01(needs.hunger + hours / kHungerHours * metabolism);
         needs.thirst = clamp01(needs.thirst + hours / kThirstHours * metabolism *
                                                   (walking ? kWalkThirst : 1.0f) *
+                                                  (running ? kRunThirst : 1.0f) *
                                                   (hot ? kHotThirst : 1.0f));
         if (person.asleep) {
             needs.fatigue = clamp01(needs.fatigue -
                                     hours / (atHome ? kSleepHomeHours : kSleepOutsideHours));
         } else {
-            needs.fatigue =
-                clamp01(needs.fatigue + hours / kAwakeHours * (walking ? kWalkFatigue : 1.0f));
+            needs.fatigue = clamp01(needs.fatigue + hours / kAwakeHours *
+                                                        (walking ? kWalkFatigue : 1.0f) *
+                                                        (running ? kRunFatigue : 1.0f));
         }
 
         // Общительному одиночество тяжелее (до 1,6 раза), нелюдимому — легче (от 0,4).
@@ -142,8 +152,13 @@ void updateNeeds(World& world, float minutes) {
         if (dark && !atHome && !company) {
             fearTarget += kDarkFear * timidity;
         }
-        needs.fear = clamp01(needs.fear + (fearTarget - needs.fear) *
-                                              std::min(1.0f, hours / kFearResponseHours));
+        // Зомби рядом пугают сразу, а не за час.
+        const Threat threat = threatOf(world, entity);
+        fearTarget += kThreatFear * threat.level * timidity;
+        const bool alarm = threat.level > 0.0f && fearTarget > needs.fear;
+        const float response = alarm ? kThreatResponseHours : kFearResponseHours;
+        needs.fear =
+            clamp01(needs.fear + (fearTarget - needs.fear) * std::min(1.0f, hours / response));
         recordChanges(world, id.value, before, needs);
     }
 }

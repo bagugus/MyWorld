@@ -19,18 +19,31 @@ struct Candidate {
     float distance = 0.0f;
     float reach = 0.0f; // дальность зрения до него без учёта укрытия, леса и стен
     SoundKind heard = SoundKind::None;
+    Interest interest = Interest::Ordinary;
 };
 
 // Замеченный в этом обновлении.
 struct Fresh {
     Contact contact;
     float distance = 0.0f;
+    Interest interest = Interest::Ordinary;
 };
 
+// Угрозы вперёд, затем ближние; при равных — меньший id.
+template <typename T>
+bool closerFirst(const T& a, float distanceA, EntityId idA, const T& b, float distanceB,
+                 EntityId idB) {
+    if (a.interest != b.interest) {
+        return a.interest < b.interest;
+    }
+    return distanceA != distanceB ? distanceA < distanceB : idA < idB;
+}
+
 void merge(Awareness& awareness, std::vector<Fresh>& fresh, std::uint64_t tick) {
-    // Сначала замеченные сейчас, ближние вперёд; затем помнящиеся, недавние вперёд.
+    // Сначала замеченные сейчас, угрозы и ближние вперёд; затем помнящиеся,
+    // недавние вперёд.
     std::sort(fresh.begin(), fresh.end(), [](const Fresh& a, const Fresh& b) {
-        return a.distance != b.distance ? a.distance < b.distance : a.contact.id < b.contact.id;
+        return closerFirst(a, a.distance, a.contact.id, b, b.distance, b.contact.id);
     });
     Contact old[Awareness::kMaxContacts];
     std::size_t oldCount = 0;
@@ -89,8 +102,13 @@ public:
             if (hit.id == self || !lookup_.perceivable(hit.entity)) {
                 return;
             }
+            const Interest interest = interestOf(lookup_, entity, hit.entity);
+            if (interest == Interest::Ignored) {
+                return;
+            }
             Candidate candidate;
             candidate.hit = hit;
+            candidate.interest = interest;
             candidate.distance = std::sqrt(hit.distanceSq);
             if (range > 0.0f) {
                 candidate.reach = range * bodyVisibility(lookup_, hit.entity);
@@ -99,7 +117,8 @@ public:
             if (noise.kind != SoundKind::None && candidate.distance <= noise.loudness * hearing) {
                 candidate.heard = noise.kind;
             }
-            if (candidate.heard != SoundKind::None || candidate.distance <= candidate.reach) {
+            if (candidate.heard != SoundKind::None ||
+                (candidate.reach > 0.0f && candidate.distance <= candidate.reach)) {
                 candidates_.push_back(candidate);
             }
         });
@@ -107,7 +126,7 @@ public:
         // ближайших замеченных: лучи — от ближних к дальним, пока столько не
         // наберётся. Дальние всё равно не попали бы в Awareness.
         std::sort(candidates_.begin(), candidates_.end(), [](const Candidate& a, const Candidate& b) {
-            return a.distance != b.distance ? a.distance < b.distance : a.hit.id < b.hit.id;
+            return closerFirst(a, a.distance, a.hit.id, b, b.distance, b.hit.id);
         });
         for (const Candidate& candidate : candidates_) {
             if (fresh_.size() == Awareness::kMaxContacts) {
@@ -115,15 +134,17 @@ public:
             }
             const SpatialHit& hit = candidate.hit;
             bool seen = false;
-            // range > 0: спящий не видит даже того, кто стоит вплотную.
-            if (range > 0.0f && candidate.distance <= candidate.reach) {
+            // range > 0: спящий не видит даже того, кто стоит вплотную; reach > 0:
+            // того, кто дома, не видно даже вплотную.
+            if (range > 0.0f && candidate.reach > 0.0f && candidate.distance <= candidate.reach) {
                 const float reach = candidate.reach * coverVisibility(map_, hit.x, hit.y);
                 seen = candidate.distance <= reach &&
                        sightCost(map_, nav_, position.x, position.y, hit.x, hit.y, reach) <= reach;
             }
             if (seen || candidate.heard != SoundKind::None) {
-                fresh_.push_back(
-                    {{hit.id, hit.x, hit.y, tick_, seen, candidate.heard}, candidate.distance});
+                fresh_.push_back({{hit.id, hit.x, hit.y, tick_, seen, candidate.heard},
+                                  candidate.distance,
+                                  candidate.interest});
             }
         }
 
@@ -143,7 +164,14 @@ public:
                 return f.contact.id == sound.source;
             });
             if (known == fresh_.end()) {
-                fresh_.push_back({{sound.source, sound.x, sound.y, tick_, false, sound.kind}, distance});
+                // Источник мог уже исчезнуть: тогда он не угроза, а просто шум.
+                const entt::entity source = world_.find(sound.source);
+                const Interest interest = source != entt::null
+                                              ? interestOf(lookup_, entity, source)
+                                              : Interest::Ordinary;
+                fresh_.push_back({{sound.source, sound.x, sound.y, tick_, false, sound.kind},
+                                  distance,
+                                  interest == Interest::Ignored ? Interest::Ordinary : interest});
             } else {
                 known->contact.heard = sound.kind;
             }
