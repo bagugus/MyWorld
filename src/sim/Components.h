@@ -4,6 +4,8 @@
 #include "sim/Map.h"
 #include "sim/Sound.h"
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -88,18 +90,48 @@ struct Traits {
     float chronotype = 0.5f;  // 0 — жаворонок, 1 — сова: время сна сдвигается на ±1,5 ч
 };
 
-// Припасы здания, порции: одна порция еды — один приём пищи, воды — несколько
-// глотков. Их съедают жильцы и уносят те, кто ищет еду.
-struct Supplies {
-    std::uint16_t food = 0;
-    std::uint16_t water = 0;
+// Предметы (этап 5.6). Значения попадают в хеш и сохранения: новые добавлять
+// только в конец (перед Count). Вес и прочее — sim/Items.h.
+enum class ItemKind : std::uint8_t {
+    Food,          // порция еды: консервы, крупа, ягоды; один приём пищи
+    Water,         // порция воды: бутылка, несколько глотков
+    Meat,          // порция сырого мяса: сытно, но портится
+    Bandage,       // бинт: останавливает кровотечение
+    Medicine,      // лекарства: возвращают здоровье (заражение не лечат)
+    PistolAmmo,    // патрон к пистолету
+    ShotgunShells, // патрон к дробовику
+    RifleAmmo,     // патрон к винтовке
+    Knife,
+    Axe,
+    Pistol,
+    Shotgun,
+    Rifle,
+    Count
 };
+inline constexpr std::size_t kItemKinds = static_cast<std::size_t>(ItemKind::Count);
 
-// Что человек несёт с собой: найденное в чужих домах и в лесу. Дома
-// выкладывается в его запасы. Временно, до инвентаря (этап 5).
-struct Carry {
-    std::uint8_t food = 0;
-    std::uint8_t water = 0;
+// Что лежит в здании, что несёт человек, что осталось при теле: сколько
+// предметов каждого вида. Оружие в руках — отдельно (Weapon).
+struct Inventory {
+    std::array<std::uint16_t, kItemKinds> items{};
+
+    std::uint16_t count(ItemKind kind) const { return items[static_cast<std::size_t>(kind)]; }
+    void set(ItemKind kind, int value) {
+        items[static_cast<std::size_t>(kind)] =
+            static_cast<std::uint16_t>(std::clamp(value, 0, 0xFFFF));
+    }
+    void add(ItemKind kind, int value) { set(kind, count(kind) + value); }
+    // Взять до value штук; возвращает, сколько взято.
+    int take(ItemKind kind, int value) {
+        const int taken = std::min<int>(value, count(kind));
+        set(kind, count(kind) - taken);
+        return taken;
+    }
+    // Порций еды: и припасы, и мясо.
+    int food() const { return count(ItemKind::Food) + count(ItemKind::Meat); }
+    bool empty() const {
+        return std::all_of(items.begin(), items.end(), [](std::uint16_t n) { return n == 0; });
+    }
 };
 
 // Действия Utility AI (UtilityAiSystem). Значения попадают в хеш и сохранения:
@@ -117,6 +149,7 @@ enum class Action : std::uint8_t {
     Flee,      // бежать от зомби (этап 5.2)
     Fight,     // драться с зомби или стрелять в него (этап 5.4)
     Hunt,      // охотиться: выследить, подстрелить, разделать (этап 5.4)
+    Treat,     // перевязаться или принять лекарство (этап 5.6)
     Count
 };
 

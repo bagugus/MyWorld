@@ -115,7 +115,7 @@ void printPeople(const lw::World& world) {
                 asleep);
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
                                         "forage", "socialize", "wander", "go home", "flee",
-                                        "fight",  "hunt"};
+                                        "fight",  "hunt",      "treat"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -125,18 +125,34 @@ void printPeople(const lw::World& world) {
     for (std::size_t i = 0; i < std::size(kActions); ++i) {
         std::printf(" %s %zu%s", kActions[i], actions[i], i + 1 < std::size(kActions) ? "," : "\n");
     }
-    long long food = 0;
-    long long water = 0;
-    for (const auto [entity, supplies] : registry.view<const lw::Supplies>().each()) {
-        food += supplies.food;
-        water += supplies.water;
+    // Лут в зданиях и что несут живые, по видам предметов.
+    long long inBuildings[lw::kItemKinds] = {};
+    long long carried[lw::kItemKinds] = {};
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        for (std::size_t i = 0; i < lw::kItemKinds; ++i) {
+            inBuildings[i] += inventory.items[i];
+        }
     }
-    long long carried = 0;
-    for (const auto [entity, carry] : registry.view<const lw::Carry>().each()) {
-        carried += carry.food;
+    for (const auto [entity, person, inventory] :
+         registry.view<const lw::Person, const lw::Inventory>().each()) {
+        for (std::size_t i = 0; i < lw::kItemKinds; ++i) {
+            carried[i] += inventory.items[i];
+        }
     }
-    std::printf("  supplies in buildings: food %lld, water %lld; carried food %lld\n", food,
-                water, carried);
+    const auto at = [](const long long* counts, lw::ItemKind kind) {
+        return counts[static_cast<std::size_t>(kind)];
+    };
+    using K = lw::ItemKind;
+    std::printf("  in buildings: food %lld, water %lld, bandages %lld, medicine %lld, "
+                "ammo %lld/%lld/%lld, guns %lld; carried: food %lld, meat %lld, water %lld, "
+                "bandages %lld, medicine %lld\n",
+                at(inBuildings, K::Food), at(inBuildings, K::Water), at(inBuildings, K::Bandage),
+                at(inBuildings, K::Medicine), at(inBuildings, K::PistolAmmo),
+                at(inBuildings, K::ShotgunShells), at(inBuildings, K::RifleAmmo),
+                at(inBuildings, K::Pistol) + at(inBuildings, K::Shotgun) + at(inBuildings, K::Rifle),
+                at(carried, K::Food), at(carried, K::Meat), at(carried, K::Water),
+                at(carried, K::Bandage), at(carried, K::Medicine));
     const lw::Resources& resources = world.resources();
     std::printf("  forest: %lld portions in %d blocks (%d empty); rain filled barrels by %u\n",
                 resources.forestTotal(), resources.forestBlocks(), resources.forestEmpty(),

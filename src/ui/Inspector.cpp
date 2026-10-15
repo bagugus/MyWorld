@@ -5,6 +5,7 @@
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/TimeScale.h"
+#include "sim/Items.h"
 #include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
@@ -81,8 +82,10 @@ EntityId idOf(const entt::registry& registry, entt::entity entity) {
 }
 
 void drawSupplies(const entt::registry& registry, entt::entity building) {
-    if (const auto* supplies = registry.try_get<Supplies>(building)) {
-        ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
+    if (const auto* inventory = registry.try_get<Inventory>(building)) {
+        char text[256];
+        formatInventory(text, sizeof(text), *inventory);
+        ImGui::TextWrapped("Внутри: %s", text);
         if (const auto* info = registry.try_get<Building>(building);
             info != nullptr && rainBarrel(info->kind) > 0) {
             ImGui::Text("Бочка для дождя: до %d порций воды", rainBarrel(info->kind));
@@ -452,15 +455,18 @@ void Inspector::drawPerson(entt::entity entity) {
             return;
         }
         ImGui::SameLine();
-        const auto* supplies = registry.try_get<Supplies>(home);
+        const auto* supplies = registry.try_get<Inventory>(home);
         ImGui::Text("%s, еды %d, воды %d", buildingName(registry.get<Building>(home).kind),
-                    supplies != nullptr ? supplies->food : 0,
-                    supplies != nullptr ? supplies->water : 0);
+                    supplies != nullptr ? supplies->food() : 0,
+                    supplies != nullptr ? supplies->count(ItemKind::Water) : 0);
     } else {
         ImGui::TextUnformatted("Дом: нет");
     }
-    if (const auto* carry = registry.try_get<Carry>(entity)) {
-        ImGui::Text("Несёт: еды %d, воды %d", carry->food, carry->water);
+    if (const auto* carry = registry.try_get<Inventory>(entity)) {
+        char text[256];
+        formatInventory(text, sizeof(text), *carry);
+        ImGui::TextWrapped("Несёт (%.1f из %.0f кг): %s", inventoryWeight(*carry), kCarryCapacity,
+                           text);
     }
     if (const auto* weapon = registry.try_get<Weapon>(entity)) {
         if (isFirearm(weapon->kind)) {
@@ -847,9 +853,10 @@ void Inspector::drawCorpse(entt::entity entity) {
             ImGui::Text("(патронов %d)", weapon->ammo);
         }
     }
-    if (const auto* carry = registry.try_get<Carry>(entity); carry != nullptr &&
-                                                            (carry->food > 0 || carry->water > 0)) {
-        ImGui::Text("При теле: еды %d, воды %d", carry->food, carry->water);
+    if (const auto* carry = registry.try_get<Inventory>(entity); carry != nullptr && !carry->empty()) {
+        char text[256];
+        formatInventory(text, sizeof(text), *carry);
+        ImGui::TextWrapped("При теле: %s", text);
     }
 }
 
@@ -938,9 +945,9 @@ void Inspector::drawSettlement(entt::entity entity) {
         }
         ++buildings;
         homes.push_back(id.value);
-        if (const auto* supplies = registry.try_get<Supplies>(other)) {
-            food += supplies->food;
-            water += supplies->water;
+        if (const auto* supplies = registry.try_get<Inventory>(other)) {
+            food += supplies->food();
+            water += supplies->count(ItemKind::Water);
         }
     }
     std::sort(homes.begin(), homes.end());

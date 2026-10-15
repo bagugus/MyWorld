@@ -37,6 +37,9 @@ enum class ChronicleKind : std::uint8_t {
     Butchered,     // разделал тушу object: a порций мяса
     Turned,        // встал зомби после смерти от укуса
     Feverish,      // заражение после укуса перешло в лихорадку
+    FoundWeapon,   // нашёл в здании или на теле object оружие и взял в руки: a — WeaponKind
+    LootedBody,    // обыскал тело object: взял еды a, воды b
+    Treated,       // перевязался (a = 0) или принял лекарство (a = 1)
     Count
 };
 

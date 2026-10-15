@@ -1,6 +1,7 @@
 #include "sim/systems/UtilityAiSystem.h"
 
 #include "sim/Calendar.h"
+#include "sim/Items.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Weapons.h"
@@ -58,8 +59,20 @@ constexpr int kNeighbourLatestMinute = 11 * 60;
 constexpr float kMeal = 0.4f;          // порция еды снимает столько голода
 constexpr float kWaterPortion = 0.5f;  // порция воды — столько жажды
 constexpr float kForageMeal = 0.25f;   // найденное в лесу и съеденное на месте
-constexpr std::uint8_t kCarryFoodMax = 8;
-constexpr std::uint8_t kCarryWaterMax = 6;
+// Сколько еды (с мясом) и воды человек берёт с собой — меньше, чем позволяет
+// вес (kCarryCapacity): не всё, что найдено, нужно унести.
+constexpr int kCarryFoodMax = 8;
+constexpr int kCarryWaterMax = 6;
+// Снаряжение (этап 5.6): бинтов и лекарств при себе — не больше этого.
+constexpr int kBandageWant = 4;
+constexpr int kMedicineWant = 3;
+// Перевязаться — при кровотечении сильнее этого; лекарство — при здоровье ниже.
+constexpr float kTreatBleeding = 0.03f;
+constexpr float kMedicineBelow = 0.6f;
+constexpr float kMedicineHeal = 0.25f;
+constexpr int kTreatMinutes = 3;
+// Тело с вещами ближе этого обыскивают раньше зданий, метры.
+constexpr float kBodySearch = 300.0f;
 // Запасливый идёт за едой, когда дома (с несомым) меньше kStockLow порций.
 constexpr int kStockLow = 2;
 constexpr float kStockWeight = 0.25f;
@@ -210,7 +223,7 @@ struct Context {
     const Person& person;
     const Needs& needs;
     const Traits& traits;
-    const Carry& carry;
+    const Inventory& carry; // что несёт с собой
     std::uint8_t emptySearches;
     Cell cell;
     float x;
@@ -220,7 +233,7 @@ struct Context {
     // Дом: kInvalidId — нет.
     EntityId homeId = kInvalidId;
     Cell homeDoor;
-    const Supplies* homeSupplies = nullptr;
+    const Inventory* homeSupplies = nullptr; // запасы дома
     float homeDistance = 0.0f;
     bool atHome = false;
     // Поселение, где человек ищет еду и гуляет: где дом, у бездомного — ближайшее.
@@ -233,6 +246,8 @@ struct Context {
     std::size_t dangerCount = 0;
     // Оружие в руках (этап 5.4).
     Weapon weapon{};
+    // Кровотечение (этап 5.6: перевязка).
+    float bleeding = 0.0f;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -241,8 +256,8 @@ Context makeContext(const World& world, entt::entity entity) {
     const Person& person = registry.get<Person>(entity);
     const Traits* traits = registry.try_get<Traits>(entity);
     static const Traits kAverage{};
-    static const Carry kEmpty{};
-    const Carry* carry = registry.try_get<Carry>(entity);
+    static const Inventory kEmpty{};
+    const Inventory* carry = registry.try_get<Inventory>(entity);
     const Mind* mind = registry.try_get<Mind>(entity);
     const CalendarTime time = calendarAt(world.tick());
     Context ctx{world,
@@ -263,6 +278,9 @@ Context makeContext(const World& world, entt::entity entity) {
     if (const auto* weapon = registry.try_get<Weapon>(entity)) {
         ctx.weapon = *weapon;
     }
+    if (const auto* wounds = registry.try_get<Wounds>(entity)) {
+        ctx.bleeding = wounds->bleeding;
+    }
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -276,7 +294,7 @@ Context makeContext(const World& world, entt::entity entity) {
         const Building& building = registry.get<Building>(home);
         ctx.homeId = person.home;
         ctx.homeDoor = building.door;
-        ctx.homeSupplies = registry.try_get<Supplies>(home);
+        ctx.homeSupplies = registry.try_get<Inventory>(home);
         ctx.homeDistance = distance(ctx.x, ctx.y, cellX(building.door), cellY(building.door));
         ctx.atHome = ctx.cell == building.door;
         ctx.settlement = building.settlement;
@@ -400,10 +418,10 @@ Option evalEat(const Context& ctx) {
     if (need <= 0.0f) {
         return {};
     }
-    if (ctx.carry.food > 0) {
+    if (ctx.carry.food() > 0) {
         return here(ctx, need);
     }
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food > 0) {
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0) {
         return atHome(ctx, need);
     }
     return {};
@@ -414,11 +432,11 @@ Option evalDrink(const Context& ctx) {
     if (need <= 0.0f) {
         return {};
     }
-    if (ctx.carry.water > 0) {
+    if (ctx.carry.count(ItemKind::Water) > 0) {
         return here(ctx, need);
     }
     Option best;
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->water > 0) {
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->count(ItemKind::Water) > 0) {
         best = atHome(ctx, need);
     }
     // К воде — только если она заметно ближе дома (или дома воды нет).
@@ -440,9 +458,10 @@ Option evalDrink(const Context& ctx) {
 
 Option evalScavenge(const Context& ctx) {
     const bool foodAtHand =
-        ctx.carry.food > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->food > 0);
+        ctx.carry.food() > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0);
     const bool waterAtHand =
-        ctx.carry.water > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->water > 0);
+        ctx.carry.count(ItemKind::Water) > 0 ||
+        (ctx.homeSupplies != nullptr && ctx.homeSupplies->count(ItemKind::Water) > 0);
     const float start = needStart(ctx);
     // Еды в обысках подряд не нашлось — округа обобрана, за едой тянет меньше.
     const float foodHope = std::max(
@@ -456,7 +475,7 @@ Option evalScavenge(const Context& ctx) {
     }
     // Запасливый идёт за едой, пока дома кончается, а не когда уже голоден;
     // несомое домой тоже считается, с полными руками не ходят.
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food + ctx.carry.food < kStockLow &&
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() + ctx.carry.food() < kStockLow &&
         !ctx.night) {
         need = std::max(need, kStockWeight * ctx.traits.prudence * foodHope);
     }
@@ -473,7 +492,7 @@ Option evalScavenge(const Context& ctx) {
 }
 
 Option evalForage(const Context& ctx) {
-    if (ctx.carry.food > 0) {
+    if (ctx.carry.food() > 0) {
         return {};
     }
     // Сезон сказывается через запас леса (Resources): зимой он пуст.
@@ -481,7 +500,7 @@ Option evalForage(const Context& ctx) {
     if (need <= 0.0f) {
         return {};
     }
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food > 0) {
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0) {
         need *= 0.4f; // дома есть еда — в лес незачем
     }
     if (ctx.night) {
@@ -583,14 +602,14 @@ Option evalFight(const Context& ctx) {
 // Охота: голодный с ружьём идёт к ближайшему зверю. Где именно стрелять —
 // решается по ходу (updateHunt).
 Option evalHunt(const Context& ctx) {
-    if (!isFirearm(ctx.weapon.kind) || ctx.weapon.ammo == 0 || ctx.carry.food > 0) {
+    if (!isFirearm(ctx.weapon.kind) || ctx.weapon.ammo == 0 || ctx.carry.food() > 0) {
         return {};
     }
     float need = kHuntWeight * urge(ctx.needs.hunger, needStart(ctx));
     if (need <= 0.0f) {
         return {};
     }
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food > 0) {
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0) {
         need *= 0.4f; // дома есть еда
     }
     if (ctx.night) {
@@ -606,6 +625,18 @@ Option evalHunt(const Context& ctx) {
     }
     const float d = std::sqrt(game->distanceSq);
     return {need * nearness(d, kHuntScale), Map::cellAt(game->x, game->y), game->id};
+}
+
+// Перевязаться, если течёт кровь и есть бинт; принять лекарство, если плохо
+// и оно есть. На месте.
+Option evalTreat(const Context& ctx) {
+    if (ctx.bleeding > kTreatBleeding && ctx.carry.count(ItemKind::Bandage) > 0) {
+        return here(ctx, std::min(1.0f, 0.45f + 2.0f * ctx.bleeding));
+    }
+    if (ctx.needs.health < kMedicineBelow && ctx.carry.count(ItemKind::Medicine) > 0) {
+        return here(ctx, 0.6f * (1.0f - ctx.needs.health));
+    }
+    return {};
 }
 
 // Бегом, а не шагом: угроза настоящая.
@@ -639,6 +670,8 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalFight(ctx);
     case Action::Hunt:
         return evalHunt(ctx);
+    case Action::Treat:
+        return evalTreat(ctx);
     case Action::Count:
         break;
     }
@@ -683,10 +716,29 @@ void remember(Mind& mind, EntityId building) {
     mind.searchedNext = static_cast<std::uint8_t>((mind.searchedNext + 1) % Mind::kSearchedMemory);
 }
 
-// Здание, где ещё не искали: из трёх случайных — ближайшее. Сначала в своём
+// Тело с вещами рядом, которое ещё не обыскивали, — первым (этап 5.6). Иначе
+// здание, где ещё не искали: из трёх случайных — ближайшее. Сначала в своём
 // поселении, потом в соседних.
 std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, const Mind& mind,
                                                         Rng& rng) {
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    if (const auto body = world.spatial().nearest(
+            ctx.x, ctx.y, kBodySearch, [&](const SpatialHit& hit) {
+                const auto* corpse = registry.try_get<Corpse>(hit.entity);
+                if (corpse == nullptr || corpse->kind == CorpseKind::Animal ||
+                    remembered(mind, hit.id)) {
+                    return false;
+                }
+                const auto* stuff = registry.try_get<Inventory>(hit.entity);
+                const auto* weapon = registry.try_get<Weapon>(hit.entity);
+                const bool loot = (stuff != nullptr && !stuff->empty()) ||
+                                  (weapon != nullptr && weapon->kind != WeaponKind::Fists);
+                const Cell cell = Map::cellAt(hit.x, hit.y);
+                return loot && world.nav().passable(cell) && !risky(ctx, cell);
+            })) {
+        return Places::BuildingPlace{body->id, BuildingKind::House, Map::cellAt(body->x, body->y)};
+    }
     const Places& places = ctx.world.places();
     const Places::SettlementPlace* own = places.settlement(ctx.settlement);
     if (own == nullptr) {
@@ -1127,6 +1179,8 @@ private:
             option.spot = *door;
         } else if (action == Action::Fight) {
             option.spot = ctx.cell; // подойти к зомби — по ходу боя (updateFight)
+            // В руки — лучшее, что есть: ружьё без патронов хуже топора.
+            equipBest(registry_.get<Weapon>(entity_), registry_.get<Inventory>(entity_));
         }
 
         bool here = option.spot == ctx.cell;
@@ -1216,15 +1270,17 @@ private:
         // Дома — выложить найденное в запасы.
         if (const entt::entity home = world_.find(person_.home); home != entt::null) {
             if (cell == registry_.get<Building>(home).door) {
-                Carry& carry = registry_.get<Carry>(entity_);
-                if (auto* supplies = registry_.try_get<Supplies>(home)) {
-                    if (carry.food > 0 || carry.water > 0) {
-                        world_.record(ChronicleKind::BroughtHome, id_, person_.home, carry.food,
-                                      carry.water);
+                // Еду, мясо и воду — в запасы; снаряжение остаётся при себе.
+                Inventory& carry = registry_.get<Inventory>(entity_);
+                if (auto* stock = registry_.try_get<Inventory>(home)) {
+                    const int food = carry.food();
+                    const int water = carry.count(ItemKind::Water);
+                    if (food > 0 || water > 0) {
+                        world_.record(ChronicleKind::BroughtHome, id_, person_.home, food, water);
                     }
-                    supplies->food = static_cast<std::uint16_t>(supplies->food + carry.food);
-                    supplies->water = static_cast<std::uint16_t>(supplies->water + carry.water);
-                    carry = {};
+                    for (const ItemKind kind : {ItemKind::Food, ItemKind::Meat, ItemKind::Water}) {
+                        stock->add(kind, carry.take(kind, 0xFFFF));
+                    }
                 }
             }
         }
@@ -1259,7 +1315,8 @@ private:
             duration = kEatMinutes;
             break;
         case Action::Drink:
-            duration = mind_.target == kInvalidId && registry_.get<Carry>(entity_).water == 0
+            duration = mind_.target == kInvalidId &&
+                               registry_.get<Inventory>(entity_).count(ItemKind::Water) == 0
                            ? kDrinkAtWaterMinutes
                            : kDrinkMinutes;
             break;
@@ -1288,6 +1345,9 @@ private:
         case Action::Hunt:
             duration = kButcherMinutes;
             break;
+        case Action::Treat:
+            duration = kTreatMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -1304,42 +1364,42 @@ private:
     // Действие выполнено: его результат.
     void finish() {
         person_.asleep = false;
-        Carry& carry = registry_.get<Carry>(entity_);
-        Supplies* supplies = nullptr;
-        if (const entt::entity building = world_.find(mind_.target); building != entt::null) {
-            supplies = registry_.try_get<Supplies>(building);
+        Inventory& carry = registry_.get<Inventory>(entity_);
+        // Здание или тело действия.
+        Inventory* stock = nullptr;
+        if (const entt::entity target = world_.find(mind_.target); target != entt::null) {
+            stock = registry_.try_get<Inventory>(target);
         }
         switch (mind_.action) {
         case Action::Eat:
-            if (carry.food > 0) {
-                --carry.food;
+            if (eatFrom(carry)) {
                 needs_.hunger = clamp01(needs_.hunger - kMeal);
-            } else if (supplies != nullptr && supplies->food > 0) {
-                --supplies->food;
+            } else if (stock != nullptr && eatFrom(*stock)) {
                 needs_.hunger = clamp01(needs_.hunger - kMeal);
-                if (supplies->food == 0) {
+                if (stock->food() == 0) {
                     world_.record(ChronicleKind::AteLastFood, id_, mind_.target);
                 }
             }
             break;
         case Action::Drink:
-            if (carry.water > 0) {
-                --carry.water;
+            if (carry.take(ItemKind::Water, 1) == 1) {
                 needs_.thirst = clamp01(needs_.thirst - kWaterPortion);
             } else if (mind_.target == kInvalidId) {
                 needs_.thirst = 0.0f; // у реки или озера — вдоволь
-            } else if (supplies != nullptr && supplies->water > 0) {
-                --supplies->water;
+            } else if (stock != nullptr && stock->take(ItemKind::Water, 1) == 1) {
                 needs_.thirst = clamp01(needs_.thirst - kWaterPortion);
-                if (supplies->water == 0) {
+                if (stock->count(ItemKind::Water) == 0) {
                     world_.record(ChronicleKind::DrankLastWater, id_, mind_.target);
                 }
             }
             break;
+        case Action::Treat:
+            treat(carry);
+            break;
         case Action::Scavenge:
             remember(mind_, mind_.target);
-            if (supplies != nullptr) {
-                takeSupplies(*supplies, carry);
+            if (stock != nullptr) {
+                takeLoot(*stock, carry);
             } else {
                 world_.record(ChronicleKind::Scavenged, id_, mind_.target);
                 countSearch(false);
@@ -1360,7 +1420,7 @@ private:
 
     // Разделать тушу: голодный съедает порцию, остальное — с собой, сколько
     // унесёт; что не унести, остаётся в туше.
-    void butcher(Carry& carry) {
+    void butcher(Inventory& carry) {
         const entt::entity prey = world_.find(mind_.target);
         auto* carcass = prey != entt::null ? registry_.try_get<Corpse>(prey) : nullptr;
         if (carcass == nullptr || carcass->meat == 0) {
@@ -1372,42 +1432,125 @@ private:
             ++taken;
             needs_.hunger = clamp01(needs_.hunger - kMeal);
         }
-        const int carried = std::min<int>(carcass->meat, kCarryFoodMax - carry.food);
+        const int carried = std::max(0, std::min({static_cast<int>(carcass->meat),
+                                                  kCarryFoodMax - carry.food(),
+                                                  roomFor(carry, ItemKind::Meat)}));
         carcass->meat = static_cast<std::uint8_t>(carcass->meat - carried);
-        carry.food = static_cast<std::uint8_t>(carry.food + carried);
+        carry.add(ItemKind::Meat, carried);
         taken += carried;
         world_.record(ChronicleKind::Butchered, id_, mind_.target, taken);
     }
 
-    // Найденное: что-то съесть и выпить сразу, остальное — с собой, сколько
-    // позволяют жадность и запасливость.
-    void takeSupplies(Supplies& supplies, Carry& carry) {
+    // Найденное в здании или на теле: еду и воду — сколько позволяют жадность и
+    // запасливость (что-то съесть и выпить сразу), затем снаряжение (takeGear).
+    // Что не унести, остаётся на месте.
+    void takeLoot(Inventory& stock, Inventory& carry) {
         const Traits* traits = registry_.try_get<Traits>(entity_);
         const float greed = traits != nullptr ? traits->greed : 0.5f;
         const float prudence = traits != nullptr ? traits->prudence : 0.5f;
         const int wantFood = 1 + static_cast<int>(std::lround(2.0f * greed + 2.0f * prudence));
         const int wantWater = 1 + static_cast<int>(std::lround(greed + prudence));
-        int food = std::min<int>(supplies.food, wantFood);
-        int water = std::min<int>(supplies.water, wantWater);
-        supplies.food = static_cast<std::uint16_t>(supplies.food - food);
-        supplies.water = static_cast<std::uint16_t>(supplies.water - water);
-        world_.record(ChronicleKind::Scavenged, id_, mind_.target, food, water);
-        countSearch(food > 0);
-        if (food > 0 && needs_.hunger > kSnackThreshold) {
-            --food;
+        // Мясо — первым: оно портится.
+        int meat = stock.take(ItemKind::Meat, wantFood);
+        int food = stock.take(ItemKind::Food, wantFood - meat);
+        int water = stock.take(ItemKind::Water, wantWater);
+        const entt::entity source = world_.find(mind_.target);
+        const bool body = source != entt::null && registry_.all_of<Corpse>(source);
+        world_.record(body ? ChronicleKind::LootedBody : ChronicleKind::Scavenged, id_,
+                      mind_.target, meat + food, water);
+        countSearch(meat + food > 0);
+        if (meat + food > 0 && needs_.hunger > kSnackThreshold) {
+            --(meat > 0 ? meat : food);
             needs_.hunger = clamp01(needs_.hunger - kMeal);
         }
         if (water > 0 && needs_.thirst > kSnackThreshold) {
             --water;
             needs_.thirst = clamp01(needs_.thirst - kWaterPortion);
         }
-        // Что не унести, остаётся в здании.
-        const int carryFood = std::min(food, kCarryFoodMax - carry.food);
-        const int carryWater = std::min(water, kCarryWaterMax - carry.water);
-        supplies.food = static_cast<std::uint16_t>(supplies.food + food - carryFood);
-        supplies.water = static_cast<std::uint16_t>(supplies.water + water - carryWater);
-        carry.food = static_cast<std::uint8_t>(carry.food + carryFood);
-        carry.water = static_cast<std::uint8_t>(carry.water + carryWater);
+        const auto keep = [&](ItemKind kind, int found, int cap) {
+            const int kept = std::max(0, std::min({found, cap, roomFor(carry, kind)}));
+            carry.add(kind, kept);
+            stock.add(kind, found - kept);
+        };
+        keep(ItemKind::Meat, meat, kCarryFoodMax - carry.food());
+        keep(ItemKind::Food, food, kCarryFoodMax - carry.food());
+        keep(ItemKind::Water, water, kCarryWaterMax - carry.count(ItemKind::Water));
+        takeGear(stock, carry, body ? source : entt::entity{entt::null});
+    }
+
+    // Снаряжение: оружие сильнее того, что в руках, патроны к своему оружию,
+    // бинты и лекарства (до kBandageWant и kMedicineWant). Оружие в руках у
+    // погибшего — тоже добыча. Новое оружие — в руки, прежнее остаётся на месте.
+    void takeGear(Inventory& stock, Inventory& carry, entt::entity body) {
+        if (body != entt::null) {
+            if (auto* dropped = registry_.try_get<Weapon>(body);
+                dropped != nullptr && dropped->kind != WeaponKind::Fists) {
+                stock.add(itemOf(dropped->kind), 1);
+                if (const ItemKind ammo = ammoFor(dropped->kind); ammo != ItemKind::Count) {
+                    stock.add(ammo, dropped->ammo);
+                }
+                *dropped = {};
+            }
+        }
+        const auto move = [&](ItemKind kind, int want) {
+            const int moved = stock.take(kind, std::max(0, std::min(want, roomFor(carry, kind))));
+            carry.add(kind, moved);
+        };
+        Weapon& weapon = registry_.get<Weapon>(entity_);
+        // Лучшее оружие из найденного — если сильнее того, что в руках (с патронами).
+        Weapon mine = weapon;
+        if (const ItemKind ammo = ammoFor(mine.kind); ammo != ItemKind::Count) {
+            mine.ammo = static_cast<std::uint16_t>(mine.ammo + carry.count(ammo));
+        }
+        ItemKind found = ItemKind::Count;
+        float best = weaponPower(mine);
+        for (std::size_t i = 0; i < kItemKinds; ++i) {
+            const auto item = static_cast<ItemKind>(i);
+            const WeaponKind kind = weaponOf(item);
+            if (kind == WeaponKind::Fists || stock.count(item) == 0) {
+                continue;
+            }
+            const ItemKind ammo = ammoFor(kind);
+            const int rounds = ammo != ItemKind::Count ? stock.count(ammo) + carry.count(ammo) : 0;
+            const float power = weaponPower(Weapon{kind, static_cast<std::uint16_t>(rounds)});
+            if (power > best) {
+                best = power;
+                found = item;
+            }
+        }
+        if (found != ItemKind::Count) {
+            move(found, 1);
+        }
+        // Патроны ко всему своему оружию.
+        for (const WeaponKind kind : {WeaponKind::Pistol, WeaponKind::Shotgun, WeaponKind::Rifle}) {
+            if (weapon.kind == kind || carry.count(itemOf(kind)) > 0) {
+                move(ammoFor(kind), 0xFFFF);
+            }
+        }
+        move(ItemKind::Bandage, kBandageWant - carry.count(ItemKind::Bandage));
+        move(ItemKind::Medicine, kMedicineWant - carry.count(ItemKind::Medicine));
+        const WeaponKind before = weapon.kind;
+        if (equipBest(weapon, carry)) {
+            world_.record(ChronicleKind::FoundWeapon, id_, mind_.target,
+                          static_cast<std::int32_t>(weapon.kind));
+            // Прежнее — тяжёлое и хуже: оставить там, где нашёл новое.
+            if (const ItemKind old = itemOf(before); old != ItemKind::Count) {
+                stock.add(old, carry.take(old, 1));
+            }
+        }
+    }
+
+    // Перевязаться (бинт останавливает кровотечение) или принять лекарство.
+    void treat(Inventory& carry) {
+        Wounds* wounds = registry_.try_get<Wounds>(entity_);
+        if (wounds != nullptr && wounds->bleeding > kTreatBleeding &&
+            carry.take(ItemKind::Bandage, 1) == 1) {
+            wounds->bleeding = 0.0f;
+            world_.record(ChronicleKind::Treated, id_, kInvalidId, 0);
+        } else if (needs_.health < kMedicineBelow && carry.take(ItemKind::Medicine, 1) == 1) {
+            needs_.health = clamp01(needs_.health + kMedicineHeal);
+            world_.record(ChronicleKind::Treated, id_, kInvalidId, 1);
+        }
     }
 
     // Обыски подряд без еды: с каждым искать еду в зданиях хочется меньше.
@@ -1421,7 +1564,7 @@ private:
 
     // Сбор из запаса леса: порцию съесть на месте, запасливый уносит ещё одну.
     // Пока шёл, лес могли обобрать другие — тогда ничего.
-    void forage(Carry& carry) {
+    void forage(Inventory& carry) {
         Resources& resources = world_.resources();
         if (!resources.takeForest(mind_.spot)) {
             return;
@@ -1429,10 +1572,10 @@ private:
         needs_.hunger = clamp01(needs_.hunger - kForageMeal);
         const Traits* traits = registry_.try_get<Traits>(entity_);
         const float prudence = traits != nullptr ? traits->prudence : 0.5f;
-        if (carry.food < kCarryFoodMax && resources.forestAt(mind_.spot) > 0 &&
-            rng_.chance(prudence)) {
+        if (carry.food() < kCarryFoodMax && roomFor(carry, ItemKind::Food) > 0 &&
+            resources.forestAt(mind_.spot) > 0 && rng_.chance(prudence)) {
             resources.takeForest(mind_.spot);
-            ++carry.food;
+            carry.add(ItemKind::Food, 1);
         }
     }
 

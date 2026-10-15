@@ -108,8 +108,9 @@ void drawCellInfo(const World& world, Cell cell) {
                     static_cast<unsigned long long>(world.registry().get<Id>(entity).value),
                     buildingName(building.kind),
                     owner != entt::null ? world.registry().get<Settlement>(owner).name.c_str() : "—");
-        if (const auto* supplies = world.registry().try_get<Supplies>(entity)) {
-            ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
+        if (const auto* supplies = world.registry().try_get<Inventory>(entity)) {
+            ImGui::Text("Припасы: еды %d, воды %d", supplies->food(),
+                        supplies->count(ItemKind::Water));
         }
         break;
     }

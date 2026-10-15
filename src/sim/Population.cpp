@@ -96,6 +96,44 @@ SupplyRange supplyRange(BuildingKind kind) {
     return {0, 0, 0, 0};
 }
 
+// Снаряжение в зданиях (этап 5.6): с какой вероятностью найдётся и сколько.
+struct LootRoll {
+    ItemKind item;
+    float chance;
+    int min, max;
+};
+
+std::vector<LootRoll> lootTable(BuildingKind kind) {
+    using K = ItemKind;
+    switch (kind) {
+    case BuildingKind::House:
+        return {{K::Bandage, 0.5f, 1, 2},      {K::Medicine, 0.12f, 1, 1},
+                {K::Knife, 0.12f, 1, 1},       {K::Axe, 0.1f, 1, 1},
+                {K::Pistol, 0.03f, 1, 1},      {K::Shotgun, 0.02f, 1, 1},
+                {K::Rifle, 0.02f, 1, 1},       {K::PistolAmmo, 0.08f, 4, 10},
+                {K::ShotgunShells, 0.06f, 3, 8}, {K::RifleAmmo, 0.05f, 3, 8}};
+    case BuildingKind::Apartment:
+        return {{K::Bandage, 0.7f, 1, 4},       {K::Medicine, 0.25f, 1, 2},
+                {K::Knife, 0.2f, 1, 1},         {K::Axe, 0.05f, 1, 1},
+                {K::Pistol, 0.05f, 1, 1},       {K::Shotgun, 0.02f, 1, 1},
+                {K::Rifle, 0.02f, 1, 1},        {K::PistolAmmo, 0.12f, 4, 12},
+                {K::ShotgunShells, 0.06f, 3, 8}, {K::RifleAmmo, 0.05f, 3, 8}};
+    case BuildingKind::Shop:
+        return {{K::Bandage, 0.8f, 2, 8},          {K::Medicine, 0.4f, 1, 4},
+                {K::Knife, 0.3f, 1, 2},            {K::Axe, 0.2f, 1, 2},
+                {K::PistolAmmo, 0.2f, 6, 20},      {K::ShotgunShells, 0.25f, 6, 20},
+                {K::RifleAmmo, 0.15f, 5, 15}};
+    case BuildingKind::Barn:
+        return {{K::Axe, 0.35f, 1, 1},            {K::Knife, 0.15f, 1, 1},
+                {K::Shotgun, 0.06f, 1, 1},        {K::Rifle, 0.05f, 1, 1},
+                {K::ShotgunShells, 0.1f, 3, 10},  {K::RifleAmmo, 0.08f, 3, 10}};
+    }
+    return {};
+}
+
+// Бинт при себе у человека с начала мира — с такой вероятностью.
+constexpr float kStartBandageChance = 0.4f;
+
 // Есть ли кто-то из людей ближе radius к центру клетки (по индексу).
 bool nearPeople(const World& world, Cell cell, float radius) {
     const entt::registry& registry = world.registry();
@@ -134,7 +172,7 @@ NavGrid::Region mainlandOf(const World& world) {
 
 } // namespace
 
-void spawnSupplies(World& world) {
+void spawnLoot(World& world) {
     Rng& rng = world.rng(RngStream::Supplies);
     entt::registry& registry = world.registry();
     std::vector<std::pair<EntityId, entt::entity>> buildings;
@@ -143,12 +181,22 @@ void spawnSupplies(World& world) {
     }
     std::sort(buildings.begin(), buildings.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
+    // Еда и вода — первым проходом, тем же порядком рандома, что до этапа 5.6:
+    // снаряжение не сдвигает припасы.
     for (const auto& [id, entity] : buildings) {
         const SupplyRange range = supplyRange(registry.get<Building>(entity).kind);
-        Supplies supplies;
-        supplies.food = static_cast<std::uint16_t>(rng.rangeInt(range.foodMin, range.foodMax));
-        supplies.water = static_cast<std::uint16_t>(rng.rangeInt(range.waterMin, range.waterMax));
-        registry.emplace<Supplies>(entity, supplies);
+        Inventory inventory;
+        inventory.set(ItemKind::Food, rng.rangeInt(range.foodMin, range.foodMax));
+        inventory.set(ItemKind::Water, rng.rangeInt(range.waterMin, range.waterMax));
+        registry.emplace<Inventory>(entity, inventory);
+    }
+    for (const auto& [id, entity] : buildings) {
+        Inventory& inventory = registry.get<Inventory>(entity);
+        for (const LootRoll& roll : lootTable(registry.get<Building>(entity).kind)) {
+            if (rng.chance(roll.chance)) {
+                inventory.add(roll.item, rng.rangeInt(roll.min, roll.max));
+            }
+        }
     }
 }
 
@@ -226,7 +274,11 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Needs>(entity, needs);
         registry.emplace<Traits>(entity, generateTraits(character));
         registry.emplace<Mind>(entity, mind);
-        registry.emplace<Carry>(entity);
+        Inventory inventory;
+        if (gear.chance(kStartBandageChance)) {
+            inventory.set(ItemKind::Bandage, 1);
+        }
+        registry.emplace<Inventory>(entity, inventory);
         registry.emplace<Senses>(entity);
         registry.emplace<Awareness>(entity);
         registry.emplace<Weapon>(entity, startWeapon(gear));

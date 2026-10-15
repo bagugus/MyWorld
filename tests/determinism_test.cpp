@@ -1,7 +1,7 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
-// животные и птицы, бой, смерть и тела.
+// животные и птицы, бой, смерть и тела, инвентарь и лут.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -9,6 +9,7 @@
 #include "sim/Climate.h"
 #include "sim/Death.h"
 #include "sim/Components.h"
+#include "sim/Items.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
@@ -1632,14 +1633,14 @@ void testAiEatsAtHome() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 5);
     registry.get<lw::Needs>(lone.person).hunger = 0.9f;
     const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
     CHECK(scores[static_cast<std::size_t>(lw::Action::Eat)] >
           scores[static_cast<std::size_t>(lw::Action::Wander)]);
     lone.run(90);
     CHECK(registry.get<lw::Needs>(lone.person).hunger < 0.6f);
-    CHECK(registry.get<lw::Supplies>(lone.home).food < 5);
+    CHECK(registry.get<lw::Inventory>(lone.home).food() < 5);
 }
 
 // Дома нет воды — жажду утоляют у реки или в чужих домах.
@@ -1649,7 +1650,7 @@ void testAiFindsWater() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home).water = 0;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Water, 0);
     registry.get<lw::Needs>(lone.person).thirst = 0.95f;
     lone.run(8 * 60);
     CHECK(registry.get<lw::Needs>(lone.person).thirst < 0.6f);
@@ -1661,8 +1662,8 @@ void testAiFindsWater() {
 void testAiScavengesWhenHungry() {
     Lone lone;
     entt::registry& registry = lone.world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     registry.get<lw::Needs>(lone.person).hunger = 0.8f;
     bool searched = false;
@@ -1686,8 +1687,9 @@ void testAiCarriesHome() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home) = {};
-    registry.get<lw::Carry>(lone.person) = {3, 2};
+    registry.get<lw::Inventory>(lone.home) = {};
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Food, 3);
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Water, 2);
     // Уйти от дома и вернуться: на пороге запасы перекладываются.
     const lw::Cell door = registry.get<lw::Building>(lone.home).door;
     const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
@@ -1704,11 +1706,11 @@ void testAiCarriesHome() {
     mind.until = lone.world.tick();
     lone.world.syncSpatial();
     lone.run(60);
-    const lw::Supplies& supplies = registry.get<lw::Supplies>(lone.home);
-    const lw::Carry& carry = registry.get<lw::Carry>(lone.person);
+    const lw::Inventory& supplies = registry.get<lw::Inventory>(lone.home);
+    const lw::Inventory& carry = registry.get<lw::Inventory>(lone.person);
     // Что-то могли уже съесть и выпить, но остальное — дома, а не в руках.
-    CHECK(carry.food == 0 && carry.water == 0);
-    CHECK(supplies.food + supplies.water > 0);
+    CHECK(carry.food() == 0 && carry.count(lw::ItemKind::Water) == 0);
+    CHECK(supplies.food() + supplies.count(lw::ItemKind::Water) > 0);
 }
 
 // Путь оборвался не у цели — действие там не выполняется: нельзя поесть из
@@ -1727,7 +1729,7 @@ void testAiArrivesElsewhere() {
     }
     registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
                                                lw::Map::cellCenter(away->y)};
-    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 5);
     registry.get<lw::Needs>(lone.person).hunger = 0.7f;
     registry.get<lw::Walker>(lone.person).waypoints.clear();
     lw::Mind& mind = registry.get<lw::Mind>(lone.person);
@@ -1741,14 +1743,14 @@ void testAiArrivesElsewhere() {
     // запасов — значит, у своей двери.
     bool inPlace = true;
     bool ateAtHome = true;
-    std::uint16_t food = registry.get<lw::Supplies>(lone.home).food;
+    int food = registry.get<lw::Inventory>(lone.home).food();
     for (int i = 0; i < 60 * static_cast<int>(lw::kTicksPerGameMinute); ++i) {
         lone.world.step();
         const lw::Position& position = registry.get<lw::Position>(lone.person);
         const lw::Cell cell = lw::Map::cellAt(position.x, position.y);
         const lw::Mind& now = registry.get<lw::Mind>(lone.person);
         inPlace = inPlace && (now.phase != lw::ActionPhase::Perform || cell == now.spot);
-        const std::uint16_t left = registry.get<lw::Supplies>(lone.home).food;
+        const int left = registry.get<lw::Inventory>(lone.home).food();
         ateAtHome = ateAtHome && (left == food || cell == door);
         food = left;
     }
@@ -1765,13 +1767,13 @@ void testAiStocksUp() {
         return;
     }
     registry.get<lw::Traits>(lone.person).prudence = 1.0f;
-    registry.get<lw::Supplies>(lone.home).food = 0;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 0);
     const auto scavenge = [&] {
         return lw::evaluateActions(lone.world, lone.person)[static_cast<std::size_t>(
             lw::Action::Scavenge)];
     };
     CHECK(scavenge() > 0.0f); // 08:00, сыт, но дома пусто
-    registry.get<lw::Carry>(lone.person).food = 8;
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Food, 8);
     CHECK(scavenge() == 0.0f);
 }
 
@@ -1935,8 +1937,8 @@ void testResources() {
 void testRainFillsBarrels() {
     lw::World world(7, regionConfig());
     entt::registry& registry = world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.water = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Water, 0);
     }
     lw::Weather& weather = world.weather();
     weather.kind = lw::WeatherKind::Storm;
@@ -1953,18 +1955,19 @@ void testRainFillsBarrels() {
     bool withinBarrel = true;
     bool shopsDry = true;
     for (const auto [entity, building, supplies] :
-         registry.view<const lw::Building, const lw::Supplies>().each()) {
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
         const std::uint16_t barrel = lw::rainBarrel(building.kind);
-        filled = filled || supplies.water > 0;
-        withinBarrel = withinBarrel && supplies.water <= barrel;
-        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop || supplies.water == 0);
+        filled = filled || supplies.count(lw::ItemKind::Water) > 0;
+        withinBarrel = withinBarrel && supplies.count(lw::ItemKind::Water) <= barrel;
+        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop ||
+                                 supplies.count(lw::ItemKind::Water) == 0);
     }
     CHECK(filled && withinBarrel && shopsDry);
     // Сутки ливня — дом полон.
     for (const auto [entity, building, supplies] :
-         registry.view<const lw::Building, const lw::Supplies>().each()) {
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
         if (building.kind == lw::BuildingKind::House) {
-            CHECK(supplies.water == lw::rainBarrel(building.kind));
+            CHECK(supplies.count(lw::ItemKind::Water) == lw::rainBarrel(building.kind));
             break;
         }
     }
@@ -1975,8 +1978,8 @@ void testRainFillsBarrels() {
 void testAiForagesFromStock() {
     Lone lone;
     entt::registry& registry = lone.world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     lw::Resources& resources = lone.world.resources();
     const long long before = resources.forestTotal();
@@ -1992,8 +1995,8 @@ void testAiForagesFromStock() {
     // Лес пуст — в лес не идут, даже голодные.
     Lone empty;
     entt::registry& emptyRegistry = empty.world.registry();
-    for (const auto [entity, supplies] : emptyRegistry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : emptyRegistry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     for (const lw::Cell spot : forageSpots(empty.world)) {
         while (empty.world.resources().takeForest(spot)) {
@@ -2061,18 +2064,18 @@ void testChronicleRecords() {
     }
 
     // Последняя порция дома.
-    registry.get<lw::Supplies>(lone.home).food = 1;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 1);
     registry.get<lw::Needs>(lone.person).hunger = 0.9f;
     lone.run(90);
-    CHECK(registry.get<lw::Supplies>(lone.home).food == 0);
+    CHECK(registry.get<lw::Inventory>(lone.home).food() == 0);
     CHECK(has(lw::ChronicleKind::AteLastFood, homeId));
     CHECK(chronicle.eventsOf(homeId).size() >= 2); // и дом помнит
 
     // Голод доходит до предела — одно событие, а не по событию каждую минуту.
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
-    registry.get<lw::Carry>(lone.person) = {};
+    registry.get<lw::Inventory>(lone.person) = {};
     registry.get<lw::Needs>(lone.person).hunger = 0.995f;
     lone.run(30);
     CHECK(chronicle.countOf(lw::ChronicleKind::Starving) == 1);
@@ -3145,9 +3148,9 @@ void testHunting() {
     lw::Needs& needs = registry.get<lw::Needs>(hunter);
     needs = {};
     needs.hunger = 0.9f;
-    registry.get<lw::Carry>(hunter) = {};
+    registry.get<lw::Inventory>(hunter) = {};
     if (const entt::entity home = world.find(registry.get<lw::Person>(hunter).home); home != entt::null) {
-        registry.get<lw::Supplies>(home).food = 0;
+        registry.get<lw::Inventory>(home).set(lw::ItemKind::Food, 0);
     }
     lw::Mind& mind = registry.get<lw::Mind>(hunter);
     mind.emptySearches = 255; // округа обобрана
@@ -3170,8 +3173,8 @@ void testHunting() {
         CHECK(carcass->kind == lw::CorpseKind::Animal && carcass->animal == lw::AnimalKind::Deer);
         CHECK(carcass->meat < 8);
     }
-    if (registry.all_of<lw::Carry>(hunter)) {
-        CHECK(registry.get<lw::Carry>(hunter).food > 0);
+    if (registry.all_of<lw::Inventory>(hunter)) {
+        CHECK(registry.get<lw::Inventory>(hunter).food() > 0);
         CHECK(registry.get<lw::Needs>(hunter).hunger < 0.9f);
         CHECK(registry.get<lw::Weapon>(hunter).ammo < 8);
     }
@@ -3316,6 +3319,158 @@ void testCrowsFlyToBody() {
     CHECK(field.distance(flock, zombie) <= 6.0f);
 }
 
+
+// --- Инвентарь и лут (этап 5.6) -------------------------------------------------
+
+// Предметы: вес, место, лучшее оружие с учётом патронов, мясо — первым.
+void testInventory() {
+    using K = lw::ItemKind;
+    lw::Inventory inventory;
+    inventory.set(K::Water, 10);
+    CHECK(std::abs(lw::inventoryWeight(inventory) - 10.0f) < 1e-4f);
+    CHECK(lw::roomFor(inventory, K::Food) == 10); // 5 кг свободно по 0,5 кг
+    CHECK(inventory.take(K::Water, 4) == 4 && inventory.count(K::Water) == 6);
+    CHECK(inventory.take(K::Water, 40) == 6 && inventory.empty());
+
+    // Ружьё без патронов хуже топора, с патронами — лучше.
+    lw::Weapon weapon{lw::WeaponKind::Axe, 0};
+    inventory.set(K::Rifle, 1);
+    CHECK(!lw::equipBest(weapon, inventory));
+    CHECK(weapon.kind == lw::WeaponKind::Axe);
+    inventory.set(K::RifleAmmo, 5);
+    CHECK(lw::equipBest(weapon, inventory));
+    CHECK(weapon.kind == lw::WeaponKind::Rifle && weapon.ammo == 5);
+    CHECK(inventory.count(K::Rifle) == 0 && inventory.count(K::RifleAmmo) == 0);
+    CHECK(inventory.count(K::Axe) == 1); // прежнее — в инвентарь
+
+    inventory = {};
+    inventory.set(K::Food, 1);
+    inventory.set(K::Meat, 1);
+    CHECK(lw::eatFrom(inventory) && inventory.count(K::Meat) == 0 && inventory.count(K::Food) == 1);
+}
+
+// Лут в зданиях: снаряжение есть, в магазинах нет ружей; один seed — один лут.
+void testLootSpawn() {
+    const lw::World a(7, regionConfig());
+    const lw::World b(7, regionConfig());
+    const entt::registry& registry = a.registry();
+    long long bandages = 0;
+    bool shopGuns = false;
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        bandages += inventory.count(lw::ItemKind::Bandage);
+        if (building.kind == lw::BuildingKind::Shop) {
+            shopGuns = shopGuns || inventory.count(lw::ItemKind::Pistol) +
+                                           inventory.count(lw::ItemKind::Shotgun) +
+                                           inventory.count(lw::ItemKind::Rifle) > 0;
+        }
+    }
+    CHECK(bandages > 0);
+    CHECK(!shopGuns);
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Голодный обыскивает здание: кроме еды, берёт ружьё с патронами и бинты.
+void testScavengeTakesGear() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, lw::Inventory>().each()) {
+        inventory = {};
+        inventory.set(lw::ItemKind::Food, 3);
+        inventory.set(lw::ItemKind::Rifle, 1);
+        inventory.set(lw::ItemKind::RifleAmmo, 6);
+        inventory.set(lw::ItemKind::Bandage, 2);
+    }
+    registry.get<lw::Inventory>(lone.home) = {};
+    registry.get<lw::Inventory>(lone.person) = {};
+    registry.get<lw::Weapon>(lone.person) = {lw::WeaponKind::Knife, 0};
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool found = false;
+    for (int minute = 0; minute < 8 * 60 && !found; minute += 10) {
+        lone.run(10);
+        found = lone.world.chronicle().countOf(lw::ChronicleKind::FoundWeapon) > 0;
+    }
+    CHECK(found);
+    const lw::Weapon& weapon = registry.get<lw::Weapon>(lone.person);
+    CHECK(weapon.kind == lw::WeaponKind::Rifle && weapon.ammo == 6);
+    CHECK(registry.get<lw::Inventory>(lone.person).count(lw::ItemKind::Bandage) >= 2);
+}
+
+// Течёт кровь, есть бинт — перевязывается, кровотечение останавливается.
+void testTreatsWound() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Bandage, 1);
+    registry.get<lw::Wounds>(lone.person).bleeding = 0.3f;
+    const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Treat)] > 0.9f);
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = lone.world.tick();
+    lone.run(10);
+    CHECK(registry.get<lw::Wounds>(lone.person).bleeding == 0.0f);
+    CHECK(registry.get<lw::Inventory>(lone.person).count(lw::ItemKind::Bandage) == 0);
+    CHECK(lone.world.chronicle().countOf(lw::ChronicleKind::Treated) == 1);
+}
+
+// Тело с вещами рядом обыскивают раньше зданий: дробовик погибшего — в руки.
+void testLootsBody() {
+    Lone lone;
+    lw::World& world = lone.world;
+    entt::registry& registry = world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, lw::Inventory>().each()) {
+        inventory.set(lw::ItemKind::Food, 0);
+    }
+    registry.get<lw::Inventory>(lone.person) = {};
+    registry.get<lw::Weapon>(lone.person) = {};
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto near = world.nav().nearestPassable({door.x + 10, door.y}, 6);
+    CHECK(near.has_value());
+    if (!near) {
+        return;
+    }
+    lw::Rng rng(5);
+    const entt::entity body = lw::createZombie(world, *near, rng);
+    lw::Inventory loot;
+    loot.set(lw::ItemKind::Food, 2);
+    registry.emplace<lw::Inventory>(body, loot);
+    registry.emplace<lw::Weapon>(body, lw::Weapon{lw::WeaponKind::Shotgun, 4});
+    lw::die(world, body, lw::DeathCause::Wounds, lw::kInvalidId);
+    world.syncSpatial();
+    bool looted = false;
+    for (int minute = 0; minute < 4 * 60 && !looted; minute += 10) {
+        lone.run(10);
+        looted = world.chronicle().countOf(lw::ChronicleKind::LootedBody) > 0;
+    }
+    CHECK(looted);
+    CHECK(registry.get<lw::Weapon>(lone.person).kind == lw::WeaponKind::Shotgun);
+    CHECK(registry.get<lw::Weapon>(lone.person).ammo == 4);
+    CHECK(registry.get<lw::Weapon>(body).kind == lw::WeaponKind::Fists);
+}
+
+// Мясо портится: к полуночи от запаса остаётся половина.
+void testMeatSpoils() {
+    lw::World world(7, regionConfig());
+    entt::registry& registry = world.registry();
+    const entt::entity building = *registry.view<lw::Building>().begin();
+    registry.get<lw::Inventory>(building).set(lw::ItemKind::Meat, 8);
+    const std::uint64_t end = world.tick() + lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    CHECK(registry.get<lw::Inventory>(building).count(lw::ItemKind::Meat) == 4);
+}
+
 } // namespace
 
 int main() {
@@ -3384,6 +3539,12 @@ int main() {
     testBodiesDecay();
     testBodyScares();
     testCrowsFlyToBody();
+    testInventory();
+    testLootSpawn();
+    testScavengeTakesGear();
+    testTreatsWound();
+    testLootsBody();
+    testMeatSpoils();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

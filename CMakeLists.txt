@@ -43,6 +43,8 @@ add_library(lw_sim STATIC
     src/sim/Grid.h
     src/sim/Hash.h
     src/sim/Id.h
+    src/sim/Items.cpp
+    src/sim/Items.h
     src/sim/Map.cpp
     src/sim/Map.h
     src/sim/Perception.cpp

@@ -36,7 +36,7 @@ World::World(std::uint64_t seed, const WorldConfig& config)
 
     generate();
     initWeather(*this);
-    spawnSupplies(*this);
+    spawnLoot(*this);
     spawnPeople(*this, config_.people);
     // Зомби селятся подальше от людей: индекс должен их уже видеть.
     spatial_.sync(registry_);
@@ -236,15 +236,11 @@ std::uint64_t World::stateHash() const {
             }
             hasher.add(walker->next);
         }
-        if (const auto* supplies = registry_.try_get<Supplies>(entity)) {
-            hasher.add(std::uint64_t{11});
-            hasher.add(supplies->food);
-            hasher.add(supplies->water);
-        }
-        if (const auto* carry = registry_.try_get<Carry>(entity)) {
-            hasher.add(std::uint64_t{12});
-            hasher.add(carry->food);
-            hasher.add(carry->water);
+        if (const auto* inventory = registry_.try_get<Inventory>(entity)) {
+            hasher.add(std::uint64_t{24});
+            for (const std::uint16_t count : inventory->items) {
+                hasher.add(count);
+            }
         }
         if (const auto* mind = registry_.try_get<Mind>(entity)) {
             hasher.add(std::uint64_t{13});

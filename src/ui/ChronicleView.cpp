@@ -135,6 +135,20 @@ Phrase phraseOf(const ChronicleEvent& event) {
     case ChronicleKind::Feverish:
         phrase.verb = "слёг в лихорадке от укуса";
         break;
+    case ChronicleKind::FoundWeapon:
+        phrase.verb = "нашёл оружие:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      weaponName(static_cast<WeaponKind>(event.a)));
+        break;
+    case ChronicleKind::LootedBody:
+        phrase.verb = "обыскал тело";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        break;
+    case ChronicleKind::Treated:
+        phrase.verb = event.a == 0 ? "перевязал рану" : "принял лекарство";
+        break;
     case ChronicleKind::Butchered:
         phrase.verb = "разделал тушу";
         phrase.withObject = true;
