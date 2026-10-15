@@ -18,7 +18,8 @@ int bucketCount(float worldSize) {
 SpatialIndex::SpatialIndex(float worldWidth, float worldHeight)
     : columns_(bucketCount(worldWidth)),
       rows_(bucketCount(worldHeight)),
-      buckets_(static_cast<std::size_t>(columns_) * static_cast<std::size_t>(rows_)) {}
+      buckets_(static_cast<std::size_t>(columns_) * static_cast<std::size_t>(rows_)),
+      occupied_((buckets_.size() + 63) / 64, 0) {}
 
 int SpatialIndex::axisBucket(float coordinate, int count) {
     // Сравнения до приведения к int: так NaN, бесконечность и далёкие точки
@@ -95,6 +96,7 @@ void SpatialIndex::insertEntry(std::uint32_t bucket, const Entry& entry) {
     const auto it = std::lower_bound(entries.begin(), entries.end(), entry.id,
                                      [](const Entry& e, EntityId id) { return e.id < id; });
     entries.insert(it, entry);
+    occupied_[bucket >> 6] |= std::uint64_t{1} << (bucket & 63);
 }
 
 void SpatialIndex::eraseEntry(std::uint32_t bucket, EntityId id) {
@@ -103,6 +105,9 @@ void SpatialIndex::eraseEntry(std::uint32_t bucket, EntityId id) {
                                      [](const Entry& e, EntityId value) { return e.id < value; });
     assert(it != entries.end() && it->id == id);
     entries.erase(it);
+    if (entries.empty()) {
+        occupied_[bucket >> 6] &= ~(std::uint64_t{1} << (bucket & 63));
+    }
 }
 
 } // namespace lw

@@ -37,12 +37,18 @@ add_library(lw_sim STATIC
     src/sim/Chronicle.h
     src/sim/Climate.cpp
     src/sim/Climate.h
+    src/sim/Death.cpp
+    src/sim/Death.h
     src/sim/Components.h
     src/sim/Grid.h
     src/sim/Hash.h
     src/sim/Id.h
+    src/sim/Items.cpp
+    src/sim/Items.h
     src/sim/Map.cpp
     src/sim/Map.h
+    src/sim/Perception.cpp
+    src/sim/Perception.h
     src/sim/Places.cpp
     src/sim/Places.h
     src/sim/Population.cpp
@@ -53,11 +59,14 @@ add_library(lw_sim STATIC
     src/sim/Rng.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
+    src/sim/Sound.h
     src/sim/SpatialIndex.cpp
     src/sim/SpatialIndex.h
     src/sim/TimeScale.h
     src/sim/Traits.cpp
     src/sim/Traits.h
+    src/sim/Weapons.cpp
+    src/sim/Weapons.h
     src/sim/Weather.h
     src/sim/World.cpp
     src/sim/World.h
@@ -75,16 +84,24 @@ add_library(lw_sim STATIC
     src/sim/nav/Pathfinder.cpp
     src/sim/nav/Pathfinder.h
     src/sim/nav/SearchSpace.h
+    src/sim/systems/AnimalSystem.cpp
+    src/sim/systems/AnimalSystem.h
+    src/sim/systems/CombatSystem.cpp
+    src/sim/systems/CombatSystem.h
     src/sim/systems/MovementSystem.cpp
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp
     src/sim/systems/NeedsSystem.h
+    src/sim/systems/PerceptionSystem.cpp
+    src/sim/systems/PerceptionSystem.h
     src/sim/systems/ResourceSystem.cpp
     src/sim/systems/ResourceSystem.h
     src/sim/systems/UtilityAiSystem.cpp
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp
     src/sim/systems/WeatherSystem.h
+    src/sim/systems/ZombieSystem.cpp
+    src/sim/systems/ZombieSystem.h
 )
 target_include_directories(lw_sim PUBLIC src)
 target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite)

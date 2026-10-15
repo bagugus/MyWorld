@@ -5,6 +5,7 @@
 #include "sim/nav/NavGrid.h"
 
 #include <cmath>
+#include <cstdlib>
 #include <utility>
 
 namespace lw {
@@ -51,6 +52,26 @@ bool startWalk(World& world, entt::entity entity, Cell goal) {
     return true;
 }
 
+bool startWalkDirect(World& world, entt::entity entity, Cell goal) {
+    entt::registry& registry = world.registry();
+    const Position& position = registry.get<Position>(entity);
+    const Cell start = Map::cellAt(position.x, position.y);
+    const NavGrid& nav = world.nav();
+    if (std::abs(goal.x - start.x) <= kDirectWalkCells &&
+        std::abs(goal.y - start.y) <= kDirectWalkCells && nav.passable(start) &&
+        nav.segmentPassable(start, goal)) {
+        Walker& walker = registry.get<Walker>(entity);
+        walker.waypoints.clear();
+        walker.waypoints.push_back(start);
+        if (goal != start) {
+            walker.waypoints.push_back(goal);
+        }
+        walker.next = 0;
+        return true;
+    }
+    return startWalk(world, entity, goal);
+}
+
 void updateMovement(World& world, float dt) {
     const NavGrid& nav = world.nav();
     auto view = world.registry().view<Position, Velocity, Walker>();
@@ -75,7 +96,7 @@ void updateMovement(World& world, float dt) {
             if (factor <= 0.0f) {
                 factor = kSwimFactor;
             }
-            const float speed = walker.speed * factor;
+            const float speed = walker.speed * walker.pace * factor;
             const float step = speed * remaining;
             if (step >= distance) {
                 position = {tx, ty};

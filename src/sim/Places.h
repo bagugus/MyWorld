@@ -54,7 +54,9 @@ public:
 
     // Ближайшее место, где можно напиться (брод через реку или берег реки и
     // озера), достижимое из from и не дальше maxDistance метров по прямой.
-    std::optional<Cell> nearestWater(const NavGrid& nav, Cell from, float maxDistance) const;
+    // accept отсеивает места (например, опасные); пустой — подходит любое.
+    std::optional<Cell> nearestWater(const NavGrid& nav, Cell from, float maxDistance,
+                                     const std::function<bool(Cell)>& accept = {}) const;
     // То же для клетки леса, где можно собирать ягоды и грибы. accept отсеивает
     // места (например, где всё уже собрано); пустой — подходит любое.
     std::optional<Cell> nearestForage(const NavGrid& nav, Cell from, float maxDistance,

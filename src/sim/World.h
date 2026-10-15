@@ -6,6 +6,7 @@
 #include "sim/Places.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
+#include "sim/Sound.h"
 #include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
 #include "sim/Weather.h"
@@ -31,6 +32,9 @@ enum class RngStream : std::uint8_t {
     Weather,
     Traits,   // черты характера при рождении
     Supplies, // припасы в зданиях
+    Zombies,  // зомби: расселение, решения, орды
+    Animals,  // животные и птицы: расселение, решения
+    Combat,   // бой: оружие при рождении, попадания и урон
     Count
 };
 
@@ -38,6 +42,9 @@ struct WorldConfig {
     int mapWidth = 2048;  // клетки (по Map::kCellSize метров)
     int mapHeight = 2048; // клетки
     int people = 300;     // люди; живут в жилых домах
+    int zombies = 400;    // зомби: одиночки в поселениях и на природе, орды
+    int animals = 160;    // олени, кабаны, зайцы — вдали от поселений
+    int flocks = 24;      // стаи ворон
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
@@ -67,6 +74,7 @@ public:
     Rng& rng(RngStream stream) { return streams_[static_cast<std::size_t>(stream)]; }
 
     std::uint64_t seed() const { return seed_; }
+    const WorldConfig& config() const { return config_; }
     std::uint64_t tick() const { return tick_; }
     // Время симуляции в секундах (не игровое: см. sim/TimeScale.h).
     double seconds() const { return static_cast<double>(tick_) / kTicksPerSecond; }
@@ -103,6 +111,15 @@ public:
                 std::int32_t a = 0, std::int32_t b = 0) {
         chronicle_.add({tick_, kind, subject, object, a, b});
     }
+    // Разовые звуки последних тиков: выстрелы, крики (см. sim/Sound.h).
+    const std::vector<Sound>& sounds() const { return sounds_; }
+    // Издать звук в текущем тике: слышен в loudness метрах в тихую погоду.
+    void emitSound(float x, float y, float loudness, SoundKind kind,
+                   EntityId source = kInvalidId) {
+        sounds_.push_back({tick_, x, y, loudness, source, kind});
+    }
+    // Забыть звуки, прозвучавшие раньше тика before (их больше никто не услышит).
+    void forgetSounds(std::uint64_t before);
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
@@ -123,6 +140,8 @@ private:
 
     Weather weather_;
     Chronicle chronicle_;
+    // По порядку издания, то есть по тикам.
+    std::vector<Sound> sounds_;
 
     NavGrid nav_;
     NavGraph graph_;

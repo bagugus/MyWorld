@@ -1,27 +1,36 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение, нужды, черты, Utility AI, ресурсы, летопись.
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
+// животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
 #include "sim/Chronicle.h"
 #include "sim/Climate.h"
+#include "sim/Death.h"
 #include "sim/Components.h"
+#include "sim/Items.h"
 #include "sim/Map.h"
+#include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
 #include "sim/Traits.h"
+#include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
+#include "sim/systems/AnimalSystem.h"
+#include "sim/systems/CombatSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -51,6 +60,9 @@ lw::WorldConfig smallConfig(int people) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = people;
+    config.zombies = 0; // зомби, животные и птицы — в своих тестах
+    config.animals = 0;
+    config.flocks = 0;
     return config;
 }
 
@@ -162,6 +174,9 @@ lw::WorldConfig regionConfig() {
     config.mapWidth = 1024;
     config.mapHeight = 1024;
     config.people = 0;
+    config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
     return config;
 }
 
@@ -305,14 +320,25 @@ void testEntitiesStayInWorld() {
     config.mapWidth = 12;
     config.mapHeight = 8;
     config.people = 100;
-    lw::World world(5, config);
-    for (int i = 0; i < 5000; ++i) {
-        world.step();
-    }
-    const lw::World& readOnly = world;
-    for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
-        CHECK(position.x >= 0.0f && position.x <= world.width());
-        CHECK(position.y >= 0.0f && position.y <= world.height());
+    config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
+    // Люди и, отдельно, зомби: рядом с людьми зомби не селятся.
+    lw::WorldConfig undead = config;
+    undead.people = 0;
+    undead.zombies = 30;
+    for (const lw::WorldConfig& variant : {config, undead}) {
+        lw::World world(5, variant);
+        for (int i = 0; i < 5000; ++i) {
+            world.step();
+        }
+        const lw::World& readOnly = world;
+        CHECK(readOnly.registry().view<const lw::Position>().size() ==
+              static_cast<std::size_t>(variant.people + variant.zombies));
+        for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
+            CHECK(position.x >= 0.0f && position.x <= world.width());
+            CHECK(position.y >= 0.0f && position.y <= world.height());
+        }
     }
 }
 
@@ -1607,14 +1633,14 @@ void testAiEatsAtHome() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 5);
     registry.get<lw::Needs>(lone.person).hunger = 0.9f;
     const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
     CHECK(scores[static_cast<std::size_t>(lw::Action::Eat)] >
           scores[static_cast<std::size_t>(lw::Action::Wander)]);
     lone.run(90);
     CHECK(registry.get<lw::Needs>(lone.person).hunger < 0.6f);
-    CHECK(registry.get<lw::Supplies>(lone.home).food < 5);
+    CHECK(registry.get<lw::Inventory>(lone.home).food() < 5);
 }
 
 // Дома нет воды — жажду утоляют у реки или в чужих домах.
@@ -1624,7 +1650,7 @@ void testAiFindsWater() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home).water = 0;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Water, 0);
     registry.get<lw::Needs>(lone.person).thirst = 0.95f;
     lone.run(8 * 60);
     CHECK(registry.get<lw::Needs>(lone.person).thirst < 0.6f);
@@ -1636,8 +1662,8 @@ void testAiFindsWater() {
 void testAiScavengesWhenHungry() {
     Lone lone;
     entt::registry& registry = lone.world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     registry.get<lw::Needs>(lone.person).hunger = 0.8f;
     bool searched = false;
@@ -1661,8 +1687,9 @@ void testAiCarriesHome() {
     if (lone.home == entt::null) {
         return;
     }
-    registry.get<lw::Supplies>(lone.home) = {};
-    registry.get<lw::Carry>(lone.person) = {3, 2};
+    registry.get<lw::Inventory>(lone.home) = {};
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Food, 3);
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Water, 2);
     // Уйти от дома и вернуться: на пороге запасы перекладываются.
     const lw::Cell door = registry.get<lw::Building>(lone.home).door;
     const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
@@ -1679,11 +1706,11 @@ void testAiCarriesHome() {
     mind.until = lone.world.tick();
     lone.world.syncSpatial();
     lone.run(60);
-    const lw::Supplies& supplies = registry.get<lw::Supplies>(lone.home);
-    const lw::Carry& carry = registry.get<lw::Carry>(lone.person);
+    const lw::Inventory& supplies = registry.get<lw::Inventory>(lone.home);
+    const lw::Inventory& carry = registry.get<lw::Inventory>(lone.person);
     // Что-то могли уже съесть и выпить, но остальное — дома, а не в руках.
-    CHECK(carry.food == 0 && carry.water == 0);
-    CHECK(supplies.food + supplies.water > 0);
+    CHECK(carry.food() == 0 && carry.count(lw::ItemKind::Water) == 0);
+    CHECK(supplies.food() + supplies.count(lw::ItemKind::Water) > 0);
 }
 
 // Путь оборвался не у цели — действие там не выполняется: нельзя поесть из
@@ -1702,7 +1729,7 @@ void testAiArrivesElsewhere() {
     }
     registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
                                                lw::Map::cellCenter(away->y)};
-    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 5);
     registry.get<lw::Needs>(lone.person).hunger = 0.7f;
     registry.get<lw::Walker>(lone.person).waypoints.clear();
     lw::Mind& mind = registry.get<lw::Mind>(lone.person);
@@ -1716,14 +1743,14 @@ void testAiArrivesElsewhere() {
     // запасов — значит, у своей двери.
     bool inPlace = true;
     bool ateAtHome = true;
-    std::uint16_t food = registry.get<lw::Supplies>(lone.home).food;
+    int food = registry.get<lw::Inventory>(lone.home).food();
     for (int i = 0; i < 60 * static_cast<int>(lw::kTicksPerGameMinute); ++i) {
         lone.world.step();
         const lw::Position& position = registry.get<lw::Position>(lone.person);
         const lw::Cell cell = lw::Map::cellAt(position.x, position.y);
         const lw::Mind& now = registry.get<lw::Mind>(lone.person);
         inPlace = inPlace && (now.phase != lw::ActionPhase::Perform || cell == now.spot);
-        const std::uint16_t left = registry.get<lw::Supplies>(lone.home).food;
+        const int left = registry.get<lw::Inventory>(lone.home).food();
         ateAtHome = ateAtHome && (left == food || cell == door);
         food = left;
     }
@@ -1740,13 +1767,13 @@ void testAiStocksUp() {
         return;
     }
     registry.get<lw::Traits>(lone.person).prudence = 1.0f;
-    registry.get<lw::Supplies>(lone.home).food = 0;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 0);
     const auto scavenge = [&] {
         return lw::evaluateActions(lone.world, lone.person)[static_cast<std::size_t>(
             lw::Action::Scavenge)];
     };
     CHECK(scavenge() > 0.0f); // 08:00, сыт, но дома пусто
-    registry.get<lw::Carry>(lone.person).food = 8;
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Food, 8);
     CHECK(scavenge() == 0.0f);
 }
 
@@ -1910,8 +1937,8 @@ void testResources() {
 void testRainFillsBarrels() {
     lw::World world(7, regionConfig());
     entt::registry& registry = world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.water = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Water, 0);
     }
     lw::Weather& weather = world.weather();
     weather.kind = lw::WeatherKind::Storm;
@@ -1928,18 +1955,19 @@ void testRainFillsBarrels() {
     bool withinBarrel = true;
     bool shopsDry = true;
     for (const auto [entity, building, supplies] :
-         registry.view<const lw::Building, const lw::Supplies>().each()) {
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
         const std::uint16_t barrel = lw::rainBarrel(building.kind);
-        filled = filled || supplies.water > 0;
-        withinBarrel = withinBarrel && supplies.water <= barrel;
-        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop || supplies.water == 0);
+        filled = filled || supplies.count(lw::ItemKind::Water) > 0;
+        withinBarrel = withinBarrel && supplies.count(lw::ItemKind::Water) <= barrel;
+        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop ||
+                                 supplies.count(lw::ItemKind::Water) == 0);
     }
     CHECK(filled && withinBarrel && shopsDry);
     // Сутки ливня — дом полон.
     for (const auto [entity, building, supplies] :
-         registry.view<const lw::Building, const lw::Supplies>().each()) {
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
         if (building.kind == lw::BuildingKind::House) {
-            CHECK(supplies.water == lw::rainBarrel(building.kind));
+            CHECK(supplies.count(lw::ItemKind::Water) == lw::rainBarrel(building.kind));
             break;
         }
     }
@@ -1950,8 +1978,8 @@ void testRainFillsBarrels() {
 void testAiForagesFromStock() {
     Lone lone;
     entt::registry& registry = lone.world.registry();
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     lw::Resources& resources = lone.world.resources();
     const long long before = resources.forestTotal();
@@ -1967,8 +1995,8 @@ void testAiForagesFromStock() {
     // Лес пуст — в лес не идут, даже голодные.
     Lone empty;
     entt::registry& emptyRegistry = empty.world.registry();
-    for (const auto [entity, supplies] : emptyRegistry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : emptyRegistry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
     for (const lw::Cell spot : forageSpots(empty.world)) {
         while (empty.world.resources().takeForest(spot)) {
@@ -2036,18 +2064,18 @@ void testChronicleRecords() {
     }
 
     // Последняя порция дома.
-    registry.get<lw::Supplies>(lone.home).food = 1;
+    registry.get<lw::Inventory>(lone.home).set(lw::ItemKind::Food, 1);
     registry.get<lw::Needs>(lone.person).hunger = 0.9f;
     lone.run(90);
-    CHECK(registry.get<lw::Supplies>(lone.home).food == 0);
+    CHECK(registry.get<lw::Inventory>(lone.home).food() == 0);
     CHECK(has(lw::ChronicleKind::AteLastFood, homeId));
     CHECK(chronicle.eventsOf(homeId).size() >= 2); // и дом помнит
 
     // Голод доходит до предела — одно событие, а не по событию каждую минуту.
-    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
-        supplies.food = 0;
+    for (const auto [entity, supplies] : registry.view<lw::Inventory>().each()) {
+        supplies.set(lw::ItemKind::Food, 0);
     }
-    registry.get<lw::Carry>(lone.person) = {};
+    registry.get<lw::Inventory>(lone.person) = {};
     registry.get<lw::Needs>(lone.person).hunger = 0.995f;
     lone.run(30);
     CHECK(chronicle.countOf(lw::ChronicleKind::Starving) == 1);
@@ -2087,6 +2115,1448 @@ void testAiSurvives() {
     CHECK(worst > 0.95f);
     CHECK(hunger < 0.9f && thirst < 0.9f);
     CHECK(actions >= 3); // люди заняты разным
+}
+
+// Индекс шире 64 корзин: карта занятости — несколько слов на строку.
+void testSpatialIndexWide() {
+    constexpr float kWidth = 4000.0f; // 125 корзин по x
+    constexpr float kHeight = 300.0f;
+    entt::registry registry;
+    lw::SpatialIndex index(kWidth, kHeight);
+    registry.on_destroy<lw::Position>().connect<&lw::SpatialIndex::onPositionDestroyed>(index);
+    lw::Rng rng(5);
+    lw::EntityId nextId = 1;
+    std::vector<entt::entity> entities;
+    for (int i = 0; i < 400; ++i) {
+        entities.push_back(spawnAt(registry, nextId++, rng.range(-20.0f, kWidth + 20.0f),
+                                   rng.range(0.0f, kHeight)));
+    }
+    index.sync(registry);
+    // Часть сущностей удалена: опустевшие корзины не должны мешать.
+    for (std::size_t i = 0; i < 150; ++i) {
+        registry.destroy(entities[i * 2]);
+    }
+    for (int query = 0; query < 200; ++query) {
+        const float x = rng.range(-50.0f, kWidth + 50.0f);
+        const float y = rng.range(0.0f, kHeight);
+        const float radius = rng.range(0.0f, 2500.0f);
+        std::vector<lw::EntityId> found;
+        index.forEachInRadius(x, y, radius,
+                              [&](const lw::SpatialHit& hit) { found.push_back(hit.id); });
+        std::vector<lw::EntityId> expected;
+        for (const auto [entity, id, position] :
+             registry.view<const lw::Id, const lw::Position>().each()) {
+            const float dx = position.x - x;
+            const float dy = position.y - y;
+            if (dx * dx + dy * dy <= radius * radius) {
+                expected.push_back(id.value);
+            }
+        }
+        std::sort(found.begin(), found.end());
+        std::sort(expected.begin(), expected.end());
+        CHECK(found == expected);
+    }
+}
+
+// Условия зрения и слуха: ночь, луна, туман, дождь и ветер.
+void testSenseConditions() {
+    const lw::Weather calm;
+    const lw::SenseConditions day = lw::senseConditions(1.0f, calm);
+    CHECK(day.sight == 1.0f && day.hearing == 1.0f);
+    CHECK(lw::senseConditions(0.3f, calm).sight == 1.0f); // пасмурный день — как ясный
+    const float dark = lw::senseConditions(0.015f, calm).sight;
+    const float moon = lw::senseConditions(0.11f, calm).sight;
+    CHECK(dark >= 0.08f && dark < 0.15f);
+    CHECK(moon > 0.4f && moon < 0.55f);
+    CHECK(lw::senseConditions(0.0f, calm).sight == 0.08f);
+
+    lw::Weather fog;
+    fog.fog = 1.0f;
+    CHECK(std::abs(lw::senseConditions(1.0f, fog).sight - 0.2f) < 1e-5f);
+    lw::Weather storm;
+    storm.precipitation = 1.0f;
+    storm.windSpeed = 15.0f;
+    const lw::SenseConditions stormy = lw::senseConditions(1.0f, storm);
+    CHECK(stormy.sight < 0.75f && stormy.hearing < 0.55f && stormy.hearing > 0.4f);
+
+    const lw::Senses senses;
+    CHECK(lw::sightRange(senses, false, day) == senses.sight);
+    CHECK(lw::sightRange(senses, true, day) == 0.0f);
+    CHECK(lw::hearingFactor(senses, true, day) < lw::hearingFactor(senses, false, day));
+}
+
+// Луч зрения: стены закрывают, лес съедает дальность, вода — нет.
+void testSightCost() {
+    lw::Map map(40, 12);
+    // Ряд y = 2: лес в клетках 10..14 (5 клеток).
+    for (int x = 10; x < 15; ++x) {
+        map.cover.at(x, 2) = lw::Cover::Forest;
+    }
+    // Ряд y = 6: озеро в клетках 10..19.
+    for (int x = 10; x < 20; ++x) {
+        map.water.at(x, 6) = lw::Water::Lake;
+        map.depth.at(x, 6) = 20;
+    }
+    entt::registry registry;
+    // Дом 2 × 3 клетки: x = 10..11, y = 9..11.
+    const entt::entity house = registry.create();
+    registry.emplace<lw::Building>(house, lw::BuildingKind::House, lw::Cell{10, 9}, 2, 3,
+                                   lw::Cell{12, 10}, lw::kInvalidId);
+    lw::NavGrid nav;
+    nav.build(map, registry);
+    const auto at = [](int cell) { return lw::Map::cellCenter(cell); };
+
+    // Открытое место: цена — расстояние.
+    CHECK(std::abs(lw::sightCost(map, nav, at(2), at(0), at(30), at(0)) - 112.0f) < 1e-3f);
+    // Через лес: плюс штраф за 5 клеток.
+    CHECK(std::abs(lw::sightCost(map, nav, at(2), at(2), at(30), at(2)) -
+                   (112.0f + 5.0f * lw::kForestSightPenalty)) < 1e-3f);
+    // Клетки наблюдателя и цели не считаются: из леса в соседнюю клетку леса — без штрафа.
+    CHECK(std::abs(lw::sightCost(map, nav, at(10), at(2), at(11), at(2)) - 4.0f) < 1e-3f);
+    // Через озеро видно.
+    CHECK(std::abs(lw::sightCost(map, nav, at(5), at(6), at(25), at(6)) - 80.0f) < 1e-3f);
+    // Через дом — нет; у стены — видно вдоль неё.
+    CHECK(lw::sightCost(map, nav, at(5), at(10), at(25), at(10)) == lw::kNoSight);
+    CHECK(lw::sightCost(map, nav, at(5), at(8), at(25), at(8)) < lw::kNoSight);
+    // Дальше предела — kNoSight, даже на открытом месте.
+    CHECK(lw::sightCost(map, nav, at(2), at(0), at(30), at(0), 100.0f) == lw::kNoSight);
+    CHECK(lw::sightCost(map, nav, at(2), at(2), at(30), at(2), 150.0f) == lw::kNoSight);
+}
+
+// Мир из двух человек на открытом месте: A смотрит, B — цель.
+struct Pair {
+    static constexpr int kRowLength = 30;
+
+    lw::World world;
+    entt::entity a = entt::null;
+    entt::entity b = entt::null;
+    lw::EntityId idA = lw::kInvalidId;
+    lw::EntityId idB = lw::kInvalidId;
+    lw::Cell row; // начало ряда клеток без леса, воды и зданий
+    bool open = false;
+
+    Pair() : world(7, [] {
+                 lw::WorldConfig config = regionConfig();
+                 config.people = 2;
+                 return config;
+             }()) {
+        entt::registry& registry = world.registry();
+        std::vector<entt::entity> people;
+        for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+            people.push_back(entity);
+        }
+        if (people.size() != 2) {
+            return;
+        }
+        a = people[0];
+        b = people[1];
+        idA = registry.get<lw::Id>(a).value;
+        idB = registry.get<lw::Id>(b).value;
+        const lw::Map& map = world.map();
+        const lw::NavGrid& nav = world.nav();
+        for (int y = 0; y < map.height() && !open; ++y) {
+            int run = 0;
+            for (int x = 0; x < map.width() && !open; ++x) {
+                const bool clear = nav.passable({x, y}) && map.water.at(x, y) == lw::Water::None &&
+                                   map.cover.at(x, y) == lw::Cover::None;
+                run = clear ? run + 1 : 0;
+                if (run == kRowLength) {
+                    row = {x - kRowLength + 1, y};
+                    open = true;
+                }
+            }
+        }
+        // Оба стоят и ничего не делают: шума нет.
+        for (const entt::entity entity : {a, b}) {
+            registry.get<lw::Velocity>(entity) = {};
+            registry.get<lw::Mind>(entity).action = lw::Action::Idle;
+            registry.get<lw::Person>(entity).asleep = false;
+        }
+        place(a, 0);
+        place(b, 20);
+    }
+
+    // Поставить в клетку ряда со сдвигом offset клеток.
+    void place(entt::entity entity, int offset) {
+        world.registry().get<lw::Position>(entity) = {lw::Map::cellCenter(row.x + offset),
+                                                      lw::Map::cellCenter(row.y)};
+        world.registry().get<lw::Person>(entity).indoors = false; // на улице
+        world.syncSpatial();
+    }
+
+    const lw::Contact* contact() const {
+        return world.registry().get<lw::Awareness>(a).find(idB);
+    }
+};
+
+void testPerception() {
+    Pair pair;
+    CHECK(pair.open);
+    if (!pair.open) {
+        return;
+    }
+    entt::registry& registry = pair.world.registry();
+    const lw::SenseConditions day{1.0f, 1.0f};
+    const lw::SenseConditions night{0.1f, 1.0f}; // 15 м
+
+    // Днём стоящего в 80 м видно, шагов не слышно.
+    lw::perceive(pair.world, pair.a, day);
+    const lw::Contact* contact = pair.contact();
+    CHECK(contact != nullptr && contact->seen && contact->heard == lw::SoundKind::None);
+    CHECK(contact != nullptr && contact->tick == pair.world.tick());
+
+    // Ночью не видно; идущего слышно только вблизи.
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, night);
+    CHECK(pair.contact() == nullptr);
+    registry.get<lw::Velocity>(pair.b) = {1.4f, 0.0f};
+    pair.place(pair.b, 2); // 8 м
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && contact->seen && contact->heard == lw::SoundKind::Footsteps);
+
+    // Спящий не видит и слышит шаги только совсем рядом.
+    registry.get<lw::Person>(pair.a).asleep = true;
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, day);
+    CHECK(pair.contact() == nullptr);
+    pair.place(pair.b, 0); // в той же клетке
+    lw::perceive(pair.world, pair.a, day);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Footsteps);
+    registry.get<lw::Person>(pair.a).asleep = false;
+
+    // Обыск слышно дальше шагов.
+    registry.get<lw::Velocity>(pair.b) = {};
+    registry.get<lw::Mind>(pair.b).action = lw::Action::Scavenge;
+    registry.get<lw::Mind>(pair.b).phase = lw::ActionPhase::Perform;
+    pair.place(pair.b, 7); // 28 м
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Rummage);
+    registry.get<lw::Mind>(pair.b).action = lw::Action::Idle;
+
+    // Разовый звук: слышен в пределах громкости, контакт — там, где прозвучал;
+    // звук без живого источника (или чужой издалека) контакта не даёт.
+    pair.place(pair.b, 25); // 100 м
+    registry.get<lw::Awareness>(pair.a) = {};
+    const float ax = registry.get<lw::Position>(pair.a).x;
+    const float ay = registry.get<lw::Position>(pair.a).y;
+    pair.world.emitSound(ax + 50.0f, ay, 60.0f, lw::SoundKind::Voice, pair.idB);
+    pair.world.emitSound(ax + 80.0f, ay, 60.0f, lw::SoundKind::Voice, 999999);
+    pair.world.emitSound(ax + 10.0f, ay, 60.0f, lw::SoundKind::Voice);
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Voice);
+    CHECK(contact != nullptr && contact->x == ax + 50.0f);
+    CHECK(registry.get<lw::Awareness>(pair.a).find(999999) == nullptr);
+    CHECK(registry.get<lw::Awareness>(pair.a).count == 1);
+}
+
+// В мире: за kPerceptionIntervalTicks восприятие обновляется у всех, звуки
+// забываются, потерянный контакт помнится kContactMemoryTicks.
+void testPerceptionInWorld() {
+    Pair pair;
+    if (!pair.open) {
+        return;
+    }
+    entt::registry& registry = pair.world.registry();
+    pair.place(pair.b, 3);
+    // Пусть стоят, пока смотрим: решения — не раньше чем через час.
+    for (const entt::entity entity : {pair.a, pair.b}) {
+        lw::Mind& mind = registry.get<lw::Mind>(entity);
+        mind.phase = lw::ActionPhase::Perform;
+        mind.nextThink = pair.world.tick() + lw::kTicksPerGameHour;
+        mind.until = mind.nextThink;
+    }
+    pair.world.emitSound(0.0f, 0.0f, 10.0f, lw::SoundKind::Voice, pair.idB);
+    for (std::uint64_t i = 0; i < lw::kPerceptionIntervalTicks; ++i) {
+        pair.world.step();
+    }
+    const lw::Contact* seen = pair.contact();
+    const lw::Contact* back = registry.get<lw::Awareness>(pair.b).find(pair.idA);
+    CHECK(seen != nullptr && seen->seen && lw::isFresh(*seen, pair.world.tick()));
+    CHECK(back != nullptr && back->seen);
+    for (std::uint64_t i = 0; i < lw::kSoundLifetimeTicks; ++i) {
+        pair.world.step();
+    }
+    CHECK(pair.world.sounds().empty());
+
+    // Унести B за пределы зрения и слуха: контакт помнится, потом забывается.
+    const lw::Position where = registry.get<lw::Position>(pair.b);
+    registry.get<lw::Position>(pair.b) = {where.x + 2000.0f, where.y};
+    pair.world.syncSpatial();
+    for (std::uint64_t i = 0; i < lw::kPerceptionIntervalTicks; ++i) {
+        pair.world.step();
+    }
+    seen = pair.contact();
+    CHECK(seen != nullptr && seen->x == where.x && !lw::isFresh(*seen, pair.world.tick()));
+    for (std::uint64_t i = 0; i < lw::kContactMemoryTicks; ++i) {
+        pair.world.step();
+    }
+    CHECK(pair.contact() == nullptr);
+}
+
+
+// --- Зомби (этап 5.2) ------------------------------------------------------
+
+// Мир 4 × 4 км с людьми, ряд открытых клеток для опытов и ясная погода: днём
+// на ряду видно на всю дальность.
+struct Field {
+    static constexpr int kRowLength = 30;
+
+    lw::World world;
+    lw::Cell row;
+    bool open = false;
+    lw::Rng rng{99};
+    std::vector<entt::entity> people;
+
+    explicit Field(int peopleCount) : world(7, [peopleCount] {
+                                          lw::WorldConfig config = regionConfig();
+                                          config.people = peopleCount;
+                                          return config;
+                                      }()) {
+        const lw::Map& map = world.map();
+        const lw::NavGrid& nav = world.nav();
+        for (int y = 0; y < map.height() && !open; ++y) {
+            int run = 0;
+            for (int x = 0; x < map.width() && !open; ++x) {
+                const bool clear = nav.passable({x, y}) && map.water.at(x, y) == lw::Water::None &&
+                                   map.cover.at(x, y) == lw::Cover::None;
+                run = clear ? run + 1 : 0;
+                if (run == kRowLength) {
+                    row = {x - kRowLength + 1, y};
+                    open = true;
+                }
+            }
+        }
+        lw::Weather& weather = world.weather();
+        weather.kind = lw::WeatherKind::Clear;
+        weather.minutesLeft = 100000;
+        weather.cloudCover = 0.0f;
+        weather.precipitation = 0.0f;
+        weather.fog = 0.0f;
+        for (const auto [entity, person] : world.registry().view<const lw::Person>().each()) {
+            people.push_back(entity);
+        }
+        std::sort(people.begin(), people.end(), [this](entt::entity a, entt::entity b) {
+            return id(a) < id(b);
+        });
+    }
+
+    lw::EntityId id(entt::entity entity) const {
+        return world.registry().get<lw::Id>(entity).value;
+    }
+    lw::Cell at(int offset) const { return {row.x + offset, row.y}; }
+
+    entt::entity zombie(int offset) {
+        const entt::entity entity = lw::createZombie(world, at(offset), rng);
+        world.syncSpatial();
+        return entity;
+    }
+
+    // Поставить в клетку ряда со сдвигом offset клеток.
+    void place(entt::entity entity, int offset, float dy = 0.0f) {
+        world.registry().get<lw::Position>(entity) = {lw::Map::cellCenter(row.x + offset),
+                                                      lw::Map::cellCenter(row.y) + dy};
+        lw::Walker& walker = world.registry().get<lw::Walker>(entity);
+        walker.waypoints.clear();
+        walker.next = 0;
+        if (auto* person = world.registry().try_get<lw::Person>(entity)) {
+            person->indoors = false; // на улице
+        }
+        world.syncSpatial();
+    }
+
+    // Человек без решений: стоит, где поставили (Utility AI его не трогает).
+    void freeze(entt::entity person, int offset) {
+        world.registry().remove<lw::Mind>(person);
+        world.registry().get<lw::Person>(person).asleep = false;
+        place(person, offset);
+    }
+
+    // Убрать человека подальше от ряда, чтобы не мешал.
+    void dismiss(entt::entity person) {
+        world.registry().remove<lw::Mind>(person);
+        const lw::Position& position = world.registry().get<lw::Position>(person);
+        const float far = std::hypot(position.x - lw::Map::cellCenter(row.x),
+                                     position.y - lw::Map::cellCenter(row.y));
+        if (far < 500.0f) {
+            world.registry().get<lw::Position>(person) = {
+                lw::Map::cellCenter(row.x) + (row.x < 512 ? 1500.0f : -1500.0f),
+                lw::Map::cellCenter(row.y)};
+        }
+        world.syncSpatial();
+    }
+
+    void steps(std::uint64_t count) {
+        for (std::uint64_t i = 0; i < count; ++i) {
+            world.step();
+        }
+    }
+
+    float distance(entt::entity a, entt::entity b) const {
+        const lw::Position& pa = world.registry().get<lw::Position>(a);
+        const lw::Position& pb = world.registry().get<lw::Position>(b);
+        return std::hypot(pa.x - pb.x, pa.y - pb.y);
+    }
+
+    std::size_t count(lw::ChronicleKind kind) const { return world.chronicle().countOf(kind); }
+};
+
+// Расселение: сколько просили, подальше от людей, четверть — в ордах; один
+// seed — один мир и с зомби.
+void testZombieSpawn() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 40;
+    config.zombies = 120;
+    lw::World a(11, config);
+    lw::World b(11, config);
+    const entt::registry& registry = a.registry();
+    CHECK(registry.view<const lw::Zombie>().size() == 120);
+    CHECK(registry.view<const lw::Horde>().size() >= 1);
+
+    std::size_t inHordes = 0;
+    float closest = 1e9f;
+    for (const auto [entity, zombie, position] :
+         registry.view<const lw::Zombie, const lw::Position>().each()) {
+        CHECK((registry.all_of<lw::Senses, lw::Awareness, lw::Walker, lw::Velocity>(entity)));
+        if (zombie.horde != lw::kInvalidId) {
+            ++inHordes;
+            const entt::entity horde = a.find(zombie.horde);
+            CHECK(horde != entt::null);
+            if (horde != entt::null) {
+                const auto& members = registry.get<lw::Horde>(horde).members;
+                CHECK(std::binary_search(members.begin(), members.end(),
+                                         registry.get<lw::Id>(entity).value));
+            }
+        }
+        for (const auto [other, person, at] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            closest = std::min(closest, std::hypot(at.x - position.x, at.y - position.y));
+        }
+    }
+    CHECK(inHordes >= 120 / 4 - 12 && inHordes <= 120 / 4);
+    CHECK(closest >= 150.0f - 4.0f); // в клетку от расчётного расстояния
+    for (const auto [entity, horde] : registry.view<const lw::Horde>().each()) {
+        CHECK(horde.members.size() >= 2);
+        CHECK(std::is_sorted(horde.members.begin(), horde.members.end()));
+        CHECK(horde.leader == horde.members.front());
+    }
+    CHECK(a.chronicle().countOf(lw::ChronicleKind::HordeFormed) ==
+          registry.view<const lw::Horde>().size());
+
+    CHECK(a.stateHash() == b.stateHash());
+    for (int i = 0; i < 3000; ++i) {
+        a.step();
+        b.step();
+    }
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Восприятие: зомби не замечает других зомби, человек ставит зомби вперёд.
+void testZombiePerception() {
+    Field field(2);
+    CHECK(field.open && field.people.size() == 2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    const entt::entity a = field.people[0];
+    const entt::entity b = field.people[1];
+    field.freeze(a, 0);
+    field.freeze(b, 2);
+    const entt::entity z1 = field.zombie(12);
+    const entt::entity z2 = field.zombie(13);
+    const lw::SenseConditions day{1.0f, 1.0f};
+    lw::perceive(field.world, a, day);
+    lw::perceive(field.world, z1, day);
+
+    const lw::Awareness& seen = field.world.registry().get<lw::Awareness>(a);
+    CHECK(seen.count == 3);
+    // Ближе всех — человек b, но первым идёт зомби.
+    CHECK(seen.count > 0 && seen.contacts[0].id == field.id(z1));
+    CHECK(seen.find(field.id(b)) != nullptr);
+    const lw::Awareness& hunter = field.world.registry().get<lw::Awareness>(z1);
+    CHECK(hunter.find(field.id(z2)) == nullptr);
+    CHECK(hunter.find(field.id(a)) != nullptr && hunter.find(field.id(a))->seen);
+
+    // Угроза: видит зомби в 48 м — заметная, прочь от него (на запад по ряду).
+    const lw::Threat threat = lw::threatOf(field.world, a);
+    CHECK(threat.count == 2);
+    CHECK(threat.level > 0.2f && threat.level < 0.5f);
+    CHECK(threat.awayX < -0.9f);
+    CHECK(threat.nearest == field.id(z1));
+}
+
+// Погоня: увидел — преследует, созывает стоном, догоняет и держится рядом.
+// Стон слышит другой зомби, который добычу не видит, и идёт на него.
+void testZombieChase() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    const entt::entity hunter = field.zombie(15); // 60 м
+    const entt::entity listener = field.zombie(29); // 116 м от человека, 56 м от первого
+    const entt::registry& registry = field.world.registry();
+
+    // Стон звучит kSoundLifetimeTicks: проверять сразу в тик, когда погнался.
+    for (std::uint64_t i = 0; i < lw::kZombieThinkTicks &&
+                              registry.get<lw::Zombie>(hunter).state != lw::ZombieState::Chase;
+         ++i) {
+        field.steps(1);
+    }
+    const lw::Zombie& zombie = registry.get<lw::Zombie>(hunter);
+    CHECK(zombie.state == lw::ZombieState::Chase);
+    CHECK(zombie.target == field.id(person));
+    CHECK(registry.get<lw::Walker>(hunter).moving());
+    const bool called = std::any_of(
+        field.world.sounds().begin(), field.world.sounds().end(), [&](const lw::Sound& sound) {
+            return sound.kind == lw::SoundKind::Groan && sound.source == field.id(hunter);
+        });
+    CHECK(called);
+
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(listener).state == lw::ZombieState::Investigate);
+
+    // 60 м на 1,3–1,7 м/с — меньше 50 с.
+    field.steps(50 * lw::kTicksPerSecond);
+    CHECK(field.distance(hunter, person) <= 2.0f);
+    CHECK(registry.get<lw::Zombie>(hunter).state == lw::ZombieState::Chase);
+}
+
+// Шум: слышит — идёт туда, стоит и успокаивается; повторно то же место не проверяет.
+void testZombieInvestigates() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.dismiss(person);
+    const entt::entity zombie = field.zombie(0);
+    const entt::registry& registry = field.world.registry();
+    const lw::Position start = registry.get<lw::Position>(zombie);
+    const float noiseX = lw::Map::cellCenter(field.at(10).x);
+    const float noiseY = lw::Map::cellCenter(field.at(10).y);
+    // Источник далеко и не виден: слышен только сам звук.
+    field.world.emitSound(noiseX, noiseY, 60.0f, lw::SoundKind::Voice, field.id(person));
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(zombie).state == lw::ZombieState::Investigate);
+    CHECK(registry.get<lw::Zombie>(zombie).alerted > 0);
+    CHECK(std::abs(registry.get<lw::Walker>(zombie).speed * registry.get<lw::Walker>(zombie).pace -
+                   lw::kInvestigateSpeed) < 1e-3f);
+
+    // 40 м на 0,9 м/с — 45 с, потом стоит до 40 с.
+    bool arrived = false;
+    for (int second = 0; second < 100; ++second) {
+        field.steps(lw::kTicksPerSecond);
+        const lw::Position& at = registry.get<lw::Position>(zombie);
+        arrived = arrived || std::hypot(at.x - noiseX, at.y - noiseY) <= 3.0f;
+    }
+    CHECK(arrived);
+    const lw::Zombie& calm = registry.get<lw::Zombie>(zombie);
+    CHECK(calm.state != lw::ZombieState::Investigate && calm.state != lw::ZombieState::Chase);
+    CHECK(calm.checked > 0);
+    (void)start;
+}
+
+// Человек бежит от зомби бегом, будит его угроза; запоминает опасное место
+// и потом, когда зомби не видно, просто отходит оттуда шагом.
+void testPersonFlees() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    field.place(person, 20);
+    // Безоружный и не храбрец: бежит, а не дерётся.
+    registry.get<lw::Weapon>(person) = {};
+    registry.get<lw::Traits>(person) = {};
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.action = lw::Action::Sleep;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.nextThink = field.world.tick() + lw::kTicksPerGameHour;
+    mind.until = ~std::uint64_t{0};
+    registry.get<lw::Person>(person).asleep = true;
+    // Спящий не видит, но зомби в 4 м видит его, гонится и стонет — это
+    // слышно и во сне.
+    const entt::entity zombie = field.zombie(19);
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Flee);
+    CHECK(!registry.get<lw::Person>(person).asleep);
+    CHECK(std::abs(registry.get<lw::Walker>(person).pace - 1.8f) < 1e-3f);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 1);
+    CHECK(std::any_of(std::begin(registry.get<lw::Mind>(person).dangers),
+                      std::end(registry.get<lw::Mind>(person).dangers),
+                      [&](const lw::Danger& danger) { return danger.until > field.world.tick(); }));
+    const auto& events = field.world.chronicle().events();
+    const auto fled =
+        std::find_if(events.begin(), events.end(), [](const lw::ChronicleEvent& event) {
+            return event.kind == lw::ChronicleKind::Fled;
+        });
+    CHECK(fled != events.end() && fled->object == field.id(zombie) && fled->a == 1);
+
+    // Бегом быстрее погони: отрыв растёт хотя бы на 0,46 м/с.
+    field.steps(20 * lw::kTicksPerSecond);
+    CHECK(field.distance(person, zombie) > 8.0f);
+
+    // Зомби нет, а место помнится: стоя там, человек хочет уйти, и идёт шагом.
+    field.world.destroy(zombie);
+    field.place(person, 15);
+    lw::Mind& wary = registry.get<lw::Mind>(person);
+    for (lw::Danger& danger : wary.dangers) {
+        danger = {};
+    }
+    wary.dangers[0] = {field.at(16), field.world.tick() + lw::kTicksPerGameHour};
+    wary.action = lw::Action::Idle;
+    wary.phase = lw::ActionPhase::Perform;
+    wary.until = field.world.tick();
+    lw::Needs& needs = registry.get<lw::Needs>(person);
+    needs = {};
+    const lw::ActionScores scores = lw::evaluateActions(field.world, person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Flee)] > 0.2f);
+    field.steps(1);
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Flee);
+    CHECK(registry.get<lw::Walker>(person).pace == 1.0f);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 1); // отход — не бегство
+}
+
+// Орда держится вожака; одиночки, сбежавшиеся на шум, сбиваются в орду;
+// близкие орды сливаются; одиночку у орды она подбирает; из одного — распадается.
+void testHordes() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    entt::registry& registry = field.world.registry();
+
+    // Сбор на шум.
+    // Пусть стоят, пока не соберутся: иначе разбредутся.
+    const auto still = [&](entt::entity zombie) {
+        registry.get<lw::Zombie>(zombie).until = field.world.tick() + 100000;
+        return zombie;
+    };
+    std::vector<lw::EntityId> gathered;
+    for (int i = 0; i < 6; ++i) {
+        const entt::entity zombie = still(field.zombie(i));
+        registry.get<lw::Zombie>(zombie).alerted = field.world.tick() + 1;
+        gathered.push_back(field.id(zombie));
+    }
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(registry.view<const lw::Horde>().size() == 1);
+    CHECK(field.count(lw::ChronicleKind::HordeFormed) == 1);
+    lw::EntityId first = lw::kInvalidId;
+    for (const auto [entity, id, horde] : registry.view<const lw::Id, const lw::Horde>().each()) {
+        first = id.value;
+        CHECK(horde.members == gathered);
+        CHECK(horde.leader == gathered.front());
+    }
+    CHECK(field.world.chronicle().events().back().b == 1);
+
+    // Вторая орда рядом — сливаются в одну.
+    std::vector<lw::EntityId> second;
+    for (int i = 0; i < 3; ++i) {
+        second.push_back(field.id(still(field.zombie(9 + i))));
+    }
+    lw::formHorde(field.world, second, lw::HordeOrigin::Start);
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(registry.view<const lw::Horde>().size() == 1);
+    CHECK(field.count(lw::ChronicleKind::HordeMerged) == 1);
+    const entt::entity horde = field.world.find(first);
+    CHECK(horde != entt::null);
+    if (horde == entt::null) {
+        return;
+    }
+    CHECK(registry.get<lw::Horde>(horde).members.size() == 9);
+
+    // Одиночка у орды пристаёт к ней (вероятность 0,3 за обновление).
+    const entt::entity loner = still(field.zombie(5));
+    for (int i = 0; i < 30 && registry.get<lw::Zombie>(loner).horde == lw::kInvalidId; ++i) {
+        field.steps(lw::kHordeUpdateTicks);
+    }
+    CHECK(registry.get<lw::Zombie>(loner).horde == first);
+
+    // Две минуты: все держатся вожака.
+    field.steps(120 * lw::kTicksPerSecond);
+    const lw::Horde& info = registry.get<lw::Horde>(horde);
+    const entt::entity leader = field.world.find(info.leader);
+    for (const lw::EntityId member : info.members) {
+        CHECK(field.distance(field.world.find(member), leader) < 30.0f);
+        CHECK(registry.get<lw::Zombie>(field.world.find(member)).state ==
+              (member == info.leader ? registry.get<lw::Zombie>(leader).state
+                                     : lw::ZombieState::Follow));
+    }
+
+    // Остался один — орда распалась.
+    const std::vector<lw::EntityId> members = info.members;
+    for (std::size_t i = 1; i < members.size(); ++i) {
+        field.world.destroy(field.world.find(members[i]));
+    }
+    field.steps(lw::kHordeUpdateTicks);
+    CHECK(field.world.find(first) == entt::null);
+    CHECK(field.count(lw::ChronicleKind::HordeScattered) == 1);
+    CHECK(registry.get<lw::Zombie>(field.world.find(members[0])).horde == lw::kInvalidId);
+}
+
+
+// Дом — укрытие: зомби у двери не видит человека, а тот не выбегает.
+void testShelter() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    CHECK(registry.get<lw::Person>(person).indoors); // утро застаёт дома
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.nextThink = field.world.tick() + lw::kTicksPerGameHour;
+    mind.until = mind.nextThink;
+    const lw::Position& at = registry.get<lw::Position>(person);
+    const auto near = field.world.nav().nearestPassable(
+        lw::Map::cellAt(at.x + 3.0f * lw::Map::kCellSize, at.y), 2);
+    CHECK(near.has_value());
+    if (!near) {
+        return;
+    }
+    const entt::entity zombie = lw::createZombie(field.world, *near, field.rng);
+    field.world.syncSpatial();
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(person)) == nullptr);
+    // Сам он зомби видит, боится, но сидит дома.
+    CHECK(registry.get<lw::Awareness>(person).find(field.id(zombie)) != nullptr);
+    CHECK(registry.get<lw::Mind>(person).action != lw::Action::Flee);
+    CHECK(registry.get<lw::Person>(person).indoors);
+    CHECK(field.count(lw::ChronicleKind::Fled) == 0);
+}
+
+
+// --- Животные и птицы (этап 5.3) ---------------------------------------------
+
+// Расселение: сколько просили, по видам, вдали от людей; один seed — один мир.
+void testAnimalSpawn() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 40;
+    config.animals = 40;
+    config.flocks = 6;
+    lw::World a(11, config);
+    lw::World b(11, config);
+    const entt::registry& registry = a.registry();
+    CHECK(registry.view<const lw::Animal>().size() == 40);
+    CHECK(registry.view<const lw::Flock>().size() == 6);
+    std::size_t kinds[3] = {};
+    float closest = 1e9f;
+    for (const auto [entity, animal, position] :
+         registry.view<const lw::Animal, const lw::Position>().each()) {
+        CHECK((registry.all_of<lw::Senses, lw::Awareness, lw::Walker, lw::Velocity>(entity)));
+        ++kinds[static_cast<std::size_t>(animal.kind)];
+        for (const auto [other, person, at] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            closest = std::min(closest, std::hypot(at.x - position.x, at.y - position.y));
+        }
+    }
+    CHECK(kinds[0] == 20 && kinds[1] == 10 && kinds[2] == 10);
+    CHECK(closest >= 300.0f - 4.0f * lw::Map::kCellSize);
+
+    CHECK(a.stateHash() == b.stateHash());
+    for (int i = 0; i < 3000; ++i) {
+        a.step();
+        b.step();
+    }
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Олень видит человека — убегает бегом и отрывается.
+void testAnimalFlees() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    const entt::entity deer = lw::createAnimal(field.world, lw::AnimalKind::Deer, field.at(12), field.rng);
+    field.world.syncSpatial();
+    const entt::registry& registry = field.world.registry();
+    field.steps(2 * lw::kAnimalThinkTicks);
+    const lw::Animal& animal = registry.get<lw::Animal>(deer);
+    CHECK(animal.state == lw::AnimalState::Flee);
+    CHECK(animal.threat == field.id(person));
+    const lw::Walker& walker = registry.get<lw::Walker>(deer);
+    CHECK(walker.moving());
+    CHECK(std::abs(walker.speed * walker.pace - lw::animalSpec(lw::AnimalKind::Deer).runSpeed) < 1e-3f);
+    field.steps(5 * lw::kTicksPerSecond);
+    CHECK(field.distance(deer, person) > 70.0f);
+}
+
+// Зомби животных не замечают, а животные от зомби убегают.
+void testZombieIgnoresAnimals() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    const entt::entity boar = lw::createAnimal(field.world, lw::AnimalKind::Boar, field.at(0), field.rng);
+    const entt::entity zombie = field.zombie(5);
+    const entt::registry& registry = field.world.registry();
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(boar)) == nullptr);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+    CHECK(registry.get<lw::Awareness>(boar).find(field.id(zombie)) != nullptr);
+    CHECK(registry.get<lw::Animal>(boar).state == lw::AnimalState::Flee);
+}
+
+// Человек рядом — стая взлетает с криком; зомби, который человека не видит,
+// идёт на крик. Стая улетает на сотни метров и садится.
+void testBirdsScatter() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 1);
+    const entt::entity flock = lw::createFlock(field.world, field.at(0), 12, field.rng);
+    const entt::entity zombie = field.zombie(22); // 88 м: человека не видит, крик слышит
+    const entt::registry& registry = field.world.registry();
+    const lw::Position start = registry.get<lw::Position>(flock);
+    for (std::uint64_t i = 0; i < lw::kAnimalThinkTicks && !registry.get<lw::Flock>(flock).flying; ++i) {
+        field.steps(1);
+    }
+    CHECK(registry.get<lw::Flock>(flock).flying);
+    const bool cried = std::any_of(
+        field.world.sounds().begin(), field.world.sounds().end(), [&](const lw::Sound& sound) {
+            return sound.kind == lw::SoundKind::Birds && sound.source == field.id(flock);
+        });
+    CHECK(cried);
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(person)) == nullptr ||
+          !registry.get<lw::Awareness>(zombie).find(field.id(person))->seen);
+    CHECK(registry.get<lw::Zombie>(zombie).state == lw::ZombieState::Investigate);
+
+    for (int second = 0; second < 90 && registry.get<lw::Flock>(flock).flying; ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(!registry.get<lw::Flock>(flock).flying);
+    const lw::Position& end = registry.get<lw::Position>(flock);
+    CHECK(std::hypot(end.x - start.x, end.y - start.y) >= 290.0f);
+}
+
+
+// --- Бой (этап 5.4) ---------------------------------------------------------
+
+// Поставить существо в точку ряда со сдвигом в метрах.
+void putAt(Field& field, entt::entity entity, float meters) {
+    field.place(entity, 0);
+    field.world.registry().get<lw::Position>(entity).x += meters;
+    field.world.syncSpatial();
+}
+
+std::size_t countBodies(const lw::World& world, lw::CorpseKind kind) {
+    std::size_t count = 0;
+    for (const auto [entity, corpse] : world.registry().view<const lw::Corpse>().each()) {
+        count += corpse.kind == kind ? 1 : 0;
+    }
+    return count;
+}
+
+// Топор против зомби вплотную: зомби упокоен и стал телом с тем же id.
+void testMeleeKillsZombie() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Axe, 0};
+    const entt::entity zombie = field.zombie(0);
+    putAt(field, zombie, 1.0f);
+    const lw::EntityId zombieId = field.id(zombie);
+    registry.get<lw::Combat>(person).target = zombieId;
+    for (int second = 0; second < 30 && !registry.all_of<lw::Corpse>(zombie); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(field.world.find(zombieId) == zombie);
+    CHECK(registry.all_of<lw::Corpse>(zombie));
+    CHECK((!registry.any_of<lw::Zombie, lw::Walker, lw::Senses, lw::Awareness, lw::Combat>(zombie)));
+    CHECK(registry.all_of<lw::Position>(zombie));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(zombie)) {
+        CHECK(corpse->kind == lw::CorpseKind::Zombie);
+        CHECK(corpse->killer == field.id(person));
+    }
+    CHECK(field.count(lw::ChronicleKind::KilledZombie) == 1);
+    const auto& events = field.world.chronicle().events();
+    const auto killed = std::find_if(events.begin(), events.end(), [](const lw::ChronicleEvent& e) {
+        return e.kind == lw::ChronicleKind::KilledZombie;
+    });
+    CHECK(killed != events.end() && killed->a == static_cast<int>(lw::WeaponKind::Axe));
+    // Тело не мешает живым: человек больше никого не бьёт.
+    field.steps(lw::kTicksPerSecond);
+    CHECK(registry.get<lw::Combat>(person).target == lw::kInvalidId);
+}
+
+// Выстрел тратит патрон, слышен далеко: зомби, который стрелка не видит, идёт на звук.
+void testGunshotIsHeard() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Rifle, 10};
+    const entt::entity target = field.zombie(20); // 80 м: человека не видит
+    const lw::EntityId targetId = field.id(target);
+    // Слушатель — в конце ряда, в 116 м: человека не видит, выстрел винтовки слышен в 450 м.
+    const entt::entity listener = field.zombie(29);
+    registry.get<lw::Combat>(person).target = targetId;
+    field.steps(1);
+    CHECK(registry.get<lw::Weapon>(person).ammo == 9);
+    const bool shot = std::any_of(field.world.sounds().begin(), field.world.sounds().end(),
+                                  [&](const lw::Sound& sound) {
+                                      return sound.kind == lw::SoundKind::Gunshot &&
+                                             sound.source == field.id(person);
+                                  });
+    CHECK(shot);
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(listener).state == lw::ZombieState::Investigate);
+    for (int second = 0; second < 20 && !registry.all_of<lw::Corpse>(target); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(target));
+    CHECK(registry.get<lw::Weapon>(person).ammo < 9);
+}
+
+// Зомби бьёт того, кого догнал: раны, кровотечение, крик; без защиты человек гибнет
+// и становится телом.
+void testZombieKillsPerson() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    const lw::EntityId personId = field.id(person);
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    const entt::entity zombie = field.zombie(0);
+    putAt(field, zombie, 1.0f);
+    bool screamed = false;
+    for (int tick = 0; tick < 20 * lw::kTicksPerSecond; ++tick) {
+        field.steps(1);
+        screamed = screamed || std::any_of(field.world.sounds().begin(), field.world.sounds().end(),
+                                           [&](const lw::Sound& sound) {
+                                               return sound.kind == lw::SoundKind::Scream &&
+                                                      sound.source == personId;
+                                           });
+    }
+    CHECK(screamed);
+    CHECK(registry.all_of<lw::Corpse>(person) || registry.get<lw::Needs>(person).health < 0.9f);
+    if (registry.all_of<lw::Wounds>(person)) {
+        CHECK(registry.get<lw::Wounds>(person).hurtBy == field.id(zombie));
+    }
+    for (int second = 0; second < 300 && !registry.all_of<lw::Corpse>(person); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(person));
+    CHECK((!registry.any_of<lw::Person, lw::Mind, lw::Needs, lw::Walker>(person)));
+    CHECK((registry.all_of<lw::Weapon, lw::Traits>(person))); // при теле
+    CHECK(field.world.find(personId) == person);
+    CHECK(field.count(lw::ChronicleKind::Died) == 1);
+    CHECK(countBodies(field.world, lw::CorpseKind::Human) == 1);
+    // Тело зомби больше не интересно: он не бьёт и не гонится.
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Combat>(zombie).target == lw::kInvalidId);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+}
+
+// Смелый с топором не бежит от одного зомби, а дерётся и побеждает.
+void testPersonFightsZombie() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    field.place(person, 0);
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Axe, 0};
+    lw::Traits& traits = registry.get<lw::Traits>(person);
+    traits.bravery = 1.0f;
+    traits.aggression = 1.0f;
+    registry.get<lw::Needs>(person) = {};
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = field.world.tick() + lw::kTicksPerGameHour;
+    mind.nextThink = mind.until;
+    const entt::entity zombie = field.zombie(8); // 32 м
+    for (int i = 0; i < 4 && registry.get<lw::Mind>(person).action != lw::Action::Fight; ++i) {
+        field.steps(lw::kPerceptionIntervalTicks);
+    }
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Fight);
+    CHECK(registry.get<lw::Combat>(person).target == field.id(zombie));
+    for (int second = 0; second < 90 && !registry.all_of<lw::Corpse>(zombie); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(zombie));
+    CHECK(field.count(lw::ChronicleKind::KilledZombie) == 1);
+    // Угрозы нет — бой кончился, человек занят другим.
+    field.steps(lw::kTicksPerSecond);
+    if (registry.all_of<lw::Mind>(person)) {
+        CHECK(registry.get<lw::Mind>(person).action != lw::Action::Fight);
+        CHECK(registry.get<lw::Combat>(person).target == lw::kInvalidId);
+    }
+}
+
+// Голодный с винтовкой, когда в лесу пусто, охотится: выслеживает оленя,
+// стреляет, разделывает тушу и несёт мясо.
+void testHunting() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    // Лес пуст: собирать нечего.
+    const lw::Places::SpotGrid& spots = world.places().forageSpots();
+    for (int y = 0; y < spots.height(); ++y) {
+        for (int x = 0; x < spots.width(); ++x) {
+            if (const auto& spot = spots.at(x, y)) {
+                while (world.resources().takeForest(*spot)) {
+                }
+            }
+        }
+    }
+    const entt::entity hunter = field.people[0];
+    field.place(hunter, 0);
+    registry.get<lw::Weapon>(hunter) = {lw::WeaponKind::Rifle, 8};
+    lw::Needs& needs = registry.get<lw::Needs>(hunter);
+    needs = {};
+    needs.hunger = 0.9f;
+    registry.get<lw::Inventory>(hunter) = {};
+    if (const entt::entity home = world.find(registry.get<lw::Person>(hunter).home); home != entt::null) {
+        registry.get<lw::Inventory>(home).set(lw::ItemKind::Food, 0);
+    }
+    lw::Mind& mind = registry.get<lw::Mind>(hunter);
+    mind.emptySearches = 255; // округа обобрана
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = world.tick();
+    const entt::entity deer = lw::createAnimal(world, lw::AnimalKind::Deer, field.at(15), field.rng);
+    world.syncSpatial();
+    const lw::ActionScores scores = lw::evaluateActions(world, hunter);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Hunt)] > 0.5f);
+    field.steps(1);
+    CHECK(registry.get<lw::Mind>(hunter).action == lw::Action::Hunt);
+    for (int minute = 0; minute < 180 && field.count(lw::ChronicleKind::Butchered) == 0; ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(field.count(lw::ChronicleKind::Hunted) == 1);
+    CHECK(field.count(lw::ChronicleKind::Butchered) == 1);
+    CHECK(registry.all_of<lw::Corpse>(deer));
+    if (const auto* carcass = registry.try_get<lw::Corpse>(deer)) {
+        CHECK(carcass->kind == lw::CorpseKind::Animal && carcass->animal == lw::AnimalKind::Deer);
+        CHECK(carcass->meat < 8);
+    }
+    if (registry.all_of<lw::Inventory>(hunter)) {
+        CHECK(registry.get<lw::Inventory>(hunter).food() > 0);
+        CHECK(registry.get<lw::Needs>(hunter).hunger < 0.9f);
+        CHECK(registry.get<lw::Weapon>(hunter).ammo < 8);
+    }
+}
+
+
+// --- Смерть, тела, заражение (этап 5.5) ---------------------------------------
+
+// Укушенный сгорает от заражения и встаёт зомби той же сущностью; оружие при нём.
+void testInfectionTurns() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    const lw::EntityId id = field.id(person);
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Knife, 0};
+    lw::Wounds& wounds = registry.get<lw::Wounds>(person);
+    wounds.bites = 1;
+    wounds.infection = 0.97f;
+    for (int minute = 0; minute < 120 && !registry.all_of<lw::Corpse>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(registry.all_of<lw::Corpse>(person));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(person)) {
+        CHECK(corpse->cause == lw::DeathCause::Infection);
+        CHECK(corpse->turnsAt >= corpse->diedAt + lw::kTurnMinMinutes * lw::kTicksPerGameMinute);
+        CHECK(corpse->turnsAt <= corpse->diedAt + lw::kTurnMaxMinutes * lw::kTicksPerGameMinute);
+    }
+    for (int minute = 0; minute < 60 && !registry.all_of<lw::Zombie>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(field.world.find(id) == person);
+    CHECK((registry.all_of<lw::Zombie, lw::Walker, lw::Senses, lw::Awareness, lw::Combat>(person)));
+    CHECK(!registry.all_of<lw::Corpse>(person));
+    CHECK(registry.all_of<lw::Weapon>(person));
+    CHECK(field.count(lw::ChronicleKind::Turned) == 1);
+    CHECK(field.count(lw::ChronicleKind::Died) == 1);
+    // Обратившийся бьёт как зомби, а не ножом.
+    const lw::AttackSpec* spec = lw::attackOf(registry, person);
+    CHECK(spec == &lw::zombieAttack());
+    field.steps(100);
+}
+
+// Здоровье кончилось от голода — смерть от голода; неукушенный не встаёт.
+void testStarvationDeath() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    lw::Needs& needs = registry.get<lw::Needs>(person);
+    needs.hunger = 1.0f;
+    needs.thirst = 0.5f;
+    needs.health = 0.0001f;
+    field.steps(2 * lw::kTicksPerGameMinute);
+    CHECK(registry.all_of<lw::Corpse>(person));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(person)) {
+        CHECK(corpse->cause == lw::DeathCause::Starvation);
+        CHECK(corpse->turnsAt == 0);
+    }
+}
+
+// Мясо в туше портится, тела разлагаются и исчезают.
+void testBodiesDecay() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity deer = lw::createAnimal(world, lw::AnimalKind::Deer, field.at(0), field.rng);
+    const entt::entity zombie = field.zombie(10);
+    lw::die(world, deer, lw::DeathCause::Wounds, lw::kInvalidId);
+    lw::die(world, zombie, lw::DeathCause::Wounds, lw::kInvalidId);
+    const lw::EntityId deerId = field.id(deer);
+    const lw::EntityId zombieId = field.id(zombie);
+    CHECK(registry.get<lw::Corpse>(deer).meat == lw::carcassMeat(lw::AnimalKind::Deer));
+    // Состарить: туше — сутки, телу — почти до разложения.
+    const std::uint64_t now = world.tick();
+    registry.get<lw::Corpse>(deer).diedAt = now - lw::kMeatSpoilTicks;
+    registry.get<lw::Corpse>(zombie).diedAt = now - lw::kBodyDecayTicks + 2 * lw::kTicksPerGameMinute;
+    field.steps(lw::kTicksPerGameMinute + 1);
+    CHECK(world.find(deerId) != entt::null && registry.get<lw::Corpse>(deer).meat == 0);
+    CHECK(world.find(zombieId) != entt::null);
+    // Беззнаковая разность: «умер столько-то тиков назад» верно и в начале мира.
+    registry.get<lw::Corpse>(deer).diedAt = world.tick() - lw::kCarcassDecayTicks;
+    field.steps(2 * lw::kTicksPerGameMinute);
+    CHECK(world.find(deerId) == entt::null);
+    CHECK(world.find(zombieId) == entt::null);
+}
+
+// Тело человека рядом пугает.
+void testBodyScares() {
+    Field field(2);
+    CHECK(field.open && field.people.size() == 2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    const entt::entity alive = field.people[0];
+    const entt::entity dead = field.people[1];
+    field.freeze(alive, 0);
+    field.freeze(dead, 1);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Traits>(alive) = {};
+    registry.get<lw::Needs>(alive) = {};
+    lw::die(field.world, dead, lw::DeathCause::Wounds, lw::kInvalidId);
+    field.steps(60 * lw::kTicksPerGameMinute);
+    CHECK(registry.get<lw::Needs>(alive).fear > 0.1f);
+}
+
+// Перелетая сама, стая садится у тела.
+void testCrowsFlyToBody() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity zombie = field.zombie(29);
+    lw::die(world, zombie, lw::DeathCause::Wounds, lw::kInvalidId);
+    const entt::entity flock = lw::createFlock(world, field.at(0), 10, field.rng);
+    registry.get<lw::Flock>(flock).until = world.tick();
+    world.syncSpatial();
+    for (std::uint64_t i = 0; i < lw::kAnimalThinkTicks && !registry.get<lw::Flock>(flock).flying; ++i) {
+        field.steps(1);
+    }
+    CHECK(registry.get<lw::Flock>(flock).flying);
+    for (int second = 0; second < 30 && registry.get<lw::Flock>(flock).flying; ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(field.distance(flock, zombie) <= 6.0f);
+}
+
+
+// --- Инвентарь и лут (этап 5.6) -------------------------------------------------
+
+// Предметы: вес, место, лучшее оружие с учётом патронов, мясо — первым.
+void testInventory() {
+    using K = lw::ItemKind;
+    lw::Inventory inventory;
+    inventory.set(K::Water, 10);
+    CHECK(std::abs(lw::inventoryWeight(inventory) - 10.0f) < 1e-4f);
+    CHECK(lw::roomFor(inventory, K::Food) == 10); // 5 кг свободно по 0,5 кг
+    CHECK(inventory.take(K::Water, 4) == 4 && inventory.count(K::Water) == 6);
+    CHECK(inventory.take(K::Water, 40) == 6 && inventory.empty());
+
+    // Ружьё без патронов хуже топора, с патронами — лучше.
+    lw::Weapon weapon{lw::WeaponKind::Axe, 0};
+    inventory.set(K::Rifle, 1);
+    CHECK(!lw::equipBest(weapon, inventory));
+    CHECK(weapon.kind == lw::WeaponKind::Axe);
+    inventory.set(K::RifleAmmo, 5);
+    CHECK(lw::equipBest(weapon, inventory));
+    CHECK(weapon.kind == lw::WeaponKind::Rifle && weapon.ammo == 5);
+    CHECK(inventory.count(K::Rifle) == 0 && inventory.count(K::RifleAmmo) == 0);
+    CHECK(inventory.count(K::Axe) == 1); // прежнее — в инвентарь
+
+    inventory = {};
+    inventory.set(K::Food, 1);
+    inventory.set(K::Meat, 1);
+    CHECK(lw::eatFrom(inventory) && inventory.count(K::Meat) == 0 && inventory.count(K::Food) == 1);
+}
+
+// Лут в зданиях: снаряжение есть, в магазинах нет ружей; один seed — один лут.
+void testLootSpawn() {
+    const lw::World a(7, regionConfig());
+    const lw::World b(7, regionConfig());
+    const entt::registry& registry = a.registry();
+    long long bandages = 0;
+    bool shopGuns = false;
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        bandages += inventory.count(lw::ItemKind::Bandage);
+        if (building.kind == lw::BuildingKind::Shop) {
+            shopGuns = shopGuns || inventory.count(lw::ItemKind::Pistol) +
+                                           inventory.count(lw::ItemKind::Shotgun) +
+                                           inventory.count(lw::ItemKind::Rifle) > 0;
+        }
+    }
+    CHECK(bandages > 0);
+    CHECK(!shopGuns);
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Голодный обыскивает здание: кроме еды, берёт ружьё с патронами и бинты.
+void testScavengeTakesGear() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, lw::Inventory>().each()) {
+        inventory = {};
+        inventory.set(lw::ItemKind::Food, 3);
+        inventory.set(lw::ItemKind::Rifle, 1);
+        inventory.set(lw::ItemKind::RifleAmmo, 6);
+        inventory.set(lw::ItemKind::Bandage, 2);
+    }
+    registry.get<lw::Inventory>(lone.home) = {};
+    registry.get<lw::Inventory>(lone.person) = {};
+    registry.get<lw::Weapon>(lone.person) = {lw::WeaponKind::Knife, 0};
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool found = false;
+    for (int minute = 0; minute < 8 * 60 && !found; minute += 10) {
+        lone.run(10);
+        found = lone.world.chronicle().countOf(lw::ChronicleKind::FoundWeapon) > 0;
+    }
+    CHECK(found);
+    const lw::Weapon& weapon = registry.get<lw::Weapon>(lone.person);
+    CHECK(weapon.kind == lw::WeaponKind::Rifle && weapon.ammo == 6);
+    CHECK(registry.get<lw::Inventory>(lone.person).count(lw::ItemKind::Bandage) >= 2);
+}
+
+// Течёт кровь, есть бинт — перевязывается, кровотечение останавливается.
+void testTreatsWound() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    registry.get<lw::Inventory>(lone.person).set(lw::ItemKind::Bandage, 1);
+    registry.get<lw::Wounds>(lone.person).bleeding = 0.3f;
+    const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Treat)] > 0.9f);
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = lone.world.tick();
+    lone.run(10);
+    CHECK(registry.get<lw::Wounds>(lone.person).bleeding == 0.0f);
+    CHECK(registry.get<lw::Inventory>(lone.person).count(lw::ItemKind::Bandage) == 0);
+    CHECK(lone.world.chronicle().countOf(lw::ChronicleKind::Treated) == 1);
+}
+
+// Тело с вещами рядом обыскивают раньше зданий: дробовик погибшего — в руки.
+void testLootsBody() {
+    Lone lone;
+    lw::World& world = lone.world;
+    entt::registry& registry = world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, lw::Inventory>().each()) {
+        inventory.set(lw::ItemKind::Food, 0);
+    }
+    registry.get<lw::Inventory>(lone.person) = {};
+    registry.get<lw::Weapon>(lone.person) = {};
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto near = world.nav().nearestPassable({door.x + 10, door.y}, 6);
+    CHECK(near.has_value());
+    if (!near) {
+        return;
+    }
+    lw::Rng rng(5);
+    const entt::entity body = lw::createZombie(world, *near, rng);
+    lw::Inventory loot;
+    loot.set(lw::ItemKind::Food, 2);
+    registry.emplace<lw::Inventory>(body, loot);
+    registry.emplace<lw::Weapon>(body, lw::Weapon{lw::WeaponKind::Shotgun, 4});
+    lw::die(world, body, lw::DeathCause::Wounds, lw::kInvalidId);
+    world.syncSpatial();
+    bool looted = false;
+    for (int minute = 0; minute < 4 * 60 && !looted; minute += 10) {
+        lone.run(10);
+        looted = world.chronicle().countOf(lw::ChronicleKind::LootedBody) > 0;
+    }
+    CHECK(looted);
+    CHECK(registry.get<lw::Weapon>(lone.person).kind == lw::WeaponKind::Shotgun);
+    CHECK(registry.get<lw::Weapon>(lone.person).ammo == 4);
+    CHECK(registry.get<lw::Weapon>(body).kind == lw::WeaponKind::Fists);
+}
+
+// Мясо портится: к полуночи от запаса остаётся половина.
+void testMeatSpoils() {
+    lw::World world(7, regionConfig());
+    entt::registry& registry = world.registry();
+    const entt::entity building = *registry.view<lw::Building>().begin();
+    registry.get<lw::Inventory>(building).set(lw::ItemKind::Meat, 8);
+    const std::uint64_t end = world.tick() + lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    CHECK(registry.get<lw::Inventory>(building).count(lw::ItemKind::Meat) == 4);
+}
+
+
+// --- Дефицит и распределение (этап 5.7) ------------------------------------------
+
+// Выбитых зверей восполняют пришедшие издалека: по группе вида в сутки.
+void testAnimalsReturn() {
+    lw::WorldConfig config = regionConfig();
+    config.animals = 20;
+    lw::World world(11, config);
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> deer;
+    for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+        if (animal.kind == lw::AnimalKind::Deer) {
+            deer.push_back(entity);
+        }
+    }
+    CHECK(deer.size() == 10);
+    for (const entt::entity entity : deer) {
+        lw::die(world, entity, lw::DeathCause::Wounds, lw::kInvalidId);
+    }
+    const auto alive = [&] {
+        std::size_t count = 0;
+        for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+            count += animal.kind == lw::AnimalKind::Deer ? 1 : 0;
+        }
+        return count;
+    };
+    CHECK(alive() == 0);
+    const std::uint64_t end = world.tick() + 3 * lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    // Три полуночи — три стада по 2–5, но не больше начального числа.
+    CHECK(alive() >= 6 && alive() <= 10);
+}
+
+// В каждом городе есть аптека: магазин с лекарствами.
+void testPharmacies() {
+    const lw::World world(7, regionConfig());
+    const entt::registry& registry = world.registry();
+    for (const lw::Places::SettlementPlace& place : world.places().settlements()) {
+        const lw::Settlement& settlement = registry.get<lw::Settlement>(world.find(place.id));
+        if (settlement.kind != lw::SettlementKind::Town) {
+            continue;
+        }
+        bool pharmacy = false;
+        for (const lw::Places::BuildingPlace& building : place.buildings) {
+            pharmacy = pharmacy ||
+                       (building.kind == lw::BuildingKind::Shop &&
+                        registry.get<lw::Inventory>(world.find(building.id)).count(lw::ItemKind::Medicine) >= 4);
+        }
+        const bool hasShop = std::any_of(place.buildings.begin(), place.buildings.end(),
+                                         [](const lw::Places::BuildingPlace& b) {
+                                             return b.kind == lw::BuildingKind::Shop;
+                                         });
+        CHECK(pharmacy || !hasShop);
+    }
+}
+
+
+// Упокоенных зомби заменяют пришедшие издалека: в полночь — орда.
+void testZombiesArrive() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 10;
+    config.zombies = 40;
+    lw::World world(11, config);
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> zombies;
+    for (const auto [entity, zombie] : registry.view<const lw::Zombie>().each()) {
+        zombies.push_back(entity);
+    }
+    CHECK(zombies.size() == 40);
+    for (std::size_t i = 0; i < 20; ++i) {
+        lw::die(world, zombies[i], lw::DeathCause::Wounds, lw::kInvalidId);
+    }
+    const std::size_t formed = world.chronicle().countOf(lw::ChronicleKind::HordeFormed);
+    const std::uint64_t end = world.tick() + lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+    }
+    const std::size_t alive = registry.view<const lw::Zombie>().size();
+    CHECK(alive >= 20 + lw::kArrivalMin - 2 && alive <= 36); // не больше 90 %; кого-то могли упокоить
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::HordeFormed) > formed);
+    const auto& events = world.chronicle().events();
+    CHECK(std::any_of(events.begin(), events.end(), [](const lw::ChronicleEvent& e) {
+        return e.kind == lw::ChronicleKind::HordeFormed && e.b == 2;
+    }));
 }
 
 } // namespace
@@ -2131,6 +3601,41 @@ int main() {
     testAiForagesFromStock();
     testChronicle();
     testChronicleRecords();
+    testSpatialIndexWide();
+    testSenseConditions();
+    testSightCost();
+    testPerception();
+    testPerceptionInWorld();
+    testZombieSpawn();
+    testZombiePerception();
+    testZombieChase();
+    testZombieInvestigates();
+    testPersonFlees();
+    testHordes();
+    testShelter();
+    testAnimalSpawn();
+    testAnimalFlees();
+    testZombieIgnoresAnimals();
+    testBirdsScatter();
+    testMeleeKillsZombie();
+    testGunshotIsHeard();
+    testZombieKillsPerson();
+    testPersonFightsZombie();
+    testHunting();
+    testInfectionTurns();
+    testStarvationDeath();
+    testBodiesDecay();
+    testBodyScares();
+    testCrowsFlyToBody();
+    testInventory();
+    testLootSpawn();
+    testScavengeTakesGear();
+    testTreatsWound();
+    testLootsBody();
+    testMeatSpoils();
+    testAnimalsReturn();
+    testPharmacies();
+    testZombiesArrive();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

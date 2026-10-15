@@ -5,6 +5,7 @@
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <bit>
 #include <cstddef>
 #include <cstdint>
 #include <optional>
@@ -94,9 +95,17 @@ private:
     const Slot& slotOf(const Entry& entry) const {
         return slots_[static_cast<std::size_t>(entt::to_entity(entry.entity))];
     }
-    const std::vector<Entry>& bucket(int bx, int by) const {
-        return buckets_[static_cast<std::size_t>(by) * static_cast<std::size_t>(columns_) +
-                        static_cast<std::size_t>(bx)];
+    std::size_t bucketIndex(int bx, int by) const {
+        return static_cast<std::size_t>(by) * static_cast<std::size_t>(columns_) +
+               static_cast<std::size_t>(bx);
+    }
+    const std::vector<Entry>& bucket(int bx, int by) const { return buckets_[bucketIndex(bx, by)]; }
+    // Есть ли кто-то в корзине. Битовая карта занимает 8 КБ на карту по
+    // умолчанию и не вылетает из кэша, а заголовки корзин — 1,5 МБ: при обходе
+    // круга в сотню корзин, почти все пустые, проверка бита экономит промахи.
+    bool occupied(int bx, int by) const {
+        const std::size_t index = bucketIndex(bx, by);
+        return (occupied_[index >> 6] >> (index & 63)) & 1u;
     }
 
     // Номер корзины по одной оси; за краем мира — крайняя корзина.
@@ -119,6 +128,7 @@ private:
     int rows_;
     std::size_t size_ = 0;
     std::vector<std::vector<Entry>> buckets_;
+    std::vector<std::uint64_t> occupied_; // бит на корзину: она не пуста
     std::vector<Slot> slots_;
 };
 
@@ -133,16 +143,31 @@ void SpatialIndex::forEachInRadius(float x, float y, float radius, Fn&& fn) cons
     const int y0 = axisBucket(y - radius, rows_);
     const int y1 = axisBucket(y + radius, rows_);
     for (int by = y0; by <= y1; ++by) {
-        for (int bx = x0; bx <= x1; ++bx) {
-            for (const Entry& entry : bucket(bx, by)) {
-                const Slot& slot = slotOf(entry);
-                const float dx = slot.x - x;
-                const float dy = slot.y - y;
-                const float distanceSq = dx * dx + dy * dy;
-                if (distanceSq <= radiusSq) {
-                    fn(SpatialHit{entry.id, entry.entity, slot.x, slot.y, distanceSq});
-                }
+        // Непустые корзины строки — по битам карты занятости, словами по 64.
+        std::size_t index = bucketIndex(x0, by);
+        const std::size_t end = bucketIndex(x1, by) + 1;
+        while (index < end) {
+            const std::size_t shift = index & 63;
+            const std::size_t take = std::min<std::size_t>(64 - shift, end - index);
+            std::uint64_t bits = occupied_[index >> 6] >> shift;
+            if (take < 64) {
+                bits &= (std::uint64_t{1} << take) - 1;
             }
+            while (bits != 0) {
+                const std::size_t occupiedIndex =
+                    index + static_cast<std::size_t>(std::countr_zero(bits));
+                for (const Entry& entry : buckets_[occupiedIndex]) {
+                    const Slot& slot = slotOf(entry);
+                    const float dx = slot.x - x;
+                    const float dy = slot.y - y;
+                    const float distanceSq = dx * dx + dy * dy;
+                    if (distanceSq <= radiusSq) {
+                        fn(SpatialHit{entry.id, entry.entity, slot.x, slot.y, distanceSq});
+                    }
+                }
+                bits &= bits - 1;
+            }
+            index += take;
         }
     }
 }
@@ -150,7 +175,7 @@ void SpatialIndex::forEachInRadius(float x, float y, float radius, Fn&& fn) cons
 template <typename Accept>
 void SpatialIndex::scanNearest(int bx, int by, float x, float y, float maxRadiusSq,
                                Accept& accept, std::optional<SpatialHit>& best) const {
-    if (bx < 0 || by < 0 || bx >= columns_ || by >= rows_) {
+    if (bx < 0 || by < 0 || bx >= columns_ || by >= rows_ || !occupied(bx, by)) {
         return;
     }
     for (const Entry& entry : bucket(bx, by)) {

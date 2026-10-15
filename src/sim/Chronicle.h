@@ -25,6 +25,21 @@ enum class ChronicleKind : std::uint8_t {
     Weakened,      // здоровье упало ниже половины
     Dying,         // здоровье упало ниже пятой части
     Recovered,     // здоровье снова выше половины
+    Fled,          // побежал от зомби object; a = 1 — проснулся от него
+    HordeFormed,   // орда собралась из a зомби; b = 1 — сбежались на шум (0 — с начала мира)
+    HordeMerged,   // орда поглотила орду object, стало a зомби
+    HordeArrived,  // орда из a зомби пришла в поселение object
+    HordeScattered, // орда распалась: осталось меньше двух
+    Bitten,        // укушен зомби object
+    KilledZombie,  // упокоил зомби object; a — оружие (WeaponKind)
+    Hunted,        // добыл животное object; a — вид (AnimalKind)
+    Died,          // погиб; object — убийца (если есть), a — причина (DeathCause), b — что за тело (CorpseKind)
+    Butchered,     // разделал тушу object: a порций мяса
+    Turned,        // встал зомби после смерти от укуса
+    Feverish,      // заражение после укуса перешло в лихорадку
+    FoundWeapon,   // нашёл в здании или на теле object оружие и взял в руки: a — WeaponKind
+    LootedBody,    // обыскал тело object: взял еды a, воды b
+    Treated,       // перевязался (a = 0) или принял лекарство (a = 1)
     Count
 };
 

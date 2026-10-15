@@ -1,4 +1,4 @@
-#include "ui/ChronicleView.h"
+﻿#include "ui/ChronicleView.h"
 
 #include "sim/Calendar.h"
 #include "sim/World.h"
@@ -70,6 +70,91 @@ Phrase phraseOf(const ChronicleEvent& event) {
         break;
     case ChronicleKind::Recovered:
         phrase.verb = "оправился";
+        break;
+    case ChronicleKind::Fled:
+        phrase.verb = event.a != 0 ? "проснулся и бежал от зомби" : "бежал от зомби";
+        phrase.withObject = event.object != kInvalidId;
+        break;
+    case ChronicleKind::HordeFormed:
+        phrase.verb = "— орда собралась:";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%d зомби%s", event.a,
+                      event.b == 1   ? " сбежались на шум"
+                      : event.b == 2 ? " пришли издалека"
+                                     : "");
+        break;
+    case ChronicleKind::HordeMerged:
+        phrase.verb = "— орда поглотила орду";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— теперь %d зомби", event.a);
+        break;
+    case ChronicleKind::HordeArrived:
+        phrase.verb = "— орда пришла в поселение";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %d зомби", event.a);
+        break;
+    case ChronicleKind::HordeScattered:
+        phrase.verb = "— орда распалась";
+        break;
+    case ChronicleKind::Bitten:
+        phrase.verb = "укушен зомби";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::KilledZombie:
+        phrase.verb = "упокоил зомби";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "(%s)",
+                      weaponName(static_cast<WeaponKind>(event.a)));
+        break;
+    case ChronicleKind::Hunted:
+        phrase.verb = "добыл";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "(%s)",
+                      animalKindName(static_cast<AnimalKind>(event.a)));
+        break;
+    case ChronicleKind::Died:
+        if (event.object == kInvalidId) {
+            phrase.verb = "погиб:";
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
+                          deathCauseName(static_cast<DeathCause>(event.a)));
+        } else {
+            switch (static_cast<DeathCause>(event.a)) {
+            case DeathCause::Bleeding:
+                phrase.verb = "истёк кровью после нападения";
+                break;
+            case DeathCause::Infection:
+                phrase.verb = "сгорел от заражения после укуса";
+                break;
+            default:
+                phrase.verb = "погиб в схватке с";
+                break;
+            }
+            phrase.withObject = true;
+        }
+        break;
+    case ChronicleKind::Turned:
+        phrase.verb = "встал зомби";
+        break;
+    case ChronicleKind::Feverish:
+        phrase.verb = "слёг в лихорадке от укуса";
+        break;
+    case ChronicleKind::FoundWeapon:
+        phrase.verb = "нашёл оружие:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      weaponName(static_cast<WeaponKind>(event.a)));
+        break;
+    case ChronicleKind::LootedBody:
+        phrase.verb = "обыскал тело";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        break;
+    case ChronicleKind::Treated:
+        phrase.verb = event.a == 0 ? "перевязал рану" : "принял лекарство";
+        break;
+    case ChronicleKind::Butchered:
+        phrase.verb = "разделал тушу";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— мяса %d", event.a);
         break;
     case ChronicleKind::Count:
         break;

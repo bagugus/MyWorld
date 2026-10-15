@@ -4,9 +4,13 @@
 //   lw_headless --seed 42 --paths 500 замер поиска пути: пары дверей и пары случайных клеток суши
 //                                     (--optimal — сравнить каждый путь с оптимальным)
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
+//   lw_headless --seed 42 --zombies 0                    мир без зомби
+//   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
+//   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Perception.h"
 #include "sim/Rng.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -110,8 +114,9 @@ void printPeople(const lw::World& world) {
     }
     std::printf("people %zu: walking %zu, at home %zu, asleep %zu\n", people, walking, atHome,
                 asleep);
-    constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",  "scavenge",
-                                        "forage", "socialize", "wander", "go home"};
+    constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
+                                        "forage", "socialize", "wander", "go home", "flee",
+                                        "fight",  "hunt",      "treat"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -121,18 +126,34 @@ void printPeople(const lw::World& world) {
     for (std::size_t i = 0; i < std::size(kActions); ++i) {
         std::printf(" %s %zu%s", kActions[i], actions[i], i + 1 < std::size(kActions) ? "," : "\n");
     }
-    long long food = 0;
-    long long water = 0;
-    for (const auto [entity, supplies] : registry.view<const lw::Supplies>().each()) {
-        food += supplies.food;
-        water += supplies.water;
+    // Лут в зданиях и что несут живые, по видам предметов.
+    long long inBuildings[lw::kItemKinds] = {};
+    long long carried[lw::kItemKinds] = {};
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        for (std::size_t i = 0; i < lw::kItemKinds; ++i) {
+            inBuildings[i] += inventory.items[i];
+        }
     }
-    long long carried = 0;
-    for (const auto [entity, carry] : registry.view<const lw::Carry>().each()) {
-        carried += carry.food;
+    for (const auto [entity, person, inventory] :
+         registry.view<const lw::Person, const lw::Inventory>().each()) {
+        for (std::size_t i = 0; i < lw::kItemKinds; ++i) {
+            carried[i] += inventory.items[i];
+        }
     }
-    std::printf("  supplies in buildings: food %lld, water %lld; carried food %lld\n", food,
-                water, carried);
+    const auto at = [](const long long* counts, lw::ItemKind kind) {
+        return counts[static_cast<std::size_t>(kind)];
+    };
+    using K = lw::ItemKind;
+    std::printf("  in buildings: food %lld, water %lld, bandages %lld, medicine %lld, "
+                "ammo %lld/%lld/%lld, guns %lld; carried: food %lld, meat %lld, water %lld, "
+                "bandages %lld, medicine %lld\n",
+                at(inBuildings, K::Food), at(inBuildings, K::Water), at(inBuildings, K::Bandage),
+                at(inBuildings, K::Medicine), at(inBuildings, K::PistolAmmo),
+                at(inBuildings, K::ShotgunShells), at(inBuildings, K::RifleAmmo),
+                at(inBuildings, K::Pistol) + at(inBuildings, K::Shotgun) + at(inBuildings, K::Rifle),
+                at(carried, K::Food), at(carried, K::Meat), at(carried, K::Water),
+                at(carried, K::Bandage), at(carried, K::Medicine));
     const lw::Resources& resources = world.resources();
     std::printf("  forest: %lld portions in %d blocks (%d empty); rain filled barrels by %u\n",
                 resources.forestTotal(), resources.forestBlocks(), resources.forestEmpty(),
@@ -143,6 +164,156 @@ void printPeople(const lw::World& world) {
                     "loneliness %.2f, health %.2f (worst %.2f)\n",
                     mean.hunger / n, mean.thirst / n, mean.fatigue / n, mean.fear / n,
                     mean.loneliness / n, mean.health / n, worstHealth);
+    }
+}
+
+// Восприятие: сколько контактов у существ и как они замечены.
+void printPerception(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t creatures = 0;
+    std::size_t contacts = 0;
+    std::size_t seen = 0;
+    std::size_t heard = 0;
+    std::size_t remembered = 0;
+    std::size_t aware = 0; // замечают хоть кого-то сейчас
+    for (const auto [entity, awareness] : registry.view<const lw::Awareness>().each()) {
+        ++creatures;
+        contacts += awareness.count;
+        bool any = false;
+        for (std::size_t i = 0; i < awareness.count; ++i) {
+            const lw::Contact& contact = awareness.contacts[i];
+            if (!lw::isFresh(contact, world.tick())) {
+                ++remembered;
+                continue;
+            }
+            any = true;
+            seen += contact.seen ? 1 : 0;
+            heard += contact.heard != lw::SoundKind::None ? 1 : 0;
+        }
+        aware += any ? 1 : 0;
+    }
+    if (creatures == 0) {
+        return;
+    }
+    const lw::SenseConditions conditions = lw::senseConditions(world);
+    std::printf("perception: sight x%.2f, hearing x%.2f; %zu of %zu notice someone; "
+                "contacts %.2f per creature (seen %zu, heard %zu, remembered %zu); sounds %zu\n",
+                conditions.sight, conditions.hearing, aware, creatures,
+                static_cast<double>(contacts) / static_cast<double>(creatures), seen, heard,
+                remembered, world.sounds().size());
+}
+
+// Зомби: чем заняты, сколько в ордах, какие орды.
+void printZombies(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr const char* kStates[] = {"idle", "roam", "investigate", "chase", "follow"};
+    static_assert(std::size(kStates) == static_cast<std::size_t>(lw::ZombieState::Count));
+    std::size_t states[std::size(kStates)] = {};
+    std::size_t zombies = 0;
+    std::size_t loners = 0;
+    for (const auto [entity, zombie] : registry.view<const lw::Zombie>().each()) {
+        ++zombies;
+        ++states[static_cast<std::size_t>(zombie.state)];
+        loners += zombie.horde == lw::kInvalidId ? 1 : 0;
+    }
+    if (zombies == 0) {
+        return;
+    }
+    std::printf("zombies %zu (alone %zu):", zombies, loners);
+    for (std::size_t i = 0; i < std::size(kStates); ++i) {
+        std::printf(" %s %zu%s", kStates[i], states[i], i + 1 < std::size(kStates) ? "," : "\n");
+    }
+    std::vector<std::size_t> sizes;
+    std::size_t inSettlements = 0;
+    for (const auto [entity, horde] : registry.view<const lw::Horde>().each()) {
+        sizes.push_back(horde.members.size());
+        inSettlements += horde.settlement != lw::kInvalidId ? 1 : 0;
+    }
+    std::sort(sizes.begin(), sizes.end());
+    std::printf("  hordes %zu (in settlements %zu), sizes:", sizes.size(), inSettlements);
+    for (const std::size_t size : sizes) {
+        std::printf(" %zu", size);
+    }
+    std::printf("\n");
+}
+
+// Животные и птицы: сколько каких, чем заняты.
+void printAnimals(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr const char* kKinds[] = {"deer", "boar", "hare"};
+    constexpr const char* kStates[] = {"graze", "roam", "flee", "charge"};
+    static_assert(std::size(kKinds) == static_cast<std::size_t>(lw::AnimalKind::Count));
+    static_assert(std::size(kStates) == static_cast<std::size_t>(lw::AnimalState::Count));
+    std::size_t kinds[std::size(kKinds)] = {};
+    std::size_t states[std::size(kStates)] = {};
+    std::size_t animals = 0;
+    for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+        ++animals;
+        ++kinds[static_cast<std::size_t>(animal.kind)];
+        ++states[static_cast<std::size_t>(animal.state)];
+    }
+    std::size_t flocks = 0;
+    std::size_t flying = 0;
+    std::size_t birds = 0;
+    for (const auto [entity, flock] : registry.view<const lw::Flock>().each()) {
+        ++flocks;
+        flying += flock.flying ? 1 : 0;
+        birds += flock.birds;
+    }
+    if (animals == 0 && flocks == 0) {
+        return;
+    }
+    std::printf("animals %zu:", animals);
+    for (std::size_t i = 0; i < std::size(kKinds); ++i) {
+        std::printf(" %s %zu,", kKinds[i], kinds[i]);
+    }
+    for (std::size_t i = 0; i < std::size(kStates); ++i) {
+        std::printf(" %s %zu%s", kStates[i], states[i], i + 1 < std::size(kStates) ? "," : "");
+    }
+    std::printf("; flocks %zu (%zu birds, flying %zu)\n", flocks, birds, flying);
+}
+
+// Бой: оружие и патроны у живых, раненые, тела.
+void printCombat(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t firearms = 0;
+    long long ammo = 0;
+    std::size_t melee = 0;
+    for (const auto [entity, person, weapon] : registry.view<const lw::Person, const lw::Weapon>().each()) {
+        if (weapon.kind == lw::WeaponKind::Pistol || weapon.kind == lw::WeaponKind::Shotgun ||
+            weapon.kind == lw::WeaponKind::Rifle) {
+            ++firearms;
+            ammo += weapon.ammo;
+        } else if (weapon.kind != lw::WeaponKind::Fists) {
+            ++melee;
+        }
+    }
+    std::size_t bleeding = 0;
+    std::size_t bitten = 0;
+    for (const auto [entity, wounds] : registry.view<const lw::Wounds>().each()) {
+        bleeding += wounds.bleeding > 0.0f ? 1 : 0;
+        bitten += wounds.infection > 0.0f ? 1 : 0;
+    }
+    // Погибшие люди по причинам — по летописи: тела со временем исчезают.
+    constexpr const char* kCauses[] = {"wounds", "bleeding", "starvation", "dehydration",
+                                       "exhaustion", "infection"};
+    static_assert(std::size(kCauses) == static_cast<std::size_t>(lw::DeathCause::Count));
+    std::size_t causes[std::size(kCauses)] = {};
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Died) {
+            ++causes[static_cast<std::size_t>(event.a)];
+        }
+    }
+    std::size_t bodies[3] = {};
+    for (const auto [entity, corpse] : registry.view<const lw::Corpse>().each()) {
+        ++bodies[static_cast<std::size_t>(corpse.kind)];
+    }
+    std::printf("combat: firearms %zu (ammo %lld), melee weapons %zu; bleeding %zu, infected %zu; "
+                "bodies: people %zu, zombies %zu, animals %zu\n",
+                firearms, ammo, melee, bleeding, bitten, bodies[0], bodies[1], bodies[2]);
+    std::printf("  people died:");
+    for (std::size_t i = 0; i < std::size(kCauses); ++i) {
+        std::printf(" %s %zu%s", kCauses[i], causes[i], i + 1 < std::size(kCauses) ? "," : "\n");
     }
 }
 
@@ -178,6 +349,9 @@ void printClimate(std::uint64_t seed) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = 0;
+    config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
     lw::World world(seed, config);
 
     constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
@@ -225,6 +399,58 @@ void printClimate(std::uint64_t seed) {
     }
 }
 
+
+// Строка на игровые сутки: сколько кого, смерти по причинам, еда и патроны.
+// По таким строкам подбирается баланс дефицита (этап 5.7).
+void printDailyHeader() {
+    std::printf("day season | people (hungry thirsty) | zombies hordes | animals | died: wounds "
+                "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
+                "forest | ammo\n");
+}
+
+void printDaily(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    const lw::CalendarTime time = lw::calendarAt(world.tick());
+    std::size_t people = 0;
+    std::size_t hungry = 0;
+    std::size_t thirsty = 0;
+    for (const auto [entity, person, needs] : registry.view<const lw::Person, const lw::Needs>().each()) {
+        ++people;
+        hungry += needs.hunger >= 0.8f ? 1 : 0;
+        thirsty += needs.thirst >= 0.8f ? 1 : 0;
+    }
+    std::size_t died[static_cast<std::size_t>(lw::DeathCause::Count)] = {};
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Died) {
+            ++died[static_cast<std::size_t>(event.a)];
+        }
+    }
+    long long food = 0;
+    for (const auto [entity, building, inventory] :
+         registry.view<const lw::Building, const lw::Inventory>().each()) {
+        food += inventory.food();
+    }
+    long long carried = 0;
+    for (const auto [entity, person, inventory] :
+         registry.view<const lw::Person, const lw::Inventory>().each()) {
+        carried += inventory.food();
+    }
+    long long ammo = 0;
+    for (const auto [entity, person, weapon] : registry.view<const lw::Person, const lw::Weapon>().each()) {
+        ammo += weapon.ammo;
+    }
+    const lw::Chronicle& chronicle = world.chronicle();
+    std::printf("%3d %d | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld\n",
+                time.day, static_cast<int>(time.season), people, hungry, thirsty,
+                registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
+                registry.view<const lw::Animal>().size(), died[0], died[1], died[2], died[3],
+                died[4], died[5], chronicle.countOf(lw::ChronicleKind::Turned),
+                chronicle.countOf(lw::ChronicleKind::KilledZombie),
+                chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
+                world.resources().forestTotal(), ammo);
+    std::fflush(stdout);
+}
 
 using Clock = std::chrono::steady_clock;
 
@@ -385,6 +611,7 @@ int main(int argc, char** argv) {
     bool climate = false;
     int paths = 0;
     bool compare = false;
+    bool daily = false;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -399,10 +626,19 @@ int main(int argc, char** argv) {
             paths = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--optimal") == 0) {
             compare = true;
+        } else if (std::strcmp(argv[i], "--daily") == 0) {
+            daily = true;
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
+            config.zombies = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--animals") == 0 && hasValue) {
+            config.animals = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--flocks") == 0 && hasValue) {
+            config.flocks = std::atoi(argv[++i]);
         } else {
-            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] [--paths N [--optimal]]\n");
+            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
+                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily]\n");
             return 2;
         }
     }
@@ -421,8 +657,14 @@ int main(int argc, char** argv) {
     }
 
     const auto start = std::chrono::steady_clock::now();
+    if (daily) {
+        printDailyHeader();
+    }
     for (std::uint64_t i = 0; i < ticks; ++i) {
         world.step();
+        if (daily && world.tick() % lw::kTicksPerGameDay == 0) {
+            printDaily(world);
+        }
     }
     const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
 
@@ -435,6 +677,10 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printPerception(world);
+    printZombies(world);
+    printAnimals(world);
+    printCombat(world);
     printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

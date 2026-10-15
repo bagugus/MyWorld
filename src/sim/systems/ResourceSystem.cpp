@@ -37,6 +37,10 @@ void updateResources(World& world) {
     Resources& resources = world.resources();
     if (time.minuteOfDay == 0) {
         resources.growForest(time.season, time.dayOfSeason);
+        // Мясо портится: за сутки от любого запаса остаётся половина.
+        for (const auto [entity, inventory] : world.registry().view<Inventory>().each()) {
+            inventory.set(ItemKind::Meat, inventory.count(ItemKind::Meat) / 2);
+        }
     }
 
     const Weather& weather = world.weather();
@@ -49,12 +53,12 @@ void updateResources(World& world) {
         return;
     }
     // Бочки независимы друг от друга, поэтому порядок обхода не важен.
-    auto view = world.registry().view<const Building, Supplies>();
-    for (const auto [entity, building, supplies] : view.each()) {
+    auto view = world.registry().view<const Building, Inventory>();
+    for (const auto [entity, building, inventory] : view.each()) {
         const std::uint16_t barrel = rainBarrel(building.kind);
-        if (supplies.water < barrel) {
-            supplies.water = static_cast<std::uint16_t>(
-                std::min<int>(barrel, supplies.water + portions));
+        if (inventory.count(ItemKind::Water) < barrel) {
+            inventory.set(ItemKind::Water,
+                          std::min<int>(barrel, inventory.count(ItemKind::Water) + portions));
         }
     }
 }
