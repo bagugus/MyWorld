@@ -1,5 +1,5 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
-// драйвер времени, календарь, климат и погода, пространственный индекс.
+// драйвер времени, календарь, климат и погода, пространственный индекс, навигация.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -10,12 +10,16 @@
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
 #include "sim/World.h"
+#include "sim/nav/NavGraph.h"
+#include "sim/nav/NavGrid.h"
+#include "sim/nav/Pathfinder.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -742,6 +746,491 @@ void testWorldSpatialIndex() {
     CHECK(world.spatial().size() == 199);
 }
 
+// --- Навигация ---------------------------------------------------------------
+
+void testSegmentWalk() {
+    const auto walk = [](lw::Cell a, lw::Cell b) {
+        std::vector<lw::Cell> cells;
+        lw::forEachCellOnSegment(a, b, [&](int x, int y) {
+            cells.push_back({x, y});
+            return true;
+        });
+        return cells;
+    };
+    CHECK((walk({2, 3}, {2, 3}) == std::vector<lw::Cell>{{2, 3}}));
+    CHECK((walk({0, 0}, {3, 0}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {2, 0}, {3, 0}}));
+    // Через угол клеток задеты обе клетки по бокам.
+    CHECK((walk({0, 0}, {1, 1}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {0, 1}, {1, 1}}));
+    CHECK((walk({0, 0}, {2, 1}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {1, 1}, {2, 1}}));
+    CHECK((walk({0, 0}, {3, 1}) ==
+           std::vector<lw::Cell>{{0, 0}, {1, 0}, {2, 0}, {1, 1}, {2, 1}, {3, 1}}));
+    // В обратную сторону — те же клетки.
+    std::vector<lw::Cell> back = walk({3, 1}, {0, 0});
+    std::vector<lw::Cell> forth = walk({0, 0}, {3, 1});
+    const auto byRow = [](lw::Cell l, lw::Cell r) { return l.y != r.y ? l.y < r.y : l.x < r.x; };
+    std::sort(back.begin(), back.end(), byRow);
+    std::sort(forth.begin(), forth.end(), byRow);
+    CHECK(back == forth);
+    // Обход прерывается, как только visit вернул false.
+    int visited = 0;
+    CHECK(!lw::forEachCellOnSegment({0, 0}, {9, 0}, [&](int x, int) {
+        ++visited;
+        return x < 4;
+    }));
+    CHECK(visited == 5);
+}
+
+void testNavGrid() {
+    lw::Map map(16, 12);
+    // Столбец моря x = 8 делит карту на две половины.
+    for (int y = 0; y < 12; ++y) {
+        map.water.at(8, y) = lw::Water::Sea;
+        map.depth.at(8, y) = 30;
+    }
+    map.road.at(1, 1) = lw::Road::Dirt;
+    map.ground.at(2, 1) = lw::Ground::Field;
+    map.ground.at(3, 1) = lw::Ground::Sand;
+    map.cover.at(4, 1) = lw::Cover::Forest;
+    map.ground.at(5, 1) = lw::Ground::Rock;
+    map.ground.at(6, 1) = lw::Ground::Rock;
+    map.cover.at(6, 1) = lw::Cover::Forest;
+    const int depths[] = {4, 12, 25};
+    for (int i = 0; i < 3; ++i) {
+        map.water.at(1 + i, 3) = lw::Water::River;
+        map.depth.at(1 + i, 3) = static_cast<std::uint8_t>(depths[i]);
+    }
+    map.water.at(4, 3) = lw::Water::River; // мост
+    map.depth.at(4, 3) = 25;
+    map.road.at(4, 3) = lw::Road::Asphalt;
+    map.water.at(5, 3) = lw::Water::Lake;
+    map.depth.at(5, 3) = 20;
+
+    entt::registry registry;
+    const entt::entity house = registry.create();
+    registry.emplace<lw::Building>(house, lw::BuildingKind::House, lw::Cell{1, 6}, 2, 3, lw::Cell{3, 7},
+                                   lw::kInvalidId);
+    lw::NavGrid nav;
+    nav.build(map, registry);
+
+    CHECK(nav.width() == 16 && nav.height() == 12);
+    CHECK(nav.cost({0, 0}) == 11);
+    CHECK(nav.cost({1, 1}) == lw::NavGrid::kRoadCost);
+    CHECK(nav.cost({2, 1}) == 13 && nav.cost({3, 1}) == 13);
+    CHECK(nav.cost({4, 1}) == 15);
+    CHECK(nav.cost({5, 1}) == 22 && nav.cost({6, 1}) == 22);
+    CHECK(nav.cost({1, 3}) == 30 && nav.cost({2, 3}) == 60 && nav.cost({3, 3}) == 250);
+    CHECK(nav.cost({4, 3}) == lw::NavGrid::kRoadCost);
+    CHECK(!nav.passable({5, 3}) && !nav.passable({8, 5}));
+    CHECK(!nav.passable({1, 6}) && !nav.passable({2, 8}) && nav.passable({3, 7}));
+    CHECK(!nav.passable({-1, 0}) && !nav.passable({16, 0}));
+
+    CHECK(lw::NavGrid::classOf(0) == lw::NavClass::Blocked);
+    CHECK(lw::NavGrid::classOf(nav.cost({1, 1})) == lw::NavClass::Road);
+    CHECK(lw::NavGrid::classOf(nav.cost({5, 1})) == lw::NavClass::Land);
+    CHECK(lw::NavGrid::classOf(nav.cost({1, 3})) == lw::NavClass::Water);
+
+    // Шаги: по стороне и по диагонали, мимо угла непроходимой клетки — нельзя.
+    CHECK(nav.stepCost({0, 0}, {1, 0}) == lw::NavGrid::kStraightFactor * 22);
+    CHECK(nav.stepCost({0, 0}, {1, 1}) == lw::NavGrid::kDiagonalFactor * (11 + 10 + 11 + 11));
+    CHECK(nav.stepCost({1, 1}, {0, 0}) == nav.stepCost({0, 0}, {1, 1}));
+    CHECK(nav.stepCost({4, 2}, {4, 3}) == lw::NavGrid::kStraightFactor * 21); // на мост
+    CHECK(nav.stepCost({0, 2}, {1, 3}) == lw::NavGrid::kDiagonalFactor * (11 + 30 + 11 + 11)); // в брод
+    CHECK(nav.stepCost({4, 2}, {5, 3}) == 0); // в озеро
+    CHECK(nav.stepCost({5, 2}, {6, 3}) == 0); // мимо угла озера
+    CHECK(nav.stepCost({0, 6}, {1, 5}) == 0); // мимо угла дома
+    CHECK(nav.stepCost({3, 6}, {2, 5}) == 0);
+    CHECK(nav.stepCost({3, 5}, {4, 6}) > 0);
+    CHECK(nav.stepCost({4, 4}, {5, 2}) == 0); // не соседи
+
+    // Области: море делит карту пополам, дом и озеро — нет.
+    CHECK(nav.regionCount() == 2);
+    CHECK(nav.connected({0, 0}, {7, 11}));
+    CHECK(nav.connected({9, 0}, {15, 11}));
+    CHECK(!nav.connected({0, 0}, {15, 0}));
+    CHECK(!nav.connected({0, 0}, {8, 0}));
+    CHECK(nav.region({8, 0}) == lw::NavGrid::kNoRegion);
+
+    // Ближайшая проходимая клетка: из моря — по соседству, при равенстве — верхняя.
+    CHECK((nav.nearestPassable({0, 0}, 3) == lw::Cell{0, 0}));
+    CHECK((nav.nearestPassable({8, 5}, 3) == lw::Cell{7, 5}));
+    CHECK((nav.nearestPassable({1, 7}, 3) == lw::Cell{0, 7}));
+    CHECK(!nav.nearestPassable({8, 5}, 0).has_value());
+}
+
+// Карта со всеми видами местности, водой, дорогами и зданиями — для поиска пути.
+struct NavFixture {
+    NavFixture(std::uint64_t seed, int width, int height) : map(width, height) {
+        lw::Rng rng(seed);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const float roll = rng.unit();
+                map.ground.at(x, y) = roll < 0.7f   ? lw::Ground::Grass
+                                      : roll < 0.8f ? lw::Ground::Field
+                                      : roll < 0.9f ? lw::Ground::Sand
+                                                    : lw::Ground::Rock;
+                map.cover.at(x, y) = rng.chance(0.3f) ? lw::Cover::Forest : lw::Cover::None;
+            }
+        }
+        const auto setWater = [&](int x, int y, lw::Water water, int depth) {
+            if (map.contains({x, y})) {
+                map.water.at(x, y) = water;
+                map.depth.at(x, y) = static_cast<std::uint8_t>(depth);
+                map.cover.at(x, y) = lw::Cover::None;
+            }
+        };
+        // Озёра — прямоугольники; бывают и такие, что отрезают кусок карты.
+        for (int n = rng.rangeInt(2, 5); n > 0; --n) {
+            const int x0 = rng.rangeInt(0, width - 4);
+            const int y0 = rng.rangeInt(0, height - 4);
+            const int w = rng.rangeInt(2, width / 3);
+            const int h = rng.rangeInt(2, height / 3);
+            for (int y = y0; y < y0 + h; ++y) {
+                for (int x = x0; x < x0 + w; ++x) {
+                    setWater(x, y, lw::Water::Lake, 20);
+                }
+            }
+        }
+        // Река с юга на север: ширина и глубина меняются по ходу.
+        int riverX = rng.rangeInt(width / 4, 3 * width / 4);
+        const int depths[] = {4, 12, 25};
+        for (int y = 0; y < height; ++y) {
+            riverX = std::clamp(riverX + rng.rangeInt(-1, 1), 1, width - 4);
+            const int depth = depths[(y / 8 + static_cast<int>(seed)) % 3];
+            for (int k = 0; k < 1 + (y / 5) % 3; ++k) {
+                setWater(riverX + k, y, lw::Water::River, depth);
+            }
+        }
+        // Дороги: прямые, через реку — мосты.
+        for (int n = 0; n < 2; ++n) {
+            const int row = rng.rangeInt(0, height - 1);
+            const int column = rng.rangeInt(0, width - 1);
+            for (int x = 0; x < width; ++x) {
+                if (map.water.at(x, row) != lw::Water::Lake) {
+                    map.road.at(x, row) = lw::Road::Dirt;
+                    map.cover.at(x, row) = lw::Cover::None;
+                }
+            }
+            for (int y = 0; y < height; ++y) {
+                if (map.water.at(column, y) != lw::Water::Lake) {
+                    map.road.at(column, y) = lw::Road::Asphalt;
+                    map.cover.at(column, y) = lw::Cover::None;
+                }
+            }
+        }
+        for (int n = 0; n < width * height / 60; ++n) {
+            const lw::Cell origin{rng.rangeInt(0, width - 3), rng.rangeInt(0, height - 4)};
+            bool free = true;
+            for (int y = origin.y; y < origin.y + 3; ++y) {
+                for (int x = origin.x; x < origin.x + 2; ++x) {
+                    free = free && map.road.at(x, y) == lw::Road::None &&
+                           map.water.at(x, y) == lw::Water::None;
+                }
+            }
+            if (free) {
+                registry.emplace<lw::Building>(registry.create(), lw::BuildingKind::House, origin, 2, 3,
+                                               lw::Cell{origin.x - 1, origin.y}, lw::kInvalidId);
+            }
+        }
+        nav.build(map, registry);
+        graph.build(nav);
+    }
+
+    lw::Cell randomPassable(lw::Rng& rng) const {
+        for (;;) {
+            const lw::Cell cell{rng.rangeInt(0, nav.width() - 1), rng.rangeInt(0, nav.height() - 1)};
+            if (nav.passable(cell)) {
+                return cell;
+            }
+        }
+    }
+
+    lw::Map map;
+    entt::registry registry;
+    lw::NavGrid nav;
+    lw::NavGraph graph;
+};
+
+constexpr std::uint32_t kNoPath = 0xFFFFFFFFu;
+
+// Стоимость кратчайшего пути от source до каждой клетки — Дейкстра по всем клеткам.
+std::vector<std::uint32_t> shortestCosts(const lw::NavGrid& nav, lw::Cell source) {
+    const int width = nav.width();
+    std::vector<std::uint32_t> cost(static_cast<std::size_t>(width) * static_cast<std::size_t>(nav.height()),
+                                    kNoPath);
+    using Entry = std::pair<std::uint32_t, std::uint32_t>;
+    std::vector<Entry> heap;
+    const auto index = [width](int x, int y) { return static_cast<std::uint32_t>(y * width + x); };
+    cost[index(source.x, source.y)] = 0;
+    heap.emplace_back(0, index(source.x, source.y));
+    while (!heap.empty()) {
+        std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
+        const auto [g, i] = heap.back();
+        heap.pop_back();
+        if (g != cost[i]) {
+            continue;
+        }
+        const int x = static_cast<int>(i) % width;
+        const int y = static_cast<int>(i) / width;
+        for (int d = 0; d < 8; ++d) {
+            const std::uint32_t step = nav.stepCost(x, y, d);
+            if (step == 0) {
+                continue;
+            }
+            const std::uint32_t n = index(x + lw::kNavDx[d], y + lw::kNavDy[d]);
+            if (g + step < cost[n]) {
+                cost[n] = g + step;
+                heap.emplace_back(g + step, n);
+                std::push_heap(heap.begin(), heap.end(), std::greater<>{});
+            }
+        }
+    }
+    return cost;
+}
+
+// Путь связен, начинается и кончается где надо, его стоимость сходится,
+// сглаженные отрезки проходимы, а их концы — клетки пути по порядку.
+bool validPath(const lw::NavGrid& nav, const lw::Path& path, lw::Cell start, lw::Cell goal) {
+    if (path.cells.empty() || !(path.cells.front() == start) || !(path.cells.back() == goal)) {
+        return false;
+    }
+    std::uint64_t sum = 0;
+    for (std::size_t i = 1; i < path.cells.size(); ++i) {
+        const std::uint32_t step = nav.stepCost(path.cells[i - 1], path.cells[i]);
+        if (step == 0) {
+            return false;
+        }
+        sum += step;
+    }
+    if (sum != path.cost || path.waypoints.empty() || !(path.waypoints.front() == start) ||
+        !(path.waypoints.back() == goal)) {
+        return false;
+    }
+    std::size_t next = 0;
+    for (std::size_t i = 0; i < path.waypoints.size(); ++i) {
+        if (i > 0 && !nav.segmentPassable(path.waypoints[i - 1], path.waypoints[i])) {
+            return false;
+        }
+        while (next < path.cells.size() && !(path.cells[next] == path.waypoints[i])) {
+            ++next;
+        }
+        if (next == path.cells.size()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Граф навигации: узлы — куски клеток одного вида в своём секторе, каждая
+// проходимая клетка принадлежит ровно одному узлу, рёбра симметричны.
+void checkNavGraph(const lw::NavGrid& nav, const lw::NavGraph& graph) {
+    const std::vector<lw::NavGraph::Node>& nodes = graph.nodes();
+    CHECK(!nodes.empty());
+    bool nodesOk = true;
+    bool edgesOk = true;
+    for (std::uint32_t i = 0; i < nodes.size(); ++i) {
+        const lw::NavGraph::Node& node = nodes[i];
+        nodesOk = nodesOk && lw::NavGrid::classOf(nav.cost(node.cell)) == node.kind &&
+                  graph.nodeOf(nav, node.cell) == i && node.cost >= lw::NavGrid::kRoadCost;
+        for (const lw::NavGraph::Edge& edge : graph.edges(i)) {
+            const auto back = graph.edges(edge.to);
+            const bool symmetric = std::any_of(back.begin(), back.end(), [&](const lw::NavGraph::Edge& e) {
+                return e.to == i && e.cost == edge.cost;
+            });
+            const lw::Cell a = node.cell;
+            const lw::Cell b = nodes[edge.to].cell;
+            const auto dx = static_cast<std::uint32_t>(std::abs(a.x - b.x));
+            const auto dy = static_cast<std::uint32_t>(std::abs(a.y - b.y));
+            const std::uint32_t octile = lw::NavGrid::kRoadStraightStep * (std::max(dx, dy) - std::min(dx, dy)) +
+                                         lw::NavGrid::kRoadDiagonalStep * std::min(dx, dy);
+            edgesOk = edgesOk && symmetric && edge.to != i && edge.cost >= octile;
+        }
+    }
+    CHECK(nodesOk);
+    CHECK(edgesOk);
+
+    bool cellsOk = true;
+    for (int y = 0; y < nav.height(); ++y) {
+        for (int x = 0; x < nav.width(); ++x) {
+            const std::uint32_t node = graph.nodeOf(nav, {x, y});
+            if (!nav.passable({x, y})) {
+                cellsOk = cellsOk && node == lw::NavGraph::kNoNode;
+                continue;
+            }
+            cellsOk = cellsOk && node < nodes.size() &&
+                      nodes[node].kind == lw::NavGrid::classOf(nav.cost({x, y})) &&
+                      (nodes[node].cell.x >> lw::NavGraph::kSectorShift) == (x >> lw::NavGraph::kSectorShift) &&
+                      (nodes[node].cell.y >> lw::NavGraph::kSectorShift) == (y >> lw::NavGraph::kSectorShift);
+        }
+    }
+    CHECK(cellsOk);
+}
+
+// Прямой поиск оптимален, граф даёт верный путь не дешевле оптимального, пути нет —
+// только между разными областями. Проверяется на случайных картах.
+void testPathfinderOnRandomMaps() {
+    lw::PathfinderSettings graphOnly;
+    graphOnly.directRange = -1;    // всегда через граф
+    graphOnly.corridorMargin = 0;  // коридор — только секторы маршрута
+    graphOnly.refineSpan = 5;      // много промежуточных целей
+    lw::PathfinderSettings graphWide;
+    graphWide.directRange = -1;
+    graphWide.corridorMargin = 16;
+    graphWide.refineSpan = 1000;
+
+    for (std::uint64_t seed = 1; seed <= 6; ++seed) {
+        const NavFixture fixture(seed, 72, 56);
+        const lw::NavGrid& nav = fixture.nav;
+        checkNavGraph(nav, fixture.graph);
+
+        lw::Pathfinder direct(nav, fixture.graph);
+        lw::Pathfinder viaGraph(nav, fixture.graph, graphOnly);
+        lw::Pathfinder viaWideGraph(nav, fixture.graph, graphWide);
+        lw::Rng rng(seed * 977);
+        bool optimal = true;
+        bool valid = true;
+        bool graphOk = true;
+        bool reachability = true;
+        int unreachable = 0;
+        for (int q = 0; q < 25; ++q) {
+            const lw::Cell start = fixture.randomPassable(rng);
+            const std::vector<std::uint32_t> best = shortestCosts(nav, start);
+            for (int k = 0; k < 6; ++k) {
+                const lw::Cell goal = fixture.randomPassable(rng);
+                const std::uint32_t expected =
+                    best[static_cast<std::size_t>(goal.y * nav.width() + goal.x)];
+                const lw::Path a = direct.find(start, goal);
+                const lw::Path b = viaGraph.find(start, goal);
+                const lw::Path c = viaWideGraph.find(start, goal);
+                if (expected == kNoPath) {
+                    ++unreachable;
+                    reachability = reachability && a.status == lw::PathStatus::Unreachable &&
+                                   b.status == lw::PathStatus::Unreachable && a.expanded == 0;
+                    continue;
+                }
+                optimal = optimal && a.found() && a.method == lw::PathMethod::Direct && a.cost == expected;
+                valid = valid && validPath(nav, a, start, goal) && validPath(nav, b, start, goal) &&
+                        validPath(nav, c, start, goal);
+                graphOk = graphOk && b.method == lw::PathMethod::Graph && b.cost >= expected &&
+                          c.method == lw::PathMethod::Graph && c.cost >= expected;
+            }
+        }
+        CHECK(optimal);
+        CHECK(valid);
+        CHECK(graphOk);
+        CHECK(reachability);
+        (void)unreachable;
+    }
+
+    // Непроходимые начало или цель; путь в саму себя.
+    const NavFixture fixture(3, 72, 56);
+    lw::Pathfinder finder(fixture.nav, fixture.graph);
+    lw::Cell blocked{-1, -1};
+    for (const auto [entity, building] : fixture.registry.view<const lw::Building>().each()) {
+        blocked = building.origin;
+        break;
+    }
+    lw::Rng rng(5);
+    const lw::Cell somewhere = fixture.randomPassable(rng);
+    CHECK(finder.find(blocked, somewhere).status == lw::PathStatus::Blocked);
+    CHECK(finder.find(somewhere, blocked).status == lw::PathStatus::Blocked);
+    CHECK(finder.find(somewhere, {-5, 3}).status == lw::PathStatus::Blocked);
+    const lw::Path self = finder.find(somewhere, somewhere);
+    CHECK(self.found() && self.cost == 0 && self.cells.size() == 1 && self.waypoints.size() == 1);
+
+    // Без графа остаётся запасной поиск по всей карте.
+    const lw::NavGraph empty;
+    lw::PathfinderSettings noDirect;
+    noDirect.directRange = -1;
+    lw::Pathfinder fallback(fixture.nav, empty, noDirect);
+    lw::Pathfinder reference(fixture.nav, fixture.graph);
+    for (int q = 0; q < 10; ++q) {
+        const lw::Cell start = fixture.randomPassable(rng);
+        const lw::Cell goal = fixture.randomPassable(rng);
+        const lw::Path path = fallback.find(start, goal);
+        const lw::Path best = reference.find(start, goal);
+        CHECK(path.status == best.status);
+        if (path.found()) {
+            CHECK(path.method == lw::PathMethod::Full && path.cost == best.cost);
+        }
+    }
+}
+
+// Ответ не зависит от предыдущих запросов и от того, какой Pathfinder его считает.
+void testPathfinderDeterminism() {
+    const NavFixture fixture(11, 96, 80);
+    lw::PathfinderSettings settings;
+    settings.directRange = 20; // и прямой поиск, и граф
+    lw::Pathfinder first(fixture.nav, fixture.graph, settings);
+    lw::Pathfinder second(fixture.nav, fixture.graph, settings);
+    lw::Rng rng(21);
+    std::vector<std::pair<lw::Cell, lw::Cell>> queries;
+    for (int i = 0; i < 40; ++i) {
+        queries.emplace_back(fixture.randomPassable(rng), fixture.randomPassable(rng));
+    }
+    std::vector<lw::Path> forward;
+    for (const auto& [start, goal] : queries) {
+        forward.push_back(first.find(start, goal));
+    }
+    bool same = true;
+    for (std::size_t i = queries.size(); i-- > 0;) {
+        const lw::Path path = second.find(queries[i].first, queries[i].second);
+        same = same && path.status == forward[i].status && path.method == forward[i].method &&
+               path.cost == forward[i].cost && path.cells == forward[i].cells &&
+               path.waypoints == forward[i].waypoints;
+    }
+    CHECK(same);
+}
+
+// Навигация сгенерированного мира: дома непроходимы, двери и центры поселений
+// связаны, пути между поселениями идут по графу и почти не дороже оптимальных.
+void testWorldNavigation() {
+    const lw::World world(7, regionConfig());
+    const lw::NavGrid& nav = world.nav();
+    const entt::registry& registry = world.registry();
+
+    std::vector<lw::Cell> centers;
+    for (const auto [entity, settlement] : registry.view<const lw::Settlement>().each()) {
+        centers.push_back(settlement.center);
+    }
+    bool buildings = true;
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        buildings = buildings && !nav.passable(building.origin) && nav.passable(building.door) &&
+                    nav.connected(building.door, centers.front());
+    }
+    CHECK(buildings);
+    checkNavGraph(nav, world.navGraph());
+
+    lw::Pathfinder finder(nav, world.navGraph());
+    const std::vector<std::uint32_t> best = shortestCosts(nav, centers.front());
+    bool found = true;
+    bool valid = true;
+    bool viaGraph = false;
+    double worst = 0.0;
+    for (std::size_t i = 1; i < centers.size(); ++i) {
+        const lw::Cell goal = centers[i];
+        const lw::Path path = finder.find(centers.front(), goal);
+        const std::uint32_t optimum = best[static_cast<std::size_t>(goal.y * nav.width() + goal.x)];
+        found = found && path.found();
+        if (!path.found()) {
+            continue;
+        }
+        valid = valid && validPath(nav, path, centers.front(), goal) && path.cost >= optimum;
+        viaGraph = viaGraph || path.method == lw::PathMethod::Graph;
+        worst = std::max(worst, static_cast<double>(path.cost) / optimum);
+    }
+    CHECK(found);
+    CHECK(valid);
+    CHECK(viaGraph);
+    CHECK(worst < 1.1);
+
+    // Тот же мир — те же пути.
+    const lw::World twin(7, regionConfig());
+    lw::Pathfinder twinFinder(twin.nav(), twin.navGraph());
+    const lw::Path a = finder.find(centers.front(), centers.back());
+    const lw::Path b = twinFinder.find(centers.front(), centers.back());
+    CHECK(a.cells == b.cells && a.cost == b.cost);
+}
+
 } // namespace
 
 int main() {
@@ -758,6 +1247,11 @@ int main() {
     testSpatialIndex();
     testSpatialIndexOrderIndependent();
     testWorldSpatialIndex();
+    testSegmentWalk();
+    testNavGrid();
+    testPathfinderOnRandomMaps();
+    testPathfinderDeterminism();
+    testWorldNavigation();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

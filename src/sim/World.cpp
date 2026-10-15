@@ -49,6 +49,9 @@ void World::generate() {
                                     site.door,
                                     settlementIds[static_cast<std::size_t>(site.settlement)]);
     }
+
+    nav_.build(map_, registry_);
+    graph_.build(nav_);
 }
 
 void World::step() {

@@ -6,6 +6,9 @@
 #include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
 #include "sim/Weather.h"
+#include "sim/nav/NavGraph.h"
+#include "sim/nav/NavGrid.h"
+#include "sim/nav/Pathfinder.h"
 
 #include <entt/entt.hpp>
 
@@ -72,13 +75,20 @@ public:
     std::size_t entityCount() const { return idToEntity_.size(); }
     // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
     const SpatialIndex& spatial() const { return spatial_; }
+    // Проходимость клеток и граф навигации (дороги и местность) — производные
+    // данные карты и зданий.
+    const NavGrid& nav() const { return nav_; }
+    const NavGraph& navGraph() const { return graph_; }
+    // Поиск пути для систем симуляции. Ответ зависит только от карты, зданий и
+    // запроса, поэтому состояние мира он не меняет и в хеш не входит.
+    Pathfinder& pathfinder() { return pathfinder_; }
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
     std::uint64_t stateHash() const;
 
 private:
-    // Генерирует карту и создаёт сущности поселений и зданий.
+    // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 
     std::uint64_t seed_;
@@ -91,6 +101,10 @@ private:
     std::uint64_t mapHash_ = 0;
 
     Weather weather_;
+
+    NavGrid nav_;
+    NavGraph graph_;
+    Pathfinder pathfinder_{nav_, graph_};
 
     // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
     SpatialIndex spatial_;

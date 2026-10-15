@@ -58,6 +58,13 @@ add_library(lw_sim STATIC
     src/sim/gen/Settlements.cpp
     src/sim/gen/Streets.cpp
     src/sim/gen/Terrain.cpp
+    src/sim/nav/NavGraph.cpp
+    src/sim/nav/NavGraph.h
+    src/sim/nav/NavGrid.cpp
+    src/sim/nav/NavGrid.h
+    src/sim/nav/Pathfinder.cpp
+    src/sim/nav/Pathfinder.h
+    src/sim/nav/SearchSpace.h
     src/sim/systems/WanderSystem.cpp
     src/sim/systems/WanderSystem.h
     src/sim/systems/WeatherSystem.cpp
@@ -78,9 +85,11 @@ if(LW_BUILD_APP)
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
         src/render/WeatherRenderer.cpp
-    src/render/WeatherRenderer.h
-    src/render/WorldRenderer.cpp
+        src/render/WeatherRenderer.h
+        src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
+        src/ui/PathTool.cpp
+        src/ui/PathTool.h
         src/ui/Ui.cpp
         src/ui/Ui.h
     )
