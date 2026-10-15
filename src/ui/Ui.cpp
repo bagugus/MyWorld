@@ -128,6 +128,27 @@ void drawCellInfo(const World& world, Cell cell) {
     }
 }
 
+// Человек под курсором: дом, нужды.
+void drawPersonInfo(const World& world, entt::entity entity, EntityId id) {
+    const entt::registry& registry = world.registry();
+    const Person& person = registry.get<Person>(entity);
+    ImGui::Text("Человек #%llu%s", static_cast<unsigned long long>(id),
+                person.asleep ? " (спит)" : "");
+    if (person.home != kInvalidId) {
+        ImGui::Text("Дом: здание #%llu", static_cast<unsigned long long>(person.home));
+    } else {
+        ImGui::TextUnformatted("Дом: нет");
+    }
+    if (const auto* needs = registry.try_get<Needs>(entity)) {
+        meter("Голод", needs->hunger);
+        meter("Жажда", needs->thirst);
+        meter("Усталость", needs->fatigue);
+        meter("Страх", needs->fear);
+        meter("Одиночество", needs->loneliness);
+        meter("Здоровье", needs->health);
+    }
+}
+
 } // namespace
 
 void init() {
@@ -327,6 +348,17 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                         std::sqrt(nearest->distanceSq));
         } else {
             ImGui::Text("В радиусе %.0f м: %d, ближе 1 км никого", kNeighbourRadius, neighbours);
+        }
+        // Человек под курсором: не дальше нескольких пикселей.
+        constexpr float kPickPixels = 8.0f;
+        const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
+        if (const auto picked = world.spatial().nearest(
+                mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
+                    return world.registry().all_of<Person>(hit.entity);
+                })) {
+            ImGui::Separator();
+            drawPersonInfo(world, picked->entity, picked->id);
+            ImGui::Separator();
         }
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {

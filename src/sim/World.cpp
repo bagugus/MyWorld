@@ -4,6 +4,7 @@
 #include "sim/Hash.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/MovementSystem.h"
+#include "sim/systems/NeedsSystem.h"
 #include "sim/systems/RoutineSystem.h"
 #include "sim/systems/WeatherSystem.h"
 
@@ -57,6 +58,7 @@ void World::generate() {
 
 void World::step() {
     updateWeather(*this);
+    tickNeeds(*this);
     updateRoutine(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
@@ -154,6 +156,16 @@ std::uint64_t World::stateHash() const {
         if (const auto* person = registry_.try_get<Person>(entity)) {
             hasher.add(std::uint64_t{6});
             hasher.add(person->home);
+            hasher.add(static_cast<std::uint8_t>(person->asleep));
+        }
+        if (const auto* needs = registry_.try_get<Needs>(entity)) {
+            hasher.add(std::uint64_t{9});
+            hasher.add(needs->hunger);
+            hasher.add(needs->thirst);
+            hasher.add(needs->fatigue);
+            hasher.add(needs->fear);
+            hasher.add(needs->loneliness);
+            hasher.add(needs->health);
         }
         if (const auto* walker = registry_.try_get<Walker>(entity)) {
             hasher.add(std::uint64_t{7});

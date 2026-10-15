@@ -49,6 +49,20 @@ struct Building {
 // Человек. Дом — жилое здание, у двери которого он ночует; kInvalidId — бездомный.
 struct Person {
     EntityId home = kInvalidId;
+    // Спит: нужды меняются медленнее, усталость уходит.
+    bool asleep = false;
+};
+
+// Нужды человека (NeedsSystem). Голод, жажда, усталость, страх, одиночество —
+// от 0 (всё хорошо) до 1 (предел): на пределе голода, жажды и усталости уходит
+// здоровье. Здоровье — от 1 (здоров) до 0.
+struct Needs {
+    float hunger = 0.0f;
+    float thirst = 0.0f;
+    float fatigue = 0.0f;
+    float fear = 0.0f;
+    float loneliness = 0.0f;
+    float health = 1.0f;
 };
 
 // Движение пешком по пути (MovementSystem).

@@ -83,9 +83,22 @@ void printPeople(const lw::World& world) {
     std::size_t people = 0;
     std::size_t walking = 0;
     std::size_t atHome = 0;
+    std::size_t asleep = 0;
+    lw::Needs mean{0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    float worstHealth = 1.0f;
     for (const auto [entity, person, walker, position] :
          registry.view<const lw::Person, const lw::Walker, const lw::Position>().each()) {
         ++people;
+        asleep += person.asleep ? 1 : 0;
+        if (const auto* needs = registry.try_get<lw::Needs>(entity)) {
+            mean.hunger += needs->hunger;
+            mean.thirst += needs->thirst;
+            mean.fatigue += needs->fatigue;
+            mean.fear += needs->fear;
+            mean.loneliness += needs->loneliness;
+            mean.health += needs->health;
+            worstHealth = std::min(worstHealth, needs->health);
+        }
         walking += walker.moving() ? 1 : 0;
         if (const entt::entity home = world.find(person.home); home != entt::null) {
             atHome += lw::Map::cellAt(position.x, position.y) ==
@@ -94,7 +107,15 @@ void printPeople(const lw::World& world) {
                           : 0;
         }
     }
-    std::printf("people %zu: walking %zu, at home %zu\n", people, walking, atHome);
+    std::printf("people %zu: walking %zu, at home %zu, asleep %zu\n", people, walking, atHome,
+                asleep);
+    if (people > 0) {
+        const float n = static_cast<float>(people);
+        std::printf("  mean needs: hunger %.2f, thirst %.2f, fatigue %.2f, fear %.2f, "
+                    "loneliness %.2f, health %.2f (worst %.2f)\n",
+                    mean.hunger / n, mean.thirst / n, mean.fatigue / n, mean.fear / n,
+                    mean.loneliness / n, mean.health / n, worstHealth);
+    }
 }
 
 void printWeather(const lw::World& world) {

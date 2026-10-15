@@ -75,6 +75,9 @@ public:
     std::size_t entityCount() const { return idToEntity_.size(); }
     // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
     const SpatialIndex& spatial() const { return spatial_; }
+    // Привести индекс к текущим позициям — после того, как сущности переставили
+    // вне тика (тесты, будущий редактор). Тик делает это сам.
+    void syncSpatial() { spatial_.sync(registry_); }
     // Проходимость клеток и граф навигации (дороги и местность) — производные
     // данные карты и зданий.
     const NavGrid& nav() const { return nav_; }

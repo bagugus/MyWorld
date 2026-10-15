@@ -15,6 +15,7 @@
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/MovementSystem.h"
+#include "sim/systems/NeedsSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1345,6 +1346,71 @@ void testLongMovementStep() {
     CHECK(velocity.x == 0.0f && velocity.y == 0.0f);
 }
 
+// Нужды: скорости в игровых часах, сон, компания, здоровье на пределе.
+void testNeeds() {
+    lw::World world(3, smallConfig(2));
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> people;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        people.push_back(entity);
+    }
+    CHECK(people.size() == 2);
+    if (people.size() != 2) {
+        return;
+    }
+    const entt::entity a = people[0];
+    const entt::entity b = people[1];
+    // Далеко друг от друга, днём, без дома: одиноки и не боятся.
+    registry.get<lw::Position>(a) = {20.0f, 20.0f};
+    registry.get<lw::Position>(b) = {200.0f, 200.0f};
+    registry.get<lw::Needs>(a) = {};
+    registry.get<lw::Needs>(b) = {};
+    registry.get<lw::Person>(b).asleep = true;
+    registry.get<lw::Needs>(b).fatigue = 0.8f;
+    world.syncSpatial();
+
+    for (int i = 0; i < 120; ++i) {
+        lw::updateNeeds(world, 1.0f);
+    }
+    const lw::Needs awake = registry.get<lw::Needs>(a);
+    const lw::Needs sleeping = registry.get<lw::Needs>(b);
+    // Два часа: голод — 2/48, жажда — 2/30, усталость — 2/18.
+    CHECK(std::abs(awake.hunger - 2.0f / 48.0f) < 1e-3f);
+    CHECK(std::abs(awake.thirst - 2.0f / 30.0f) < 1e-3f);
+    CHECK(std::abs(awake.fatigue - 2.0f / 18.0f) < 1e-3f);
+    CHECK(awake.loneliness > 0.05f && sleeping.loneliness == 0.0f);
+    CHECK(sleeping.hunger < awake.hunger && sleeping.fatigue < 0.8f - 0.15f);
+    CHECK(awake.health == 1.0f);
+
+    // Один шаг на два часа — то же, что 120 шагов по минуте.
+    registry.get<lw::Needs>(a) = {};
+    lw::updateNeeds(world, 120.0f);
+    const lw::Needs coarse = registry.get<lw::Needs>(a);
+    CHECK(std::abs(coarse.hunger - awake.hunger) < 1e-4f);
+    CHECK(std::abs(coarse.fatigue - awake.fatigue) < 1e-4f);
+
+    // Рядом — компания: одиночество уходит.
+    registry.get<lw::Needs>(a).loneliness = 0.5f;
+    registry.get<lw::Position>(b) = {25.0f, 20.0f};
+    world.syncSpatial();
+    lw::updateNeeds(world, 60.0f);
+    CHECK(registry.get<lw::Needs>(a).loneliness < 0.5f - 0.2f);
+
+    // На пределе голода и жажды здоровье уходит, в норме — восстанавливается.
+    lw::Needs& starving = registry.get<lw::Needs>(a);
+    starving = {};
+    starving.hunger = 1.0f;
+    starving.thirst = 1.0f;
+    lw::updateNeeds(world, 60.0f * 12.0f);
+    const float hurt = registry.get<lw::Needs>(a).health;
+    CHECK(hurt < 1.0f - 0.4f);
+    CHECK(registry.get<lw::Needs>(a).fear > 0.1f); // плохо — страшно
+    registry.get<lw::Needs>(a).hunger = 0.0f;
+    registry.get<lw::Needs>(a).thirst = 0.0f;
+    lw::updateNeeds(world, 60.0f);
+    CHECK(registry.get<lw::Needs>(a).health > hurt);
+}
+
 } // namespace
 
 int main() {
@@ -1369,6 +1435,7 @@ int main() {
     testWalkSpeed();
     testPeople();
     testLongMovementStep();
+    testNeeds();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

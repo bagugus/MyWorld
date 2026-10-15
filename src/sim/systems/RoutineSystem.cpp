@@ -191,11 +191,19 @@ void spawnPeople(World& world, int count) {
         routine.bedtime = rng.rangeInt(21 * 60, 23 * 60 + 30);
         routine.wakeTime = rng.rangeInt(5 * 60 + 30, 8 * 60);
 
+        // Утро: кто-то давно не ел, кто-то не выспался.
+        Needs needs;
+        needs.hunger = rng.range(0.0f, 0.4f);
+        needs.thirst = rng.range(0.0f, 0.4f);
+        needs.fatigue = rng.range(0.0f, 0.3f);
+        needs.loneliness = rng.range(0.0f, 0.3f);
+
         const entt::entity entity = world.create();
         registry.emplace<Position>(entity, cellCenter(*cell));
         registry.emplace<Velocity>(entity);
         registry.emplace<Person>(entity, person);
         registry.emplace<Walker>(entity, std::move(walker));
+        registry.emplace<Needs>(entity, needs);
         registry.emplace<Routine>(entity, routine);
     }
 }
@@ -207,7 +215,7 @@ void updateRoutine(World& world) {
     entt::registry& registry = world.registry();
     std::vector<SettlementPlace> places; // только для бездомных, собирается по надобности
 
-    auto view = registry.view<const Person, Routine, const Walker, const Position>();
+    auto view = registry.view<Person, Routine, const Walker, const Position>();
     for (const auto [entity, person, routine, walker, position] : view.each()) {
         if (routine.activity == Activity::Walk) {
             if (walker.moving()) {
@@ -221,6 +229,7 @@ void updateRoutine(World& world) {
         if (tick < routine.restUntil) {
             continue;
         }
+        person.asleep = false;
 
         const entt::entity home = world.find(person.home);
         const std::optional<Cell> door =
@@ -232,6 +241,7 @@ void updateRoutine(World& world) {
         if (isNight(routine, now.minuteOfDay)) {
             if (!door || atHome) {
                 // Спать до утра.
+                person.asleep = true;
                 routine.restUntil =
                     nextTimeOfDay(tick, routine.wakeTime / 60, routine.wakeTime % 60);
                 continue;
