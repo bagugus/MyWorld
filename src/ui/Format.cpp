@@ -32,14 +32,15 @@ const char* settlementKindName(SettlementKind kind) {
 const char* actionName(Action action) {
     constexpr const char* kNames[] = {"отдыхает", "спит",      "ест",    "пьёт",
                                       "ищет припасы", "собирает в лесу", "общается",
-                                      "гуляет",   "уходит домой", "убегает"};
+                                      "гуляет",   "уходит домой", "убегает", "дерётся",
+                                      "охотится"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
     const auto index = static_cast<std::size_t>(action);
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
 const char* soundName(SoundKind kind) {
-    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы"};
+    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы", "выстрел", "крик"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(SoundKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -61,9 +62,30 @@ const char* animalKindName(AnimalKind kind) {
 }
 
 const char* animalStateName(AnimalState state) {
-    constexpr const char* kNames[] = {"пасётся", "переходит", "убегает"};
+    constexpr const char* kNames[] = {"пасётся", "переходит", "убегает", "бросается"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(AnimalState::Count));
     const auto index = static_cast<std::size_t>(state);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* weaponName(WeaponKind kind) {
+    constexpr const char* kNames[] = {"кулаки", "нож", "топор", "пистолет", "дробовик", "винтовка"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(WeaponKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* deathCauseName(DeathCause cause) {
+    constexpr const char* kNames[] = {"убит в схватке", "истёк кровью"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(DeathCause::Count));
+    const auto index = static_cast<std::size_t>(cause);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* corpseKindName(CorpseKind kind) {
+    constexpr const char* kNames[] = {"человек", "зомби", "животное"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(CorpseKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 

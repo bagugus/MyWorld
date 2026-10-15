@@ -36,7 +36,7 @@ constexpr int kIdleMaxSeconds = 120;
 // Сколько стоит там, где слышал шум или потерял добычу.
 constexpr int kLingerMinSeconds = 10;
 constexpr int kLingerMaxSeconds = 40;
-// Ближе этого к добыче — догнал: стоит рядом (боя пока нет).
+// Ближе этого к добыче — догнал: стоит рядом и бьёт (CombatSystem).
 constexpr float kReachDistance = 1.5f;
 // Цель сдвинулась дальше этого — проложить путь заново, метры.
 constexpr float kChaseRegoal = 4.0f;
@@ -166,12 +166,14 @@ public:
         : world_(world), registry_(world.registry()), rng_(rng), tick_(world.tick()) {}
 
     void think(entt::entity entity, EntityId id, Zombie& zombie, Walker& walker,
-               const Position& position, const Awareness& awareness) {
+               const Position& position, const Awareness& awareness, Combat& combat) {
         entity_ = entity;
         id_ = id;
         zombie_ = &zombie;
         walker_ = &walker;
         position_ = position;
+        combat_ = &combat;
+        combat.target = kInvalidId; // бьёт, только если догнал (chase)
 
         // Добыча на виду — погоня.
         const Contact* prey = nullptr;
@@ -282,7 +284,8 @@ private:
             zombie.lastGroan = tick_;
         }
         if (distance(position_.x, position_.y, prey.x, prey.y) <= kReachDistance) {
-            stop(); // догнал; боя пока нет
+            stop(); // догнал — бьёт
+            combat_->target = prey.id;
             return;
         }
         const Cell goal = Map::cellAt(prey.x, prey.y);
@@ -440,8 +443,8 @@ private:
     void follow(const Horde& horde) {
         Zombie& zombie = *zombie_;
         const entt::entity leader = world_.find(horde.leader);
-        if (leader == entt::null) {
-            roam(); // вожака назначит обновление орд
+        if (leader == entt::null || !registry_.all_of<Zombie>(leader)) {
+            roam(); // вожака нет или он упокоен — нового назначит обновление орд
             return;
         }
         if (zombie.state != ZombieState::Follow) {
@@ -484,6 +487,7 @@ private:
     EntityId id_ = kInvalidId;
     Zombie* zombie_ = nullptr;
     Walker* walker_ = nullptr;
+    Combat* combat_ = nullptr;
     Position position_;
 };
 
@@ -755,6 +759,7 @@ entt::entity createZombie(World& world, Cell cell, Rng& rng) {
     registry.emplace<Walker>(entity, std::move(walker));
     registry.emplace<Senses>(entity, Senses{kZombieSight, kZombieHearing});
     registry.emplace<Awareness>(entity);
+    registry.emplace<Combat>(entity);
     Zombie zombie;
     zombie.anchor = cell;
     zombie.goal = cell;
@@ -798,10 +803,11 @@ void updateZombies(World& world) {
     ZombieBrain brain(world, rng);
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по
     // ходу не добавляются и не удаляются.
-    auto view = world.registry().view<const Id, Zombie, Walker, const Position, const Awareness>();
-    for (const auto [entity, id, zombie, walker, position, awareness] : view.each()) {
+    auto view = world.registry()
+                    .view<const Id, Zombie, Walker, const Position, const Awareness, Combat>();
+    for (const auto [entity, id, zombie, walker, position, awareness, combat] : view.each()) {
         if ((tick + id.value) % kZombieThinkTicks == 0) {
-            brain.think(entity, id.value, zombie, walker, position, awareness);
+            brain.think(entity, id.value, zombie, walker, position, awareness, combat);
         }
     }
     if (tick % kHordeUpdateTicks == 0) {

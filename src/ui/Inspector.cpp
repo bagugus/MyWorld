@@ -5,6 +5,7 @@
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/TimeScale.h"
+#include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/ResourceSystem.h"
@@ -104,7 +105,7 @@ EntityId Inspector::pick(float x, float y, float zoom) const {
     const entt::registry& registry = world_.registry();
     const float radius = std::max(1.0f, kPickPixels / zoom);
     if (const auto person = world_.spatial().nearest(x, y, radius, [&registry](const SpatialHit& hit) {
-            return registry.any_of<Person, Zombie, Animal, Flock>(hit.entity);
+            return registry.any_of<Person, Zombie, Animal, Flock, Corpse>(hit.entity);
         })) {
         return person->id;
     }
@@ -333,6 +334,8 @@ void Inspector::drawPanel() {
                 drawAnimal(entity);
             } else if (registry.all_of<Flock>(entity)) {
                 drawFlock(entity);
+            } else if (registry.all_of<Corpse>(entity)) {
+                drawCorpse(entity);
             } else if (registry.all_of<Horde>(entity)) {
                 drawHorde(entity);
             } else if (registry.all_of<Building>(entity)) {
@@ -458,6 +461,31 @@ void Inspector::drawPerson(entt::entity entity) {
     }
     if (const auto* carry = registry.try_get<Carry>(entity)) {
         ImGui::Text("Несёт: еды %d, воды %d", carry->food, carry->water);
+    }
+    if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+        if (isFirearm(weapon->kind)) {
+            ImGui::Text("Оружие: %s, патронов %d", weaponName(weapon->kind), weapon->ammo);
+        } else {
+            ImGui::Text("Оружие: %s", weaponName(weapon->kind));
+        }
+    }
+    if (const auto* combat = registry.try_get<Combat>(entity);
+        combat != nullptr && combat->target != kInvalidId) {
+        ImGui::TextUnformatted("Бьёт или целится в");
+        ImGui::SameLine();
+        if (idLink(combat->target)) {
+            select(combat->target);
+            return;
+        }
+    }
+    if (const auto* wounds = registry.try_get<Wounds>(entity)) {
+        if (wounds->bleeding > 0.0f) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "Кровотечение: %.0f%% здоровья в час",
+                               wounds->bleeding * 100.0f);
+        }
+        if (wounds->bites > 0) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "Укушен: %d раз", wounds->bites);
+        }
     }
 
     if (const auto* needs = registry.try_get<Needs>(entity)) {
@@ -663,6 +691,7 @@ void Inspector::drawZombie(entt::entity entity) {
     if (const auto* walker = registry.try_get<Walker>(entity)) {
         ImGui::Text("Погоня: %.2f м/с, сейчас темп %.0f%%", walker->speed, walker->pace * 100.0f);
     }
+    meter("Здоровье", zombie.health);
     if (!drawPerception(entity)) {
         return;
     }
@@ -684,8 +713,10 @@ void Inspector::drawHorde(entt::entity entity) {
         return;
     }
     if (const entt::entity leader = world_.find(horde.leader); leader != entt::null) {
-        ImGui::SameLine();
-        ImGui::TextUnformatted(zombieStateName(registry.get<Zombie>(leader).state));
+        if (const auto* zombie = registry.try_get<Zombie>(leader)) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted(zombieStateName(zombie->state));
+        }
     }
     const float toGoal = std::hypot(Map::cellCenter(horde.goal.x) - horde.x,
                                     Map::cellCenter(horde.goal.y) - horde.y);
@@ -751,6 +782,7 @@ void Inspector::drawAnimal(entt::entity entity) {
     ImGui::Text("Убегает от увиденного ближе %.0f м, от услышанного — ближе %.0f м",
                 spec.fleeSeen, spec.fleeHeard);
     ImGui::Text("Бегом %.1f м/с, шагом %.1f м/с", spec.runSpeed, spec.walkSpeed);
+    meter("Здоровье", animal.health);
     if (!drawPerception(entity)) {
         return;
     }
@@ -774,6 +806,41 @@ void Inspector::drawFlock(entt::entity entity) {
         ImGui::TextUnformatted("Сейчас взлетит");
     }
     ImGui::TextDisabled("Вспугнутая взлетает с криком: его слышат зомби");
+}
+
+void Inspector::drawCorpse(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Corpse& corpse = registry.get<Corpse>(entity);
+    char duration[32];
+    if (corpse.kind == CorpseKind::Animal) {
+        ImGui::Text("Туша #%llu: %s", static_cast<unsigned long long>(selected_),
+                    animalKindName(corpse.animal));
+        ImGui::Text("Мяса осталось: %d порций", corpse.meat);
+    } else {
+        ImGui::Text("Тело #%llu: %s", static_cast<unsigned long long>(selected_),
+                    corpseKindName(corpse.kind));
+    }
+    formatGameDuration(duration, sizeof(duration), world_.tick() - corpse.diedAt);
+    ImGui::Text("Погиб %s назад: %s", duration, deathCauseName(corpse.cause));
+    if (corpse.killer != kInvalidId) {
+        ImGui::TextUnformatted("Кто убил:");
+        ImGui::SameLine();
+        if (idLink(corpse.killer)) {
+            select(corpse.killer);
+            return;
+        }
+    }
+    if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+        ImGui::Text("При теле: %s", weaponName(weapon->kind));
+        if (isFirearm(weapon->kind)) {
+            ImGui::SameLine();
+            ImGui::Text("(патронов %d)", weapon->ammo);
+        }
+    }
+    if (const auto* carry = registry.try_get<Carry>(entity); carry != nullptr &&
+                                                            (carry->food > 0 || carry->water > 0)) {
+        ImGui::Text("При теле: еды %d, воды %d", carry->food, carry->water);
+    }
 }
 
 void Inspector::drawBuilding(entt::entity entity) {

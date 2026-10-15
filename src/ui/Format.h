@@ -21,6 +21,10 @@ const char* zombieStateName(ZombieState state);
 // Животные: «олень», «пасётся».
 const char* animalKindName(AnimalKind kind);
 const char* animalStateName(AnimalState state);
+// Оружие, причина смерти, чьё тело: «топор», «истёк кровью», «зомби».
+const char* weaponName(WeaponKind kind);
+const char* deathCauseName(DeathCause cause);
+const char* corpseKindName(CorpseKind kind);
 
 // Полоска-индикатор 0..1 с подписью.
 void meter(const char* label, float value);

@@ -53,6 +53,31 @@ constexpr int kAnimalSpawnAttempts = 400;
 constexpr int kFlockMinBirds = 6;
 constexpr int kFlockMaxBirds = 30;
 
+// Оружие при рождении: доли в процентах по WeaponKind (кулаки, нож, топор,
+// пистолет, дробовик, винтовка) и патроны к огнестрельному.
+constexpr int kWeaponPercent[] = {35, 25, 20, 10, 5, 5};
+struct AmmoRange {
+    int min, max;
+};
+constexpr AmmoRange kStartAmmo[] = {{0, 0}, {0, 0}, {0, 0}, {4, 12}, {2, 8}, {3, 10}};
+
+// Что у человека в руках при рождении.
+Weapon startWeapon(Rng& rng) {
+    static_assert(std::size(kWeaponPercent) == static_cast<std::size_t>(WeaponKind::Count));
+    int roll = rng.rangeInt(0, 99);
+    std::size_t kind = 0;
+    while (kind + 1 < std::size(kWeaponPercent) && roll >= kWeaponPercent[kind]) {
+        roll -= kWeaponPercent[kind];
+        ++kind;
+    }
+    Weapon weapon;
+    weapon.kind = static_cast<WeaponKind>(kind);
+    if (kStartAmmo[kind].max > 0) {
+        weapon.ammo = static_cast<std::uint16_t>(rng.rangeInt(kStartAmmo[kind].min, kStartAmmo[kind].max));
+    }
+    return weapon;
+}
+
 struct SupplyRange {
     int foodMin, foodMax, waterMin, waterMax;
 };
@@ -130,6 +155,7 @@ void spawnSupplies(World& world) {
 void spawnPeople(World& world, int count) {
     Rng& rng = world.rng(RngStream::Spawn);
     Rng& character = world.rng(RngStream::Traits);
+    Rng& gear = world.rng(RngStream::Combat);
     entt::registry& registry = world.registry();
     const NavGrid& nav = world.nav();
 
@@ -203,6 +229,9 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Carry>(entity);
         registry.emplace<Senses>(entity);
         registry.emplace<Awareness>(entity);
+        registry.emplace<Weapon>(entity, startWeapon(gear));
+        registry.emplace<Combat>(entity);
+        registry.emplace<Wounds>(entity);
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
 }

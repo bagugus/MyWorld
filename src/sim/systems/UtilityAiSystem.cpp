@@ -3,6 +3,7 @@
 #include "sim/Calendar.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
+#include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/ZombieSystem.h"
@@ -137,6 +138,28 @@ constexpr float kFleeHomeAlignment = 0.5f;
 constexpr float kFleeTurns[][2] = {
     {1.0f, 0.0f}, {0.766f, 0.643f}, {0.766f, -0.643f}, {0.174f, 0.985f}, {0.174f, -0.985f}};
 
+// Бой с зомби (этап 5.4): оценка — угроза × (kFightBase + сила оружия) ×
+// решимость × здоровье / толпа. Решимость — kResolveBase + смелость и
+// агрессия; каждый следующий зомби делит оценку на 1 + kCrowdPenalty.
+constexpr float kFightBase = 0.6f;
+constexpr float kResolveBase = 0.3f;
+constexpr float kResolveBravery = 0.6f;
+constexpr float kResolveAggression = 0.3f;
+constexpr float kCrowdPenalty = 0.5f;
+constexpr float kFightWounded = 0.6f; // при нуле здоровья решимости меньше на столько
+// Бой держится, пока угроза есть; затянулся без неё — кончился.
+constexpr int kFightMinutes = 2;
+
+// Охота (этап 5.4): с ружьём и патронами, когда голоден, к ближайшему зверю не
+// дальше kHuntSearch — люди знают, где он ходит (следы).
+constexpr float kHuntWeight = 0.8f;
+constexpr float kHuntSearch = 1200.0f;
+constexpr float kHuntScale = 1000.0f;
+constexpr int kHuntMinutes = 180;     // сколько выслеживать
+constexpr int kButcherMinutes = 10;   // разделать тушу
+constexpr float kStalkPace = 0.8f;    // крадётся: тише шаги
+constexpr float kTrackRegoal = 12.0f; // зверь ушёл от цели пути дальше — идти за ним заново
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -208,6 +231,8 @@ struct Context {
     std::array<float, Mind::kDangerMemory> dangerX{};
     std::array<float, Mind::kDangerMemory> dangerY{};
     std::size_t dangerCount = 0;
+    // Оружие в руках (этап 5.4).
+    Weapon weapon{};
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -235,6 +260,9 @@ Context makeContext(const World& world, entt::entity entity) {
                 false};
     ctx.night = isPersonalNight(ctx.traits.chronotype, time.minuteOfDay);
     ctx.threat = threatOf(world, entity);
+    if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+        ctx.weapon = *weapon;
+    }
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -535,6 +563,51 @@ Option evalFlee(const Context& ctx) {
     return {};
 }
 
+// Драться с ближайшим зомби: с оружием, смело и против одного — охотнее.
+// Дома не дерутся, а прячутся.
+Option evalFight(const Context& ctx) {
+    if (ctx.person.indoors || ctx.threat.nearest == kInvalidId ||
+        ctx.threat.level < kFleeMinThreat) {
+        return {};
+    }
+    const Traits& traits = ctx.traits;
+    const float resolve = kResolveBase + kResolveBravery * traits.bravery +
+                          kResolveAggression * traits.aggression;
+    const float healthy = 1.0f - kFightWounded * (1.0f - ctx.needs.health);
+    const float crowd = 1.0f + kCrowdPenalty * static_cast<float>(ctx.threat.count - 1);
+    const float score = ctx.threat.level * (kFightBase + weaponPower(ctx.weapon)) * resolve *
+                        healthy / crowd;
+    return {score, ctx.cell, ctx.threat.nearest};
+}
+
+// Охота: голодный с ружьём идёт к ближайшему зверю. Где именно стрелять —
+// решается по ходу (updateHunt).
+Option evalHunt(const Context& ctx) {
+    if (!isFirearm(ctx.weapon.kind) || ctx.weapon.ammo == 0 || ctx.carry.food > 0) {
+        return {};
+    }
+    float need = kHuntWeight * urge(ctx.needs.hunger, needStart(ctx));
+    if (need <= 0.0f) {
+        return {};
+    }
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food > 0) {
+        need *= 0.4f; // дома есть еда
+    }
+    if (ctx.night) {
+        need *= kNightPenalty;
+    }
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    const auto game = world.spatial().nearest(ctx.x, ctx.y, kHuntSearch, [&](const SpatialHit& hit) {
+        return registry.all_of<Animal>(hit.entity) && !risky(ctx, Map::cellAt(hit.x, hit.y));
+    });
+    if (!game) {
+        return {};
+    }
+    const float d = std::sqrt(game->distanceSq);
+    return {need * nearness(d, kHuntScale), Map::cellAt(game->x, game->y), game->id};
+}
+
 // Бегом, а не шагом: угроза настоящая.
 bool mustRun(const Context& ctx) {
     return ctx.threat.level >= kFleeMinThreat;
@@ -562,6 +635,10 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalGoHome(ctx);
     case Action::Flee:
         return evalFlee(ctx);
+    case Action::Fight:
+        return evalFight(ctx);
+    case Action::Hunt:
+        return evalHunt(ctx);
     case Action::Count:
         break;
     }
@@ -573,7 +650,8 @@ Option evaluateRaw(const Context& ctx, Action action) {
 // снова и так и не напивался.
 Option evaluate(const Context& ctx, Action action) {
     Option option = evaluateRaw(ctx, action);
-    if (action != Action::Flee && option.score > 0.0f && risky(ctx, option.spot)) {
+    if (action != Action::Flee && action != Action::Fight && option.score > 0.0f &&
+        risky(ctx, option.spot)) {
         option.score *= kDangerPenalty;
     }
     return option;
@@ -697,9 +775,19 @@ public:
                 rememberDanger(mind_, Map::cellAt(threat.nearestX, threat.nearestY), tick_,
                                tick_ + minutes(kDangerMemoryMinutes));
             }
-            if (mind_.action != Action::Flee && threat.level >= kFleeMinThreat && react()) {
+            if (mind_.action != Action::Flee && mind_.action != Action::Fight &&
+                threat.level >= kFleeMinThreat && react()) {
                 return;
             }
+        }
+        // Бой и охота идут своим ходом: цель движется, а место действия — за ней.
+        if (mind_.action == Action::Fight) {
+            updateFight();
+            return;
+        }
+        if (mind_.action == Action::Hunt) {
+            updateHunt();
+            return;
         }
         const Walker& walker = registry_.get<Walker>(entity_);
         if (mind_.phase == ActionPhase::Travel) {
@@ -761,22 +849,171 @@ private:
         fail();
     }
 
-    // Зомби рядом: бросить дело и бежать, если бегство важнее текущего с
-    // обычной надбавкой. Надбавка сна здесь не действует — угроза будит.
+    // Зомби рядом: бросить дело и бежать или драться — что важнее, — если это
+    // важнее текущего с обычной надбавкой. Надбавка сна здесь не действует —
+    // угроза будит.
     bool react() {
         if (person_.indoors) {
             return false; // дома прячется
         }
         const Context ctx = makeContext(world_, entity_);
         const Option flee = evalFlee(ctx);
+        const Option fight = evalFight(ctx);
+        const bool brave = fight.score > flee.score;
+        const Option& best = brave ? fight : flee;
         float current = evaluate(ctx, mind_.action).score;
         if (mind_.action == Action::Wander || mind_.action == Action::Idle) {
             current = std::max(current, mind_.score);
         }
-        if (flee.score <= current + kInertia) {
+        if (best.score <= current + kInertia) {
             return false;
         }
-        return tryStart(ctx, Action::Flee, flee);
+        return tryStart(ctx, brave ? Action::Fight : Action::Flee, best);
+    }
+
+    // Бой: раз в обновление восприятия — с кем драться, подойти или стоять и
+    // бить (стрелять); не бежать ли. Угрозы нет — бой кончился.
+    void updateFight() {
+        Combat& combat = registry_.get<Combat>(entity_);
+        if ((tick_ + id_) % kPerceptionIntervalTicks != 0 && tick_ < mind_.until) {
+            return;
+        }
+        const Context ctx = makeContext(world_, entity_);
+        const Option fight = evalFight(ctx);
+        if (ctx.threat.nearest == kInvalidId || fight.score <= 0.0f) {
+            combat.target = kInvalidId;
+            finish();
+            think();
+            return;
+        }
+        const Option flee = evalFlee(ctx);
+        if (flee.score > fight.score + kInertia && tryStart(ctx, Action::Flee, flee)) {
+            return;
+        }
+        // С кем бьётся — пока тот жив и на виду; иначе с ближайшим.
+        const Awareness& awareness = registry_.get<Awareness>(entity_);
+        EntityId target = combat.target;
+        const Contact* contact = target != kInvalidId ? awareness.find(target) : nullptr;
+        const entt::entity foe = world_.find(target);
+        if (contact == nullptr || !isFresh(*contact, tick_) || foe == entt::null ||
+            !registry_.all_of<Zombie>(foe)) {
+            target = ctx.threat.nearest;
+            contact = awareness.find(target);
+        }
+        if (contact == nullptr) {
+            combat.target = kInvalidId;
+            finish();
+            think();
+            return;
+        }
+        const AttackSpec& spec = attackSpec(ctx.weapon);
+        const float d = distance(ctx.x, ctx.y, contact->x, contact->y);
+        const Cell goal = Map::cellAt(contact->x, contact->y);
+        if (spec.ranged) {
+            // Стрелок стоит и ждёт, пока зомби подойдёт на верный выстрел.
+            stopWalking();
+            combat.target = contact->seen && d <= spec.reach ? target : kInvalidId;
+        } else {
+            combat.target = target;
+            Walker& walker = registry_.get<Walker>(entity_);
+            if (d <= spec.reach) {
+                stopWalking();
+            } else if (!walker.moving() || walker.waypoints.back() != goal) {
+                walker.pace = 1.0f;
+                startWalkDirect(world_, entity_, goal);
+            }
+        }
+        mind_.target = target;
+        mind_.spot = goal;
+        mind_.score = fight.score;
+        mind_.until = tick_ + minutes(kFightMinutes);
+        person_.indoors = false;
+    }
+
+    // Охота: идти за зверем, увидев на верном выстреле — стоять и стрелять;
+    // подстрелил — дойти до туши и разделать. Не вышло за отведённое время,
+    // кончились патроны, зверь ушёл далеко — бросить и отдохнуть.
+    void updateHunt() {
+        Combat& combat = registry_.get<Combat>(entity_);
+        Walker& walker = registry_.get<Walker>(entity_);
+        if (mind_.phase == ActionPhase::Perform) { // разделывает тушу
+            if (tick_ >= mind_.until) {
+                finish();
+                think();
+            }
+            return;
+        }
+        const bool look = (tick_ + id_) % kPerceptionIntervalTicks == 0;
+        if (!look && walker.moving()) {
+            return;
+        }
+        if (tick_ >= mind_.until) {
+            giveUpHunt();
+            return;
+        }
+        const entt::entity prey = world_.find(mind_.target);
+        if (prey == entt::null) {
+            giveUpHunt();
+            return;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(prey);
+        const Cell goal = Map::cellAt(at.x, at.y);
+        if (const auto* carcass = registry_.try_get<Corpse>(prey)) {
+            combat.target = kInvalidId;
+            if (carcass->kind != CorpseKind::Animal || carcass->meat == 0) {
+                giveUpHunt();
+                return;
+            }
+            const Cell cell = cellOf(self);
+            if (std::abs(cell.x - goal.x) <= 1 && std::abs(cell.y - goal.y) <= 1) {
+                stopWalking();
+                mind_.spot = cell;
+                walker.pace = 1.0f;
+                perform(); // разделать
+                return;
+            }
+            if (!walker.moving() || mind_.spot != goal) {
+                mind_.spot = goal;
+                walker.pace = 1.0f;
+                if (!startWalk(world_, entity_, goal)) {
+                    giveUpHunt();
+                }
+            }
+            return;
+        }
+        const Weapon* weapon = registry_.try_get<Weapon>(entity_);
+        if (!registry_.all_of<Animal>(prey) || weapon == nullptr || !isFirearm(weapon->kind) ||
+            weapon->ammo == 0) {
+            giveUpHunt();
+            return;
+        }
+        const AttackSpec& spec = attackSpec(*weapon);
+        const float d = distance(self.x, self.y, at.x, at.y);
+        const Contact* contact = registry_.get<Awareness>(entity_).find(mind_.target);
+        if (contact != nullptr && isFresh(*contact, tick_) && contact->seen && d <= spec.reach) {
+            stopWalking();
+            combat.target = mind_.target; // целится и стреляет
+            return;
+        }
+        combat.target = kInvalidId;
+        if (d > kHuntSearch * 1.5f) {
+            giveUpHunt();
+            return;
+        }
+        if (!walker.moving() ||
+            distance(cellX(mind_.spot), cellY(mind_.spot), at.x, at.y) > kTrackRegoal) {
+            mind_.spot = goal;
+            walker.pace = kStalkPace;
+            if (!startWalkDirect(world_, entity_, goal)) {
+                giveUpHunt();
+            }
+        }
+    }
+
+    void giveUpHunt() {
+        registry_.get<Combat>(entity_).target = kInvalidId;
+        fail();
     }
 
     // Куда бежать: домой, если он в той стороне, иначе прочь от зомби (или от
@@ -888,6 +1125,8 @@ private:
                 return false;
             }
             option.spot = *door;
+        } else if (action == Action::Fight) {
+            option.spot = ctx.cell; // подойти к зомби — по ходу боя (updateFight)
         }
 
         bool here = option.spot == ctx.cell;
@@ -921,8 +1160,11 @@ private:
         if (here) {
             stopWalking();
         }
-        registry_.get<Walker>(entity_).pace =
-            action == Action::Flee && mustRun(ctx) ? kRunPace : 1.0f;
+        registry_.get<Walker>(entity_).pace = action == Action::Flee && mustRun(ctx) ? kRunPace
+                                              : action == Action::Hunt              ? kStalkPace
+                                                                                    : 1.0f;
+        registry_.get<Combat>(entity_).target =
+            action == Action::Fight ? option.target : kInvalidId;
         person_.asleep = false;
         mind_.action = action;
         mind_.score = option.score;
@@ -936,6 +1178,9 @@ private:
             person_.indoors = false;
             mind_.nextThink =
                 tick_ + minutes(action == Action::Flee ? kFleeThinkMinutes : kThinkMinutes);
+            if (action == Action::Hunt) {
+                mind_.until = tick_ + minutes(kHuntMinutes); // сколько выслеживать
+            }
         }
         return true;
     }
@@ -1036,6 +1281,13 @@ private:
         case Action::Flee:
             duration = rng_.rangeInt(kFleeMinMinutes, kFleeMaxMinutes);
             break;
+        case Action::Fight:
+            duration = kFightMinutes;
+            person_.indoors = false; // дерётся у порога — на виду
+            break;
+        case Action::Hunt:
+            duration = kButcherMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -1096,9 +1348,35 @@ private:
         case Action::Forage:
             forage(carry);
             break;
+        case Action::Hunt:
+            if (mind_.phase == ActionPhase::Perform) {
+                butcher(carry);
+            }
+            break;
         default:
             break;
         }
+    }
+
+    // Разделать тушу: голодный съедает порцию, остальное — с собой, сколько
+    // унесёт; что не унести, остаётся в туше.
+    void butcher(Carry& carry) {
+        const entt::entity prey = world_.find(mind_.target);
+        auto* carcass = prey != entt::null ? registry_.try_get<Corpse>(prey) : nullptr;
+        if (carcass == nullptr || carcass->meat == 0) {
+            return;
+        }
+        int taken = 0;
+        if (needs_.hunger > kSnackThreshold) {
+            --carcass->meat;
+            ++taken;
+            needs_.hunger = clamp01(needs_.hunger - kMeal);
+        }
+        const int carried = std::min<int>(carcass->meat, kCarryFoodMax - carry.food);
+        carcass->meat = static_cast<std::uint8_t>(carcass->meat - carried);
+        carry.food = static_cast<std::uint8_t>(carry.food + carried);
+        taken += carried;
+        world_.record(ChronicleKind::Butchered, id_, mind_.target, taken);
     }
 
     // Найденное: что-то съесть и выпить сразу, остальное — с собой, сколько

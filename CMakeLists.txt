@@ -37,6 +37,8 @@ add_library(lw_sim STATIC
     src/sim/Chronicle.h
     src/sim/Climate.cpp
     src/sim/Climate.h
+    src/sim/Death.cpp
+    src/sim/Death.h
     src/sim/Components.h
     src/sim/Grid.h
     src/sim/Hash.h
@@ -61,6 +63,8 @@ add_library(lw_sim STATIC
     src/sim/TimeScale.h
     src/sim/Traits.cpp
     src/sim/Traits.h
+    src/sim/Weapons.cpp
+    src/sim/Weapons.h
     src/sim/Weather.h
     src/sim/World.cpp
     src/sim/World.h
@@ -80,6 +84,8 @@ add_library(lw_sim STATIC
     src/sim/nav/SearchSpace.h
     src/sim/systems/AnimalSystem.cpp
     src/sim/systems/AnimalSystem.h
+    src/sim/systems/CombatSystem.cpp
+    src/sim/systems/CombatSystem.h
     src/sim/systems/MovementSystem.cpp
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp

@@ -1,7 +1,7 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
-// животные и птицы.
+// животные и птицы, бой.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -2669,6 +2669,9 @@ void testPersonFlees() {
     const entt::entity person = field.people[0];
     entt::registry& registry = field.world.registry();
     field.place(person, 20);
+    // Безоружный и не храбрец: бежит, а не дерётся.
+    registry.get<lw::Weapon>(person) = {};
+    registry.get<lw::Traits>(person) = {};
     lw::Mind& mind = registry.get<lw::Mind>(person);
     mind.action = lw::Action::Sleep;
     mind.phase = lw::ActionPhase::Perform;
@@ -2943,6 +2946,234 @@ void testBirdsScatter() {
     CHECK(std::hypot(end.x - start.x, end.y - start.y) >= 290.0f);
 }
 
+
+// --- Бой (этап 5.4) ---------------------------------------------------------
+
+// Поставить существо в точку ряда со сдвигом в метрах.
+void putAt(Field& field, entt::entity entity, float meters) {
+    field.place(entity, 0);
+    field.world.registry().get<lw::Position>(entity).x += meters;
+    field.world.syncSpatial();
+}
+
+std::size_t countBodies(const lw::World& world, lw::CorpseKind kind) {
+    std::size_t count = 0;
+    for (const auto [entity, corpse] : world.registry().view<const lw::Corpse>().each()) {
+        count += corpse.kind == kind ? 1 : 0;
+    }
+    return count;
+}
+
+// Топор против зомби вплотную: зомби упокоен и стал телом с тем же id.
+void testMeleeKillsZombie() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Axe, 0};
+    const entt::entity zombie = field.zombie(0);
+    putAt(field, zombie, 1.0f);
+    const lw::EntityId zombieId = field.id(zombie);
+    registry.get<lw::Combat>(person).target = zombieId;
+    for (int second = 0; second < 30 && !registry.all_of<lw::Corpse>(zombie); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(field.world.find(zombieId) == zombie);
+    CHECK(registry.all_of<lw::Corpse>(zombie));
+    CHECK((!registry.any_of<lw::Zombie, lw::Walker, lw::Senses, lw::Awareness, lw::Combat>(zombie)));
+    CHECK(registry.all_of<lw::Position>(zombie));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(zombie)) {
+        CHECK(corpse->kind == lw::CorpseKind::Zombie);
+        CHECK(corpse->killer == field.id(person));
+    }
+    CHECK(field.count(lw::ChronicleKind::KilledZombie) == 1);
+    const auto& events = field.world.chronicle().events();
+    const auto killed = std::find_if(events.begin(), events.end(), [](const lw::ChronicleEvent& e) {
+        return e.kind == lw::ChronicleKind::KilledZombie;
+    });
+    CHECK(killed != events.end() && killed->a == static_cast<int>(lw::WeaponKind::Axe));
+    // Тело не мешает живым: человек больше никого не бьёт.
+    field.steps(lw::kTicksPerSecond);
+    CHECK(registry.get<lw::Combat>(person).target == lw::kInvalidId);
+}
+
+// Выстрел тратит патрон, слышен далеко: зомби, который стрелка не видит, идёт на звук.
+void testGunshotIsHeard() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Rifle, 10};
+    const entt::entity target = field.zombie(20); // 80 м: человека не видит
+    const lw::EntityId targetId = field.id(target);
+    // Слушатель — в конце ряда, в 116 м: человека не видит, выстрел винтовки слышен в 450 м.
+    const entt::entity listener = field.zombie(29);
+    registry.get<lw::Combat>(person).target = targetId;
+    field.steps(1);
+    CHECK(registry.get<lw::Weapon>(person).ammo == 9);
+    const bool shot = std::any_of(field.world.sounds().begin(), field.world.sounds().end(),
+                                  [&](const lw::Sound& sound) {
+                                      return sound.kind == lw::SoundKind::Gunshot &&
+                                             sound.source == field.id(person);
+                                  });
+    CHECK(shot);
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Zombie>(listener).state == lw::ZombieState::Investigate);
+    for (int second = 0; second < 20 && !registry.all_of<lw::Corpse>(target); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(target));
+    CHECK(registry.get<lw::Weapon>(person).ammo < 9);
+}
+
+// Зомби бьёт того, кого догнал: раны, кровотечение, крик; без защиты человек гибнет
+// и становится телом.
+void testZombieKillsPerson() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    const lw::EntityId personId = field.id(person);
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    const entt::entity zombie = field.zombie(0);
+    putAt(field, zombie, 1.0f);
+    bool screamed = false;
+    for (int tick = 0; tick < 20 * lw::kTicksPerSecond; ++tick) {
+        field.steps(1);
+        screamed = screamed || std::any_of(field.world.sounds().begin(), field.world.sounds().end(),
+                                           [&](const lw::Sound& sound) {
+                                               return sound.kind == lw::SoundKind::Scream &&
+                                                      sound.source == personId;
+                                           });
+    }
+    CHECK(screamed);
+    CHECK(registry.all_of<lw::Corpse>(person) || registry.get<lw::Needs>(person).health < 0.9f);
+    if (registry.all_of<lw::Wounds>(person)) {
+        CHECK(registry.get<lw::Wounds>(person).hurtBy == field.id(zombie));
+    }
+    for (int second = 0; second < 300 && !registry.all_of<lw::Corpse>(person); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(person));
+    CHECK((!registry.any_of<lw::Person, lw::Mind, lw::Needs, lw::Walker>(person)));
+    CHECK((registry.all_of<lw::Weapon, lw::Traits>(person))); // при теле
+    CHECK(field.world.find(personId) == person);
+    CHECK(field.count(lw::ChronicleKind::Died) == 1);
+    CHECK(countBodies(field.world, lw::CorpseKind::Human) == 1);
+    // Тело зомби больше не интересно: он не бьёт и не гонится.
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Combat>(zombie).target == lw::kInvalidId);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+}
+
+// Смелый с топором не бежит от одного зомби, а дерётся и побеждает.
+void testPersonFightsZombie() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    entt::registry& registry = field.world.registry();
+    field.place(person, 0);
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Axe, 0};
+    lw::Traits& traits = registry.get<lw::Traits>(person);
+    traits.bravery = 1.0f;
+    traits.aggression = 1.0f;
+    registry.get<lw::Needs>(person) = {};
+    lw::Mind& mind = registry.get<lw::Mind>(person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = field.world.tick() + lw::kTicksPerGameHour;
+    mind.nextThink = mind.until;
+    const entt::entity zombie = field.zombie(8); // 32 м
+    for (int i = 0; i < 4 && registry.get<lw::Mind>(person).action != lw::Action::Fight; ++i) {
+        field.steps(lw::kPerceptionIntervalTicks);
+    }
+    CHECK(registry.get<lw::Mind>(person).action == lw::Action::Fight);
+    CHECK(registry.get<lw::Combat>(person).target == field.id(zombie));
+    for (int second = 0; second < 90 && !registry.all_of<lw::Corpse>(zombie); ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(registry.all_of<lw::Corpse>(zombie));
+    CHECK(field.count(lw::ChronicleKind::KilledZombie) == 1);
+    // Угрозы нет — бой кончился, человек занят другим.
+    field.steps(lw::kTicksPerSecond);
+    if (registry.all_of<lw::Mind>(person)) {
+        CHECK(registry.get<lw::Mind>(person).action != lw::Action::Fight);
+        CHECK(registry.get<lw::Combat>(person).target == lw::kInvalidId);
+    }
+}
+
+// Голодный с винтовкой, когда в лесу пусто, охотится: выслеживает оленя,
+// стреляет, разделывает тушу и несёт мясо.
+void testHunting() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    // Лес пуст: собирать нечего.
+    const lw::Places::SpotGrid& spots = world.places().forageSpots();
+    for (int y = 0; y < spots.height(); ++y) {
+        for (int x = 0; x < spots.width(); ++x) {
+            if (const auto& spot = spots.at(x, y)) {
+                while (world.resources().takeForest(*spot)) {
+                }
+            }
+        }
+    }
+    const entt::entity hunter = field.people[0];
+    field.place(hunter, 0);
+    registry.get<lw::Weapon>(hunter) = {lw::WeaponKind::Rifle, 8};
+    lw::Needs& needs = registry.get<lw::Needs>(hunter);
+    needs = {};
+    needs.hunger = 0.9f;
+    registry.get<lw::Carry>(hunter) = {};
+    if (const entt::entity home = world.find(registry.get<lw::Person>(hunter).home); home != entt::null) {
+        registry.get<lw::Supplies>(home).food = 0;
+    }
+    lw::Mind& mind = registry.get<lw::Mind>(hunter);
+    mind.emptySearches = 255; // округа обобрана
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = world.tick();
+    const entt::entity deer = lw::createAnimal(world, lw::AnimalKind::Deer, field.at(15), field.rng);
+    world.syncSpatial();
+    const lw::ActionScores scores = lw::evaluateActions(world, hunter);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Hunt)] > 0.5f);
+    field.steps(1);
+    CHECK(registry.get<lw::Mind>(hunter).action == lw::Action::Hunt);
+    for (int minute = 0; minute < 180 && field.count(lw::ChronicleKind::Butchered) == 0; ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(field.count(lw::ChronicleKind::Hunted) == 1);
+    CHECK(field.count(lw::ChronicleKind::Butchered) == 1);
+    CHECK(registry.all_of<lw::Corpse>(deer));
+    if (const auto* carcass = registry.try_get<lw::Corpse>(deer)) {
+        CHECK(carcass->kind == lw::CorpseKind::Animal && carcass->animal == lw::AnimalKind::Deer);
+        CHECK(carcass->meat < 8);
+    }
+    if (registry.all_of<lw::Carry>(hunter)) {
+        CHECK(registry.get<lw::Carry>(hunter).food > 0);
+        CHECK(registry.get<lw::Needs>(hunter).hunger < 0.9f);
+        CHECK(registry.get<lw::Weapon>(hunter).ammo < 8);
+    }
+}
+
 } // namespace
 
 int main() {
@@ -3001,6 +3232,11 @@ int main() {
     testAnimalFlees();
     testZombieIgnoresAnimals();
     testBirdsScatter();
+    testMeleeKillsZombie();
+    testGunshotIsHeard();
+    testZombieKillsPerson();
+    testPersonFightsZombie();
+    testHunting();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

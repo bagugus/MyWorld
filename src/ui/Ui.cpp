@@ -325,6 +325,18 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::Text("Животных: %zu, убегают: %zu; стай птиц: %zu, в воздухе: %zu", animals,
                     animalsFleeing, world.registry().view<const Flock>().size(), flying);
+        std::size_t bodies[3] = {};
+        for (const auto [entity, corpse] : world.registry().view<const Corpse>().each()) {
+            ++bodies[static_cast<std::size_t>(corpse.kind)];
+        }
+        std::size_t fighting = 0;
+        std::size_t hunting = 0;
+        for (const auto [entity, mind] : world.registry().view<const Mind>().each()) {
+            fighting += mind.action == Action::Fight ? 1 : 0;
+            hunting += mind.action == Action::Hunt ? 1 : 0;
+        }
+        ImGui::Text("Дерутся: %zu, охотятся: %zu; тела: людей %zu, зомби %zu, туш %zu", fighting,
+                    hunting, bodies[0], bodies[1], bodies[2]);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
@@ -349,11 +361,15 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
         if (const auto picked = world.spatial().nearest(
                 mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
-                    return world.registry().any_of<Person, Zombie, Animal, Flock>(hit.entity);
+                    return world.registry().any_of<Person, Zombie, Animal, Flock, Corpse>(hit.entity);
                 })) {
             if (const auto* animal = world.registry().try_get<Animal>(picked->entity)) {
                 ImGui::Text("Животное #%llu: %s, %s", static_cast<unsigned long long>(picked->id),
                             animalKindName(animal->kind), animalStateName(animal->state));
+            } else if (const auto* corpse = world.registry().try_get<Corpse>(picked->entity)) {
+                ImGui::Text("Тело #%llu: %s", static_cast<unsigned long long>(picked->id),
+                            corpse->kind == CorpseKind::Animal ? animalKindName(corpse->animal)
+                                                               : corpseKindName(corpse->kind));
             } else if (const auto* flock = world.registry().try_get<Flock>(picked->entity)) {
                 ImGui::Text("Стая #%llu: %d ворон%s", static_cast<unsigned long long>(picked->id),
                             flock->birds, flock->flying ? ", в воздухе" : "");

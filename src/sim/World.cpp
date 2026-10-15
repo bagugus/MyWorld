@@ -5,6 +5,7 @@
 #include "sim/Population.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
+#include "sim/systems/CombatSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
@@ -80,6 +81,9 @@ void World::step() {
     updateZombies(*this);
     updateAnimals(*this);
     updateUtilityAi(*this);
+    // Удары и выстрелы — по целям, которые выставили решения; погибшие
+    // становятся телами до движения.
+    updateCombat(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
     spatial_.sync(registry_);
@@ -293,6 +297,7 @@ std::uint64_t World::stateHash() const {
             hasher.add(zombie->checked);
             hasher.add(zombie->alerted);
             hasher.add(zombie->lastGroan);
+            hasher.add(zombie->health);
         }
         if (const auto* horde = registry_.try_get<Horde>(entity)) {
             hasher.add(std::uint64_t{17});
@@ -319,6 +324,9 @@ std::uint64_t World::stateHash() const {
             hasher.add(animal->goal.y);
             hasher.add(animal->until);
             hasher.add(animal->threat);
+            hasher.add(animal->health);
+            hasher.add(animal->hurtAt);
+            hasher.add(animal->hurtBy);
         }
         if (const auto* flock = registry_.try_get<Flock>(entity)) {
             hasher.add(std::uint64_t{19});
@@ -327,6 +335,32 @@ std::uint64_t World::stateHash() const {
             hasher.add(flock->toX);
             hasher.add(flock->toY);
             hasher.add(flock->until);
+        }
+        if (const auto* weapon = registry_.try_get<Weapon>(entity)) {
+            hasher.add(std::uint64_t{20});
+            hasher.add(static_cast<std::uint8_t>(weapon->kind));
+            hasher.add(weapon->ammo);
+        }
+        if (const auto* combat = registry_.try_get<Combat>(entity)) {
+            hasher.add(std::uint64_t{21});
+            hasher.add(combat->target);
+            hasher.add(combat->ready);
+        }
+        if (const auto* wounds = registry_.try_get<Wounds>(entity)) {
+            hasher.add(std::uint64_t{22});
+            hasher.add(wounds->bleeding);
+            hasher.add(wounds->bites);
+            hasher.add(wounds->hurtAt);
+            hasher.add(wounds->hurtBy);
+        }
+        if (const auto* corpse = registry_.try_get<Corpse>(entity)) {
+            hasher.add(std::uint64_t{23});
+            hasher.add(static_cast<std::uint8_t>(corpse->kind));
+            hasher.add(static_cast<std::uint8_t>(corpse->animal));
+            hasher.add(static_cast<std::uint8_t>(corpse->cause));
+            hasher.add(corpse->killer);
+            hasher.add(corpse->diedAt);
+            hasher.add(corpse->meat);
         }
     }
     return hasher.value();

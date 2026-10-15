@@ -114,7 +114,8 @@ void printPeople(const lw::World& world) {
     std::printf("people %zu: walking %zu, at home %zu, asleep %zu\n", people, walking, atHome,
                 asleep);
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
-                                        "forage", "socialize", "wander", "go home", "flee"};
+                                        "forage", "socialize", "wander", "go home", "flee",
+                                        "fight",  "hunt"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -223,7 +224,7 @@ void printZombies(const lw::World& world) {
 void printAnimals(const lw::World& world) {
     const entt::registry& registry = world.registry();
     constexpr const char* kKinds[] = {"deer", "boar", "hare"};
-    constexpr const char* kStates[] = {"graze", "roam", "flee"};
+    constexpr const char* kStates[] = {"graze", "roam", "flee", "charge"};
     static_assert(std::size(kKinds) == static_cast<std::size_t>(lw::AnimalKind::Count));
     static_assert(std::size(kStates) == static_cast<std::size_t>(lw::AnimalState::Count));
     std::size_t kinds[std::size(kKinds)] = {};
@@ -253,6 +254,36 @@ void printAnimals(const lw::World& world) {
         std::printf(" %s %zu%s", kStates[i], states[i], i + 1 < std::size(kStates) ? "," : "");
     }
     std::printf("; flocks %zu (%zu birds, flying %zu)\n", flocks, birds, flying);
+}
+
+// Бой: оружие и патроны у живых, раненые, тела.
+void printCombat(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t firearms = 0;
+    long long ammo = 0;
+    std::size_t melee = 0;
+    for (const auto [entity, person, weapon] : registry.view<const lw::Person, const lw::Weapon>().each()) {
+        if (weapon.kind == lw::WeaponKind::Pistol || weapon.kind == lw::WeaponKind::Shotgun ||
+            weapon.kind == lw::WeaponKind::Rifle) {
+            ++firearms;
+            ammo += weapon.ammo;
+        } else if (weapon.kind != lw::WeaponKind::Fists) {
+            ++melee;
+        }
+    }
+    std::size_t bleeding = 0;
+    std::size_t bitten = 0;
+    for (const auto [entity, wounds] : registry.view<const lw::Wounds>().each()) {
+        bleeding += wounds.bleeding > 0.0f ? 1 : 0;
+        bitten += wounds.bites > 0 ? 1 : 0;
+    }
+    std::size_t bodies[3] = {};
+    for (const auto [entity, corpse] : registry.view<const lw::Corpse>().each()) {
+        ++bodies[static_cast<std::size_t>(corpse.kind)];
+    }
+    std::printf("combat: firearms %zu (ammo %lld), melee weapons %zu; bleeding %zu, bitten %zu; "
+                "bodies: people %zu, zombies %zu, animals %zu\n",
+                firearms, ammo, melee, bleeding, bitten, bodies[0], bodies[1], bodies[2]);
 }
 
 // Летопись: сколько событий каждого вида.
@@ -557,6 +588,7 @@ int main(int argc, char** argv) {
     printPerception(world);
     printZombies(world);
     printAnimals(world);
+    printCombat(world);
     printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

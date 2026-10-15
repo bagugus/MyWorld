@@ -115,6 +115,8 @@ enum class Action : std::uint8_t {
     Wander,    // прогулка к зданию своего или соседнего поселения
     GoHome,    // домой, переждать страх
     Flee,      // бежать от зомби (этап 5.2)
+    Fight,     // драться с зомби или стрелять в него (этап 5.4)
+    Hunt,      // охотиться: выследить, подстрелить, разделать (этап 5.4)
     Count
 };
 
@@ -236,6 +238,7 @@ struct Zombie {
     // сбежавшиеся на шум, сбиваются в орду.
     std::uint64_t alerted = 0;
     std::uint64_t lastGroan = 0;  // когда последний раз созывал стоном
+    float health = 1.0f;          // 0 — упокоен (этап 5.4)
 };
 
 // Орда: зомби, бредущие вместе за вожаком. Своей позиции в индексе нет — это
@@ -264,6 +267,7 @@ enum class AnimalState : std::uint8_t {
     Graze, // пасётся на месте
     Roam,  // переходит к другому месту у своих мест
     Flee,  // убегает от человека или зомби
+    Charge, // бросается на обидчика (кабан, этап 5.4)
     Count
 };
 
@@ -274,8 +278,11 @@ struct Animal {
     AnimalState state = AnimalState::Graze;
     Cell anchor;                  // родные места: пасётся вокруг них
     Cell goal;                    // куда идёт или бежит
-    std::uint64_t until = 0;      // до какого тика пастись на месте
-    EntityId threat = kInvalidId; // от кого бежит (Flee)
+    std::uint64_t until = 0;      // до какого тика пастись на месте (бросаться — Charge)
+    EntityId threat = kInvalidId; // от кого бежит (Flee) или на кого бросается (Charge)
+    float health = 1.0f;          // 0 — погибло (этап 5.4)
+    std::uint64_t hurtAt = 0;     // когда последний раз ранено
+    EntityId hurtBy = kInvalidId; // кем
 };
 
 // Стая птиц (вороны). Не существо: восприятия у неё нет и глазами её не
@@ -287,6 +294,63 @@ struct Flock {
     float toX = 0.0f;        // куда летит, метры
     float toY = 0.0f;
     std::uint64_t until = 0; // сидит до этого тика, потом перелетает сама
+};
+
+// Оружие (этап 5.4). Значения попадают в хеш и сохранения: новые добавлять
+// только в конец (перед Count). Свойства — sim/Weapons.h.
+enum class WeaponKind : std::uint8_t {
+    Fists,
+    Knife,
+    Axe,
+    Pistol,
+    Shotgun,
+    Rifle,
+    Count
+};
+
+// Оружие в руках человека и патроны к нему.
+struct Weapon {
+    WeaponKind kind = WeaponKind::Fists;
+    std::uint16_t ammo = 0;
+};
+
+// Кого бьёт или в кого стреляет существо (CombatSystem). Цель выставляет тот,
+// кто решает (Utility AI, ZombieSystem, AnimalSystem); удар или выстрел
+// случается, когда цель в досягаемости и оружие готово.
+struct Combat {
+    EntityId target = kInvalidId;
+    std::uint64_t ready = 0; // с какого тика можно бить снова
+};
+
+// Раны человека (этап 5.4): кровотечение отнимает здоровье, пока не
+// остановится само; укусы зомби.
+struct Wounds {
+    float bleeding = 0.0f;           // здоровья в игровой час
+    std::uint8_t bites = 0;          // сколько раз укушен
+    std::uint64_t hurtAt = 0;        // когда последний раз ранен
+    EntityId hurtBy = kInvalidId;    // кем
+};
+
+// Отчего наступила смерть. Значения попадают в хеш и сохранения: новые
+// добавлять только в конец (перед Count).
+enum class DeathCause : std::uint8_t {
+    Wounds,   // убит в бою
+    Bleeding, // истёк кровью
+    Count
+};
+
+// Чьё тело.
+enum class CorpseKind : std::uint8_t { Human, Zombie, Animal, Count };
+
+// Тело погибшего (этап 5.4). Сущность та же, что была при жизни, с тем же id:
+// у неё остаются позиция и то, что было при себе, а поведение снимается.
+struct Corpse {
+    CorpseKind kind = CorpseKind::Human;
+    AnimalKind animal = AnimalKind::Deer; // для туши
+    DeathCause cause = DeathCause::Wounds;
+    EntityId killer = kInvalidId;
+    std::uint64_t diedAt = 0;
+    std::uint8_t meat = 0; // порций мяса в туше: её можно разделать
 };
 
 } // namespace lw

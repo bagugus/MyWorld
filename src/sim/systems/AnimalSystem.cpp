@@ -28,6 +28,14 @@ constexpr int kRoamAttempts = 6;
 // Убежав, стоит настороже столько секунд.
 constexpr int kAlertMinSeconds = 10;
 constexpr int kAlertMaxSeconds = 30;
+// Раненое животное помнит обидчика столько и бежит от него, даже не видя.
+constexpr std::uint64_t kHurtMemoryTicks = 10 * kTicksPerSecond;
+// Кабан бросается на человека, который подошёл ближе kBoarCornered метров или
+// ранил его, с вероятностью kBoarChargeChance; бросок длится до kChargeSeconds.
+constexpr float kBoarCornered = 6.0f;
+constexpr float kBoarChargeChance = 0.5f;
+constexpr int kChargeSeconds = 8;
+constexpr float kChargeReach = 1.5f;
 // Направления бегства: прямо прочь, затем на 40° и 80° в стороны (cos, sin).
 constexpr float kFleeTurns[][2] = {
     {1.0f, 0.0f}, {0.766f, 0.643f}, {0.766f, -0.643f}, {0.174f, 0.985f}, {0.174f, -0.985f}};
@@ -90,17 +98,38 @@ public:
         : world_(world), registry_(world.registry()), rng_(rng), tick_(world.tick()) {}
 
     void think(entt::entity entity, Animal& animal, Walker& walker, const Position& position,
-               const Awareness& awareness) {
+               const Awareness& awareness, Combat* combat) {
         entity_ = entity;
         animal_ = &animal;
         walker_ = &walker;
         position_ = position;
+        combat_ = combat;
+        if (combat != nullptr) {
+            combat->target = kInvalidId; // бьёт, только пока бросается
+        }
         const AnimalSpec& spec = animalSpec(animal.kind);
+
+        if (animal.state == AnimalState::Charge && charge(spec)) {
+            return;
+        }
 
         // Кого боится и куда бежать: прочь от всех, сильнее — от ближних.
         EntityId threat = kInvalidId;
+        float threatDistance = 0.0f;
         float awayX = 0.0f;
         float awayY = 0.0f;
+        // Ранен недавно — обидчик угроза, даже если его не видно.
+        if (animal.hurtAt > 0 && tick_ < animal.hurtAt + kHurtMemoryTicks) {
+            const entt::entity other = world_.find(animal.hurtBy);
+            if (other != entt::null && registry_.any_of<Person, Zombie>(other)) {
+                const Position& at = registry_.get<Position>(other);
+                threat = animal.hurtBy;
+                threatDistance = distance(position.x, position.y, at.x, at.y);
+                const float weight = 1.0f / std::max(threatDistance, 0.5f);
+                awayX += (position.x - at.x) * weight;
+                awayY += (position.y - at.y) * weight;
+            }
+        }
         for (std::size_t i = 0; i < awareness.count; ++i) {
             const Contact& contact = awareness.contacts[i];
             if (!isFresh(contact, tick_)) {
@@ -117,6 +146,7 @@ public:
             }
             if (threat == kInvalidId) {
                 threat = contact.id; // контакты — угрозы и ближние вперёд
+                threatDistance = d;
             }
             const float weight = 1.0f / std::max(d, 0.5f);
             awayX += (position.x - contact.x) * weight;
@@ -126,6 +156,19 @@ public:
         if (threat != kInvalidId) {
             // Бежит — пусть добежит; добежал, а угроза рядом, — дальше.
             if (animal.state != AnimalState::Flee || !walker.moving()) {
+                // Кабан, которого загнали или ранили, может броситься на человека.
+                const entt::entity other = world_.find(threat);
+                const bool cornered = threatDistance <= kBoarCornered || animal.hurtBy == threat;
+                if (combat != nullptr && animal.kind == AnimalKind::Boar && cornered &&
+                    other != entt::null && registry_.all_of<Person>(other) &&
+                    rng_.chance(kBoarChargeChance)) {
+                    animal.state = AnimalState::Charge;
+                    animal.threat = threat;
+                    animal.until = tick_ + seconds(kChargeSeconds);
+                    if (charge(spec)) {
+                        return;
+                    }
+                }
                 flee(spec, threat, awayX, awayY);
             }
             return;
@@ -161,6 +204,33 @@ private:
     void stop() {
         walker_->waypoints.clear();
         walker_->next = 0;
+    }
+
+    // Бросок на обидчика: бежит к нему и бьёт, пока не выйдет время. false —
+    // бросок кончился (обидчика нет или время вышло).
+    bool charge(const AnimalSpec& spec) {
+        const entt::entity target = world_.find(animal_->threat);
+        if (combat_ == nullptr || target == entt::null || !registry_.all_of<Person>(target) ||
+            tick_ >= animal_->until) {
+            animal_->state = AnimalState::Flee;
+            stop();
+            return false;
+        }
+        const Position& at = registry_.get<Position>(target);
+        setSpeed(*walker_, spec.runSpeed);
+        combat_->target = animal_->threat;
+        if (distance(position_.x, position_.y, at.x, at.y) <= kChargeReach) {
+            stop();
+            return true;
+        }
+        const Cell goal = Map::cellAt(at.x, at.y);
+        animal_->goal = goal;
+        if (!startWalkDirect(world_, entity_, goal)) {
+            animal_->state = AnimalState::Flee;
+            combat_->target = kInvalidId;
+            return false;
+        }
+        return true;
     }
 
     void graze(const AnimalSpec& spec, int grazeSeconds) {
@@ -238,6 +308,7 @@ private:
     entt::entity entity_ = entt::null;
     Animal* animal_ = nullptr;
     Walker* walker_ = nullptr;
+    Combat* combat_ = nullptr;
     Position position_;
 };
 
@@ -344,6 +415,9 @@ entt::entity createAnimal(World& world, AnimalKind kind, Cell cell, Rng& rng) {
     registry.emplace<Walker>(entity, std::move(walker));
     registry.emplace<Senses>(entity, Senses{spec.sight, spec.hearing});
     registry.emplace<Awareness>(entity);
+    if (kind == AnimalKind::Boar) {
+        registry.emplace<Combat>(entity); // бросается на обидчика
+    }
     Animal animal;
     animal.kind = kind;
     animal.anchor = cell;
@@ -371,10 +445,13 @@ void updateAnimals(World& world) {
     AnimalBrain brain(world, rng);
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по
     // ходу не добавляются и не удаляются.
-    auto view = world.registry().view<const Id, Animal, Walker, const Position, const Awareness>();
+    entt::registry& registry = world.registry();
+    auto view = registry.view<const Id, Animal, Walker, const Position, const Awareness>();
     for (const auto [entity, id, animal, walker, position, awareness] : view.each()) {
-        if ((tick + id.value) % kAnimalThinkTicks == 0) {
-            brain.think(entity, animal, walker, position, awareness);
+        // Раненое решает сразу, а не в свой тик: иначе секунду стоит под выстрелами.
+        const bool hurt = animal.hurtAt > 0 && animal.hurtAt + 1 == tick; // ранили в прошлом тике
+        if ((tick + id.value) % kAnimalThinkTicks == 0 || (hurt && animal.state != AnimalState::Flee)) {
+            brain.think(entity, animal, walker, position, awareness, registry.try_get<Combat>(entity));
         }
     }
     updateFlocks(world, rng);

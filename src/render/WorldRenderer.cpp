@@ -30,6 +30,10 @@ constexpr Color kDeerColor = {150, 98, 52, 255};
 constexpr Color kBoarColor = {86, 70, 60, 255};
 constexpr Color kHareColor = {176, 166, 150, 255};
 constexpr Color kBirdColor = {24, 24, 28, 255};
+// Тела — тёмные квадратики: человек — бурый, зомби — тёмно-болотный, туша — тёмно-коричневая.
+constexpr Color kHumanBodyColor = {110, 40, 36, 255};
+constexpr Color kZombieBodyColor = {52, 62, 36, 255};
+constexpr Color kCarcassColor = {84, 56, 36, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
@@ -174,6 +178,14 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
         }
         if (const auto* flock = registry.try_get<Flock>(entity)) {
             drawFlock(*flock, registry.get<Id>(entity).value, at, zoom);
+            continue;
+        }
+        if (const auto* corpse = registry.try_get<Corpse>(entity)) {
+            const Color color = corpse->kind == CorpseKind::Human    ? kHumanBodyColor
+                                : corpse->kind == CorpseKind::Zombie ? kZombieBodyColor
+                                                                     : kCarcassColor;
+            const float half = radius * 0.7f;
+            DrawRectangleV({at.x - half, at.y - half}, {2.0f * half, 2.0f * half}, color);
             continue;
         }
         const float size = registry.all_of<Animal>(entity) ? radius * 0.8f : radius;

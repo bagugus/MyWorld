@@ -45,6 +45,7 @@ private:
     void drawHorde(entt::entity entity);
     void drawAnimal(entt::entity entity);
     void drawFlock(entt::entity entity);
+    void drawCorpse(entt::entity entity);
     // Позиция, скорость, оставшийся путь.
     void drawMovement(entt::entity entity);
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по

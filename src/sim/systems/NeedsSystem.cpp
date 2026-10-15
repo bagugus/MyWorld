@@ -2,10 +2,14 @@
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Death.h"
+#include "sim/Perception.h"
 #include "sim/World.h"
 #include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
+#include <utility>
+#include <vector>
 
 namespace lw {
 
@@ -39,6 +43,13 @@ constexpr float kWoundFear = 0.5f;
 // Страх от зомби рядом (Threat::level = 1) и как быстро он накатывает, часы.
 constexpr float kThreatFear = 0.8f;
 constexpr float kThreatResponseHours = 0.1f;
+
+// Выстрел, услышанный недавно, пугает: столько к уровню страха.
+constexpr float kGunshotFear = 0.3f;
+// Кровотечение (Wounds) за столько часов уменьшается на всю свою величину
+// (по чуть-чуть каждую минуту — примерно вдвое за час); слабее этого — остановилось.
+constexpr float kClotHours = 1.5f;
+constexpr float kBleedingStopped = 0.005f;
 
 // Компания — люди не дальше этого, метры.
 constexpr float kCompanyRadius = 20.0f;
@@ -93,6 +104,8 @@ void updateNeeds(World& world, float minutes) {
     const bool hot = environment.temperature > kHotTemperature;
     entt::registry& registry = world.registry();
 
+    // Истёкшие кровью становятся телами после обхода: компоненты по ходу не снимаются.
+    std::vector<std::pair<entt::entity, EntityId>> bledOut;
     auto view = registry.view<const Id, const Person, Needs, const Walker, const Position>();
     for (const auto [entity, id, person, needs, walker, position] : view.each()) {
         const Traits* traits = registry.try_get<Traits>(entity);
@@ -138,6 +151,16 @@ void updateNeeds(World& world, float minutes) {
         damage += needs.hunger >= 1.0f ? hours / kStarveHours : 0.0f;
         damage += needs.thirst >= 1.0f ? hours / kDehydrateHours : 0.0f;
         damage += needs.fatigue >= 1.0f ? hours / kExhaustHours : 0.0f;
+        // Кровотечение отнимает здоровье и само понемногу останавливается.
+        Wounds* wounds = registry.try_get<Wounds>(entity);
+        const bool bleeding = wounds != nullptr && wounds->bleeding > 0.0f;
+        if (bleeding) {
+            damage += wounds->bleeding * hours;
+            wounds->bleeding -= wounds->bleeding * std::min(1.0f, hours / kClotHours);
+            if (wounds->bleeding < kBleedingStopped) {
+                wounds->bleeding = 0.0f;
+            }
+        }
         if (damage > 0.0f) {
             needs.health = clamp01(needs.health - damage);
         } else if (needs.hunger < kRecoverHungerMax && needs.thirst < kRecoverThirstMax &&
@@ -155,11 +178,26 @@ void updateNeeds(World& world, float minutes) {
         // Зомби рядом пугают сразу, а не за час.
         const Threat threat = threatOf(world, entity);
         fearTarget += kThreatFear * threat.level * timidity;
+        if (const auto* awareness = registry.try_get<Awareness>(entity)) {
+            for (std::size_t i = 0; i < awareness->count; ++i) {
+                const Contact& contact = awareness->contacts[i];
+                if (contact.heard == SoundKind::Gunshot && isFresh(contact, world.tick())) {
+                    fearTarget += kGunshotFear * timidity;
+                    break;
+                }
+            }
+        }
         const bool alarm = threat.level > 0.0f && fearTarget > needs.fear;
         const float response = alarm ? kThreatResponseHours : kFearResponseHours;
         needs.fear =
             clamp01(needs.fear + (fearTarget - needs.fear) * std::min(1.0f, hours / response));
         recordChanges(world, id.value, before, needs);
+        if (bleeding && needs.health <= 0.0f) {
+            bledOut.emplace_back(entity, wounds->hurtBy);
+        }
+    }
+    for (const auto& [entity, killer] : bledOut) {
+        die(world, entity, DeathCause::Bleeding, killer);
     }
 }
 

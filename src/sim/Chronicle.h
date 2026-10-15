@@ -30,6 +30,11 @@ enum class ChronicleKind : std::uint8_t {
     HordeMerged,   // орда поглотила орду object, стало a зомби
     HordeArrived,  // орда из a зомби пришла в поселение object
     HordeScattered, // орда распалась: осталось меньше двух
+    Bitten,        // укушен зомби object
+    KilledZombie,  // упокоил зомби object; a — оружие (WeaponKind)
+    Hunted,        // добыл животное object; a — вид (AnimalKind)
+    Died,          // погиб; object — убийца (если есть), a — причина (DeathCause), b — что за тело (CorpseKind)
+    Butchered,     // разделал тушу object: a порций мяса
     Count
 };
 

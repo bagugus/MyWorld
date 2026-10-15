@@ -93,6 +93,39 @@ Phrase phraseOf(const ChronicleEvent& event) {
     case ChronicleKind::HordeScattered:
         phrase.verb = "— орда распалась";
         break;
+    case ChronicleKind::Bitten:
+        phrase.verb = "укушен зомби";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::KilledZombie:
+        phrase.verb = "упокоил зомби";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "(%s)",
+                      weaponName(static_cast<WeaponKind>(event.a)));
+        break;
+    case ChronicleKind::Hunted:
+        phrase.verb = "добыл";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "(%s)",
+                      animalKindName(static_cast<AnimalKind>(event.a)));
+        break;
+    case ChronicleKind::Died:
+        if (event.object == kInvalidId) {
+            phrase.verb = "погиб:";
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
+                          deathCauseName(static_cast<DeathCause>(event.a)));
+        } else {
+            phrase.verb = static_cast<DeathCause>(event.a) == DeathCause::Bleeding
+                              ? "истёк кровью после нападения"
+                              : "погиб в схватке с";
+            phrase.withObject = true;
+        }
+        break;
+    case ChronicleKind::Butchered:
+        phrase.verb = "разделал тушу";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— мяса %d", event.a);
+        break;
     case ChronicleKind::Count:
         break;
     }
