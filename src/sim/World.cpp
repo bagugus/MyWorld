@@ -14,7 +14,10 @@ namespace lw {
 World::World(std::uint64_t seed, const WorldConfig& config)
     : seed_(seed),
       config_(config),
-      map_(std::max(1, config.mapWidth), std::max(1, config.mapHeight)) {
+      map_(std::max(1, config.mapWidth), std::max(1, config.mapHeight)),
+      spatial_(map_.worldWidth(), map_.worldHeight()) {
+    registry_.on_destroy<Position>().connect<&SpatialIndex::onPositionDestroyed>(spatial_);
+
     const Rng root(seed);
     const auto streamCount = static_cast<std::size_t>(RngStream::Count);
     streams_.reserve(streamCount);
@@ -25,6 +28,7 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     generate();
     initWeather(*this);
     spawnWanderers(*this, config_.wanderers);
+    spatial_.sync(registry_);
 }
 
 void World::generate() {
@@ -50,6 +54,8 @@ void World::generate() {
 void World::step() {
     updateWeather(*this);
     updateWander(*this);
+    // Последним: между тиками индекс совпадает с позициями всех сущностей.
+    spatial_.sync(registry_);
     ++tick_;
 }
 

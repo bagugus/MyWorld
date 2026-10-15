@@ -3,6 +3,7 @@
 #include "sim/Id.h"
 #include "sim/Map.h"
 #include "sim/Rng.h"
+#include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
 #include "sim/Weather.h"
 
@@ -40,6 +41,9 @@ public:
     static constexpr float kTickDt = lw::kTickDt;
 
     explicit World(std::uint64_t seed, const WorldConfig& config = {});
+    // Индекс подписан на сигналы реестра по адресу: мир не копируется и не перемещается.
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
 
     // Продвигает мир ровно на один тик.
     void step();
@@ -66,6 +70,8 @@ public:
     float width() const { return map_.worldWidth(); }
     float height() const { return map_.worldHeight(); }
     std::size_t entityCount() const { return idToEntity_.size(); }
+    // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
+    const SpatialIndex& spatial() const { return spatial_; }
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
@@ -86,6 +92,8 @@ private:
 
     Weather weather_;
 
+    // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
+    SpatialIndex spatial_;
     entt::registry registry_;
     std::vector<Rng> streams_;
     // Только для поиска по id; обходить нельзя — порядок не детерминирован.

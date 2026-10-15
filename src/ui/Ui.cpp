@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 
 namespace lw::ui {
@@ -309,6 +310,18 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         const Vector2 mouse = GetScreenToWorld2D(GetMousePosition(), camera.camera());
         ImGui::Text("Зум: %.2f пикс/м", camera.zoom());
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
+        // Проверка пространственного индекса: соседи курсора.
+        constexpr float kNeighbourRadius = 50.0f;
+        int neighbours = 0;
+        world.spatial().forEachInRadius(mouse.x, mouse.y, kNeighbourRadius,
+                                        [&neighbours](const SpatialHit&) { ++neighbours; });
+        if (const auto nearest = world.spatial().nearest(mouse.x, mouse.y, 1000.0f)) {
+            ImGui::Text("В радиусе %.0f м: %d, ближайший #%llu в %.0f м", kNeighbourRadius,
+                        neighbours, static_cast<unsigned long long>(nearest->id),
+                        std::sqrt(nearest->distanceSq));
+        } else {
+            ImGui::Text("В радиусе %.0f м: %d, ближе 1 км никого", kNeighbourRadius, neighbours);
+        }
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {
             ImGui::Text("Клетка: %d, %d, высота %.1f м, %+.1f °C", cell.x, cell.y,

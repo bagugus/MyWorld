@@ -45,6 +45,8 @@ add_library(lw_sim STATIC
     src/sim/Rng.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
+    src/sim/SpatialIndex.cpp
+    src/sim/SpatialIndex.h
     src/sim/TimeScale.h
     src/sim/Weather.h
     src/sim/World.cpp

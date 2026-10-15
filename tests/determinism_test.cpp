@@ -1,5 +1,5 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
-// драйвер времени, календарь, климат и погода.
+// драйвер времени, календарь, климат и погода, пространственный индекс.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -8,6 +8,7 @@
 #include "sim/Map.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
+#include "sim/SpatialIndex.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -15,6 +16,8 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -497,6 +500,248 @@ void testWeather() {
     CHECK(same.weather().anomaly != other.weather().anomaly);
 }
 
+
+// --- Пространственный индекс -------------------------------------------------
+
+entt::entity spawnAt(entt::registry& registry, lw::EntityId id, float x, float y) {
+    const entt::entity entity = registry.create();
+    registry.emplace<lw::Id>(entity, id);
+    registry.emplace<lw::Position>(entity, x, y);
+    return entity;
+}
+
+// Эталон — полный перебор. Результат — id по возрастанию.
+std::vector<lw::EntityId> bruteRadius(const entt::registry& registry, float x, float y,
+                                      float radius) {
+    std::vector<lw::EntityId> ids;
+    for (const auto [entity, id, position] :
+         registry.view<const lw::Id, const lw::Position>().each()) {
+        const float dx = position.x - x;
+        const float dy = position.y - y;
+        if (dx * dx + dy * dy <= radius * radius) {
+            ids.push_back(id.value);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+// Ближайший перебором; при равных расстояниях — меньший id.
+// oddOnly — только сущности с нечётным id.
+lw::EntityId bruteNearest(const entt::registry& registry, float x, float y, float radius,
+                          bool oddOnly) {
+    std::optional<std::pair<float, lw::EntityId>> best;
+    for (const auto [entity, id, position] :
+         registry.view<const lw::Id, const lw::Position>().each()) {
+        const float dx = position.x - x;
+        const float dy = position.y - y;
+        const float distanceSq = dx * dx + dy * dy;
+        if (distanceSq > radius * radius || (oddOnly && id.value % 2 == 0)) {
+            continue;
+        }
+        if (!best || distanceSq < best->first ||
+            (distanceSq == best->first && id.value < best->second)) {
+            best = std::pair{distanceSq, id.value};
+        }
+    }
+    return best ? best->second : lw::kInvalidId;
+}
+
+std::vector<lw::EntityId> hitIds(const std::vector<lw::SpatialHit>& hits) {
+    std::vector<lw::EntityId> ids;
+    for (const lw::SpatialHit& hit : hits) {
+        ids.push_back(hit.id);
+    }
+    return ids;
+}
+
+// Сверяет запросы индекса с перебором в случайных точках, в том числе за краем мира.
+void checkAgainstBruteForce(const entt::registry& registry, const lw::SpatialIndex& index,
+                            lw::Rng& rng, float width, float height) {
+    CHECK(index.size() == registry.view<const lw::Position>().size());
+    std::vector<lw::SpatialHit> hits;
+    for (int q = 0; q < 400; ++q) {
+        float x = rng.range(-60.0f, width + 60.0f);
+        float y = rng.range(-60.0f, height + 60.0f);
+        if (q % 4 == 0) {
+            // Узел решётки или середина между узлами: много равных расстояний.
+            x = static_cast<float>(rng.rangeInt(0, 20)) * 10.0f;
+            y = static_cast<float>(rng.rangeInt(0, 10)) * 10.0f;
+        }
+        const float radius = q % 3 == 0 ? rng.range(0.0f, 8.0f) : rng.range(0.0f, 150.0f);
+
+        index.queryRadius(x, y, radius, hits);
+        std::vector<lw::EntityId> ids = hitIds(hits);
+        std::sort(ids.begin(), ids.end());
+        CHECK(ids == bruteRadius(registry, x, y, radius));
+        for (const lw::SpatialHit& hit : hits) {
+            const lw::Position& position = registry.get<lw::Position>(hit.entity);
+            CHECK(registry.get<lw::Id>(hit.entity).value == hit.id);
+            CHECK(position.x == hit.x && position.y == hit.y);
+        }
+
+        const auto nearest = index.nearest(x, y, radius);
+        CHECK((nearest ? nearest->id : lw::kInvalidId) ==
+              bruteNearest(registry, x, y, radius, false));
+        const auto nearestOdd = index.nearest(
+            x, y, radius, [](const lw::SpatialHit& hit) { return hit.id % 2 == 1; });
+        CHECK((nearestOdd ? nearestOdd->id : lw::kInvalidId) ==
+              bruteNearest(registry, x, y, radius, true));
+    }
+}
+
+void testSpatialIndex() {
+    // 200 × 100 м — 7 × 4 корзины, крайние неполные.
+    constexpr float kWidth = 200.0f;
+    constexpr float kHeight = 100.0f;
+    entt::registry registry;
+    lw::SpatialIndex index(kWidth, kHeight);
+    registry.on_destroy<lw::Position>().connect<&lw::SpatialIndex::onPositionDestroyed>(index);
+    CHECK(index.columns() == 7 && index.rows() == 4);
+
+    lw::Rng rng(11);
+    lw::EntityId nextId = 1;
+    std::vector<entt::entity> entities;
+    for (int i = 0; i < 300; ++i) {
+        // Часть — за краем мира.
+        entities.push_back(spawnAt(registry, nextId++, rng.range(-30.0f, kWidth + 30.0f),
+                                   rng.range(-30.0f, kHeight + 30.0f)));
+    }
+    entities.push_back(spawnAt(registry, nextId++, kWidth, kHeight));
+    entities.push_back(spawnAt(registry, nextId++, 0.0f, 0.0f));
+    for (int gx = 0; gx <= 20; gx += 2) {
+        for (int gy = 0; gy <= 10; gy += 2) {
+            entities.push_back(spawnAt(registry, nextId++, static_cast<float>(gx) * 10.0f,
+                                       static_cast<float>(gy) * 10.0f));
+        }
+    }
+    index.sync(registry);
+    checkAgainstBruteForce(registry, index, rng, kWidth, kHeight);
+
+    // Снимок: без sync индекс помнит старую позицию.
+    lw::Position& moved = registry.get<lw::Position>(entities[0]);
+    const float oldX = moved.x;
+    const float oldY = moved.y;
+    moved.x = oldX + 77.0f;
+    std::vector<lw::SpatialHit> hits;
+    index.queryRadius(oldX, oldY, 0.0f, hits);
+    CHECK(std::any_of(hits.begin(), hits.end(),
+                      [&](const lw::SpatialHit& hit) { return hit.entity == entities[0]; }));
+
+    // Движение (в том числе через границы корзин), удаление, снятие Position,
+    // новые сущности на освободившихся номерах реестра.
+    for (int round = 0; round < 5; ++round) {
+        for (const entt::entity entity : entities) {
+            if (registry.valid(entity) && registry.all_of<lw::Position>(entity) &&
+                rng.below(3) != 0) {
+                lw::Position& position = registry.get<lw::Position>(entity);
+                position.x += rng.range(-40.0f, 40.0f);
+                position.y += rng.range(-40.0f, 40.0f);
+            }
+        }
+        for (int i = 0; i < 15; ++i) {
+            const entt::entity entity =
+                entities[rng.below(static_cast<std::uint32_t>(entities.size()))];
+            if (!registry.valid(entity)) {
+                continue;
+            }
+            const std::size_t before = index.size();
+            const bool hadPosition = registry.all_of<lw::Position>(entity);
+            if (i % 3 == 0) {
+                registry.remove<lw::Position>(entity);
+            } else {
+                registry.destroy(entity);
+            }
+            // Удалённые исчезают сразу, без sync.
+            CHECK(index.size() == before - (hadPosition ? 1u : 0u));
+        }
+        for (int i = 0; i < 10; ++i) {
+            entities.push_back(spawnAt(registry, nextId++, rng.range(0.0f, kWidth),
+                                       rng.range(0.0f, kHeight)));
+        }
+        index.sync(registry);
+        checkAgainstBruteForce(registry, index, rng, kWidth, kHeight);
+    }
+
+    // Отрицательный радиус и NaN ничего не находят.
+    index.queryRadius(50.0f, 50.0f, -1.0f, hits);
+    CHECK(hits.empty());
+    CHECK(!index.nearest(50.0f, 50.0f, -1.0f));
+    index.queryRadius(std::nanf(""), 50.0f, 10.0f, hits);
+    CHECK(hits.empty());
+}
+
+// Содержимое индекса и порядок выдачи не зависят от порядка вставки, истории
+// перемещений и номеров сущностей в реестре — только от id и позиций.
+void testSpatialIndexOrderIndependent() {
+    constexpr float kSize = 300.0f;
+    constexpr std::size_t kCount = 500;
+    std::vector<lw::Position> positions;
+    lw::Rng rng(5);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        positions.push_back({rng.range(0.0f, kSize), rng.range(0.0f, kSize)});
+    }
+
+    entt::registry forward;
+    entt::registry backward;
+    lw::SpatialIndex forwardIndex(kSize, kSize);
+    lw::SpatialIndex backwardIndex(kSize, kSize);
+    std::vector<entt::entity> forwardEntities;
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forwardEntities.push_back(spawnAt(forward, i + 1, positions[i].x, positions[i].y));
+    }
+    for (std::size_t i = kCount; i-- > 0;) {
+        spawnAt(backward, i + 1, positions[i].x, positions[i].y);
+    }
+    // Разная история: первый индекс видел промежуточные позиции, второй — нет.
+    forwardIndex.sync(forward);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forward.get<lw::Position>(forwardEntities[i]).x = static_cast<float>(i % 300);
+    }
+    forwardIndex.sync(forward);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forward.get<lw::Position>(forwardEntities[i]) = positions[i];
+    }
+    forwardIndex.sync(forward);
+    backwardIndex.sync(backward);
+
+    std::vector<lw::SpatialHit> a;
+    std::vector<lw::SpatialHit> b;
+    bool same = true;
+    for (int q = 0; q < 100; ++q) {
+        const float x = rng.range(0.0f, kSize);
+        const float y = rng.range(0.0f, kSize);
+        const float radius = rng.range(0.0f, 120.0f);
+        forwardIndex.queryRadius(x, y, radius, a);
+        backwardIndex.queryRadius(x, y, radius, b);
+        same = same && !a.empty() == !b.empty() && hitIds(a) == hitIds(b);
+    }
+    CHECK(same);
+}
+
+// Мир синхронизирует индекс в конце тика и убирает удалённые сущности сразу.
+void testWorldSpatialIndex() {
+    lw::World world(3, smallConfig(200));
+    for (int i = 0; i < 300; ++i) {
+        world.step();
+    }
+    const lw::World& readOnly = world;
+    CHECK(world.spatial().size() == 200);
+    std::vector<lw::SpatialHit> hits;
+    bool allFound = true;
+    for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
+        world.spatial().queryRadius(position.x, position.y, 0.0f, hits);
+        allFound = allFound &&
+                   std::any_of(hits.begin(), hits.end(),
+                               [&](const lw::SpatialHit& hit) { return hit.entity == entity; });
+    }
+    CHECK(allFound);
+
+    const entt::entity victim = *readOnly.registry().view<const lw::Position>().begin();
+    world.destroy(victim);
+    CHECK(world.spatial().size() == 199);
+}
+
 } // namespace
 
 int main() {
@@ -510,6 +755,9 @@ int main() {
     testCalendar();
     testClimate();
     testWeather();
+    testSpatialIndex();
+    testSpatialIndexOrderIndependent();
+    testWorldSpatialIndex();
 
     if (failures == 0) {
         std::printf("all tests passed\n");
