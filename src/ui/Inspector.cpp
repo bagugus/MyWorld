@@ -5,6 +5,7 @@
 #include "sim/Map.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
+#include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
@@ -67,6 +68,10 @@ EntityId idOf(const entt::registry& registry, entt::entity entity) {
 void drawSupplies(const entt::registry& registry, entt::entity building) {
     if (const auto* supplies = registry.try_get<Supplies>(building)) {
         ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
+        if (const auto* info = registry.try_get<Building>(building);
+            info != nullptr && rainBarrel(info->kind) > 0) {
+            ImGui::Text("Бочка для дождя: до %d порций воды", rainBarrel(info->kind));
+        }
     }
 }
 
@@ -279,6 +284,10 @@ void Inspector::drawPerson(entt::entity entity) {
                 return;
             }
         }
+        if (mind->action == Action::Forage) {
+            ImGui::Text("Ягоды и грибы на месте сбора: %d из %d",
+                        world_.resources().forestAt(mind->spot), Resources::kForestMax);
+        }
         ImGui::Text("Оценка при выборе: %.2f", mind->score);
         if (mind->phase == ActionPhase::Perform &&
             mind->until != std::numeric_limits<std::uint64_t>::max() && mind->until > tick) {
@@ -291,6 +300,9 @@ void Inspector::drawPerson(entt::entity entity) {
         if (mind->failures > 0) {
             ImGui::TextColored({1.0f, 0.55f, 0.3f, 1.0f}, "Не нашлось пути: %u раз подряд",
                                mind->failures);
+        }
+        if (mind->emptySearches > 0) {
+            ImGui::Text("Обысков без еды подряд: %d", mind->emptySearches);
         }
     }
 

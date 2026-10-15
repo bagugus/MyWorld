@@ -54,6 +54,10 @@ constexpr std::uint8_t kCarryWaterMax = 6;
 // Запасливый идёт за едой, когда дома (с несомым) меньше kStockLow порций.
 constexpr int kStockLow = 2;
 constexpr float kStockWeight = 0.25f;
+// Каждый обыск подряд без еды умножает желание искать еду в зданиях на это, но
+// не ниже kEmptySearchFloor: обобранная округа гонит в лес, а отчаявшийся всё равно ищет.
+constexpr float kEmptySearchDecay = 0.6f;
+constexpr float kEmptySearchFloor = 0.25f;
 // Поесть и попить из найденного сразу, если голод (жажда) больше этого.
 constexpr float kSnackThreshold = 0.2f;
 
@@ -120,21 +124,6 @@ float urge(float value, float start) {
     return u * std::sqrt(u);
 }
 
-// Урожай леса по сезону: доля удачных часов сбора.
-float forageYield(Season season) {
-    switch (season) {
-    case Season::Spring:
-        return 0.4f;
-    case Season::Summer:
-        return 0.7f;
-    case Season::Autumn:
-        return 0.9f;
-    case Season::Winter:
-        return 0.05f;
-    }
-    return 0.0f;
-}
-
 Cell cellOf(const Position& position) {
     return Map::cellAt(position.x, position.y);
 }
@@ -163,6 +152,7 @@ struct Context {
     const Needs& needs;
     const Traits& traits;
     const Carry& carry;
+    std::uint8_t emptySearches;
     Cell cell;
     float x;
     float y;
@@ -186,6 +176,7 @@ Context makeContext(const World& world, entt::entity entity) {
     static const Traits kAverage{};
     static const Carry kEmpty{};
     const Carry* carry = registry.try_get<Carry>(entity);
+    const Mind* mind = registry.try_get<Mind>(entity);
     const CalendarTime time = calendarAt(world.tick());
     Context ctx{world,
                 entity,
@@ -194,6 +185,7 @@ Context makeContext(const World& world, entt::entity entity) {
                 registry.get<Needs>(entity),
                 traits != nullptr ? *traits : kAverage,
                 carry != nullptr ? *carry : kEmpty,
+                mind != nullptr ? mind->emptySearches : std::uint8_t{0},
                 cellOf(position),
                 position.x,
                 position.y,
@@ -298,9 +290,12 @@ Option evalScavenge(const Context& ctx) {
     const bool waterAtHand =
         ctx.carry.water > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->water > 0);
     const float start = needStart(ctx);
+    // Еды в обысках подряд не нашлось — округа обобрана, за едой тянет меньше.
+    const float foodHope = std::max(
+        kEmptySearchFloor, std::pow(kEmptySearchDecay, static_cast<float>(ctx.emptySearches)));
     float need = 0.0f;
     if (!foodAtHand) {
-        need = std::max(need, kScavengeWeight * urge(ctx.needs.hunger, start));
+        need = std::max(need, kScavengeWeight * urge(ctx.needs.hunger, start) * foodHope);
     }
     if (!waterAtHand) {
         need = std::max(need, kScavengeWaterWeight * urge(ctx.needs.thirst, start));
@@ -309,7 +304,7 @@ Option evalScavenge(const Context& ctx) {
     // несомое домой тоже считается, с полными руками не ходят.
     if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food + ctx.carry.food < kStockLow &&
         !ctx.night) {
-        need = std::max(need, kStockWeight * ctx.traits.prudence);
+        need = std::max(need, kStockWeight * ctx.traits.prudence * foodHope);
     }
     const Places::SettlementPlace* settlement = ctx.world.places().settlement(ctx.settlement);
     if (need <= 0.0f || settlement == nullptr) {
@@ -327,8 +322,8 @@ Option evalForage(const Context& ctx) {
     if (ctx.carry.food > 0) {
         return {};
     }
-    float need = kForageWeight * urge(ctx.needs.hunger, needStart(ctx)) *
-                 forageYield(ctx.time.season);
+    // Сезон сказывается через запас леса (Resources): зимой он пуст.
+    float need = kForageWeight * urge(ctx.needs.hunger, needStart(ctx));
     if (need <= 0.0f) {
         return {};
     }
@@ -339,7 +334,10 @@ Option evalForage(const Context& ctx) {
         need *= kNightPenalty;
     }
     const World& world = ctx.world;
-    const auto spot = world.places().nearestForage(world.nav(), ctx.cell, kForageSearch);
+    const Resources& resources = world.resources();
+    const auto spot = world.places().nearestForage(
+        world.nav(), ctx.cell, kForageSearch,
+        [&resources](Cell cell) { return resources.forestAt(cell) > 0; });
     if (!spot) {
         return {};
     }
@@ -811,6 +809,7 @@ private:
                 takeSupplies(*supplies, carry);
             } else {
                 world_.record(ChronicleKind::Scavenged, id_, mind_.target);
+                countSearch(false);
             }
             break;
         case Action::Forage:
@@ -834,6 +833,7 @@ private:
         supplies.food = static_cast<std::uint16_t>(supplies.food - food);
         supplies.water = static_cast<std::uint16_t>(supplies.water - water);
         world_.record(ChronicleKind::Scavenged, id_, mind_.target, food, water);
+        countSearch(food > 0);
         if (food > 0 && needs_.hunger > kSnackThreshold) {
             --food;
             needs_.hunger = clamp01(needs_.hunger - kMeal);
@@ -851,15 +851,28 @@ private:
         carry.water = static_cast<std::uint8_t>(carry.water + carryWater);
     }
 
+    // Обыски подряд без еды: с каждым искать еду в зданиях хочется меньше.
+    void countSearch(bool found) {
+        if (found) {
+            mind_.emptySearches = 0;
+        } else if (mind_.emptySearches < 255) {
+            ++mind_.emptySearches;
+        }
+    }
+
+    // Сбор из запаса леса: порцию съесть на месте, запасливый уносит ещё одну.
+    // Пока шёл, лес могли обобрать другие — тогда ничего.
     void forage(Carry& carry) {
-        const float yield = forageYield(calendarAt(tick_).season);
-        if (!rng_.chance(yield)) {
+        Resources& resources = world_.resources();
+        if (!resources.takeForest(mind_.spot)) {
             return;
         }
         needs_.hunger = clamp01(needs_.hunger - kForageMeal);
         const Traits* traits = registry_.try_get<Traits>(entity_);
         const float prudence = traits != nullptr ? traits->prudence : 0.5f;
-        if (carry.food < kCarryFoodMax && rng_.chance(prudence * yield)) {
+        if (carry.food < kCarryFoodMax && resources.forestAt(mind_.spot) > 0 &&
+            rng_.chance(prudence)) {
+            resources.takeForest(mind_.spot);
             ++carry.food;
         }
     }

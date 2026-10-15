@@ -117,15 +117,17 @@ EntityId Places::nearestSettlement(float x, float y) const {
 }
 
 std::optional<Cell> Places::nearestWater(const NavGrid& nav, Cell from, float maxDistance) const {
-    return nearestSpot(water_, nav, from, maxDistance);
+    return nearestSpot(water_, nav, from, maxDistance, {});
 }
 
-std::optional<Cell> Places::nearestForage(const NavGrid& nav, Cell from, float maxDistance) const {
-    return nearestSpot(forage_, nav, from, maxDistance);
+std::optional<Cell> Places::nearestForage(const NavGrid& nav, Cell from, float maxDistance,
+                                          const std::function<bool(Cell)>& accept) const {
+    return nearestSpot(forage_, nav, from, maxDistance, accept);
 }
 
 std::optional<Cell> Places::nearestSpot(const SpotGrid& spots, const NavGrid& nav, Cell from,
-                                        float maxDistance) {
+                                        float maxDistance,
+                                        const std::function<bool(Cell)>& accept) {
     if (spots.width() == 0) {
         return std::nullopt;
     }
@@ -149,7 +151,8 @@ std::optional<Cell> Places::nearestSpot(const SpotGrid& spots, const NavGrid& na
         }
         const float d = distanceSq(Map::cellCenter(spot->x), Map::cellCenter(spot->y), fx, fy);
         // При равных расстояниях остаётся первое по обходу: порядок колец фиксирован.
-        if (d > maxSq || (best && d >= bestSq) || !nav.connected(from, *spot)) {
+        if (d > maxSq || (best && d >= bestSq) || (accept && !accept(*spot)) ||
+            !nav.connected(from, *spot)) {
             return;
         }
         best = spot;

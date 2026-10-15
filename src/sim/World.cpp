@@ -6,6 +6,7 @@
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
 
@@ -57,10 +58,12 @@ void World::generate() {
     nav_.build(map_, registry_);
     graph_.build(nav_);
     places_.build(map_, nav_, registry_);
+    resources_.build(places_);
 }
 
 void World::step() {
     updateWeather(*this);
+    updateResources(*this);
     tickNeeds(*this);
     updateUtilityAi(*this);
     updateMovement(*this, kTickDt);
@@ -114,6 +117,7 @@ std::uint64_t World::stateHash() const {
     hasher.add(weather_.snowCover);
     hasher.add(static_cast<std::uint64_t>(chronicle_.events().size()));
     hasher.add(chronicle_.hash());
+    hasher.add(resources_.hash());
 
     std::vector<std::pair<EntityId, entt::entity>> order;
     order.reserve(idToEntity_.size());
@@ -215,6 +219,7 @@ std::uint64_t World::stateHash() const {
             hasher.add(mind->until);
             hasher.add(mind->nextThink);
             hasher.add(mind->failures);
+            hasher.add(mind->emptySearches);
             for (const EntityId building : mind->searched) {
                 hasher.add(building);
             }

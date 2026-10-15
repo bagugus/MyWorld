@@ -133,6 +133,10 @@ void printPeople(const lw::World& world) {
     }
     std::printf("  supplies in buildings: food %lld, water %lld; carried food %lld\n", food,
                 water, carried);
+    const lw::Resources& resources = world.resources();
+    std::printf("  forest: %lld portions in %d blocks (%d empty); rain filled barrels by %u\n",
+                resources.forestTotal(), resources.forestBlocks(), resources.forestEmpty(),
+                static_cast<unsigned>(resources.rainPortions()));
     if (people > 0) {
         const float n = static_cast<float>(people);
         std::printf("  mean needs: hunger %.2f, thirst %.2f, fatigue %.2f, fear %.2f, "

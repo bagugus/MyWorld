@@ -47,6 +47,8 @@ add_library(lw_sim STATIC
     src/sim/Places.h
     src/sim/Population.cpp
     src/sim/Population.h
+    src/sim/Resources.cpp
+    src/sim/Resources.h
     src/sim/Rng.cpp
     src/sim/Rng.h
     src/sim/SimDriver.cpp
@@ -77,6 +79,8 @@ add_library(lw_sim STATIC
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp
     src/sim/systems/NeedsSystem.h
+    src/sim/systems/ResourceSystem.cpp
+    src/sim/systems/ResourceSystem.h
     src/sim/systems/UtilityAiSystem.cpp
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp

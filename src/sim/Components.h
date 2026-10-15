@@ -129,6 +129,8 @@ struct Mind {
     std::uint64_t until = 0;          // тик конца выполнения
     std::uint64_t nextThink = 0;      // тик следующего пересмотра решения
     std::uint32_t failures = 0;       // подряд не нашлось пути — для отладки
+    // Обыски подряд, где не нашлось еды: округа обобрана.
+    std::uint8_t emptySearches = 0;
     // Обысканные здания, кольцевой буфер.
     EntityId searched[kSearchedMemory] = {};
     std::uint8_t searchedNext = 0;

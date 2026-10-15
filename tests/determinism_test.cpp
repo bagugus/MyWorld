@@ -1,6 +1,6 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение, нужды, черты, Utility AI.
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -9,6 +9,7 @@
 #include "sim/Components.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
+#include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
@@ -19,6 +20,7 @@
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 
 #include <algorithm>
@@ -1813,6 +1815,177 @@ void testAiSleepsWhereStranded() {
 
 // Двое суток мира: люди едят, пьют и спят, здоровье не падает; ночью спят.
 // Летопись: биография по id (субъект и объект), счётчики, накопленный хеш.
+// Все лесные места по блокам Places.
+std::vector<lw::Cell> forageSpots(const lw::World& world) {
+    std::vector<lw::Cell> spots;
+    for (const auto& spot : world.places().forageSpots().cells()) {
+        if (spot) {
+            spots.push_back(*spot);
+        }
+    }
+    return spots;
+}
+
+// Запас леса: убывает при сборе, растёт по сезону до предела, зимой пропадает;
+// дождь копится долями порции.
+void testResources() {
+    lw::World world(7, regionConfig());
+    lw::Resources& resources = world.resources();
+    const std::vector<lw::Cell> spots = forageSpots(world);
+    CHECK(!spots.empty() && resources.forestBlocks() == static_cast<int>(spots.size()));
+    if (spots.empty()) {
+        return;
+    }
+    const lw::Cell spot = spots.front();
+    CHECK(resources.forestAt(spot) == lw::Resources::kForestStart);
+    CHECK(resources.forestTotal() ==
+          static_cast<long long>(spots.size()) * lw::Resources::kForestStart);
+    CHECK(resources.forestAt({-1, -1}) == 0 && resources.forestAt({100000, 5}) == 0);
+    // Нелесной блок: запаса нет.
+    bool barrenFound = false;
+    for (int y = 0; y < world.map().height() && !barrenFound; y += lw::Places::kSpotBlock) {
+        for (int x = 0; x < world.map().width() && !barrenFound; x += lw::Places::kSpotBlock) {
+            if (!world.places().forageSpots().at(x / lw::Places::kSpotBlock,
+                                                 y / lw::Places::kSpotBlock)) {
+                barrenFound = true;
+                CHECK(resources.forestAt({x, y}) == 0 && !resources.takeForest({x, y}));
+            }
+        }
+    }
+    CHECK(barrenFound);
+
+    // Сбор: до нуля, дальше пусто.
+    for (int i = 0; i < lw::Resources::kForestStart; ++i) {
+        CHECK(resources.takeForest(spot));
+    }
+    CHECK(resources.forestAt(spot) == 0 && !resources.takeForest(spot));
+    CHECK(resources.forestEmpty() == 1);
+    // Пустое место ближайшим не считается.
+    const auto nearest = world.places().nearestForage(world.nav(), spot, 500.0f);
+    const auto stocked = world.places().nearestForage(
+        world.nav(), spot, 500.0f, [&](lw::Cell c) { return resources.forestAt(c) > 0; });
+    CHECK(nearest && *nearest == spot);
+    CHECK(!stocked || !(*stocked == spot));
+
+    // Весной порция за двое суток, летом — каждые сутки, до предела.
+    resources.growForest(lw::Season::Spring, 1);
+    CHECK(resources.forestAt(spot) == 0);
+    resources.growForest(lw::Season::Spring, 2);
+    CHECK(resources.forestAt(spot) == 1);
+    for (int day = 0; day < 10; ++day) {
+        resources.growForest(lw::Season::Summer, day);
+    }
+    CHECK(resources.forestAt(spot) == lw::Resources::kForestMax);
+    CHECK(resources.forestEmpty() == 0);
+    // Зима: за kForestMax суток пусто везде.
+    for (int day = 0; day < lw::Resources::kForestMax; ++day) {
+        resources.growForest(lw::Season::Winter, day);
+    }
+    CHECK(resources.forestTotal() == 0);
+    CHECK(resources.forestEmpty() == resources.forestBlocks());
+
+    // Ливень наполняет порцию за 180 минут, вполсилы — вдвое дольше.
+    int portions = 0;
+    for (int minute = 0; minute < 180; ++minute) {
+        portions += resources.collectRain(1.0f, 1.0f);
+    }
+    CHECK(portions == 1);
+    for (int minute = 0; minute < 350; ++minute) {
+        portions += resources.collectRain(0.5f, 1.0f);
+    }
+    CHECK(portions == 1);
+    for (int minute = 0; minute < 20; ++minute) {
+        portions += resources.collectRain(0.5f, 1.0f);
+    }
+    CHECK(portions == 2 && resources.rainPortions() == 2);
+    CHECK(resources.collectRain(0.0f, 1000.0f) == 0);
+
+    // Запас — часть состояния.
+    const lw::World other(7, regionConfig());
+    CHECK(world.resources().hash() != other.resources().hash());
+}
+
+// Тёплый ливень наполняет бочки домов, многоэтажек и сараев до предела;
+// в магазинах воды не прибавляется.
+void testRainFillsBarrels() {
+    lw::World world(7, regionConfig());
+    entt::registry& registry = world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.water = 0;
+    }
+    lw::Weather& weather = world.weather();
+    weather.kind = lw::WeatherKind::Storm;
+    weather.minutesLeft = 100000;
+    weather.cloudCover = 1.0f;
+    weather.precipitation = 1.0f;
+    weather.anomaly = 20.0f; // тепло: дождь, а не снег
+    const std::uint64_t end = world.tick() + 24 * lw::kTicksPerGameHour;
+    while (world.tick() < end) {
+        world.step();
+    }
+    CHECK(world.resources().rainPortions() >= 4);
+    bool filled = false;
+    bool withinBarrel = true;
+    bool shopsDry = true;
+    for (const auto [entity, building, supplies] :
+         registry.view<const lw::Building, const lw::Supplies>().each()) {
+        const std::uint16_t barrel = lw::rainBarrel(building.kind);
+        filled = filled || supplies.water > 0;
+        withinBarrel = withinBarrel && supplies.water <= barrel;
+        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop || supplies.water == 0);
+    }
+    CHECK(filled && withinBarrel && shopsDry);
+    // Сутки ливня — дом полон.
+    for (const auto [entity, building, supplies] :
+         registry.view<const lw::Building, const lw::Supplies>().each()) {
+        if (building.kind == lw::BuildingKind::House) {
+            CHECK(supplies.water == lw::rainBarrel(building.kind));
+            break;
+        }
+    }
+}
+
+// Голодный в обобранной округе после обыска без еды идёт в лес и вычерпывает
+// запас; в обобранный лес не ходит.
+void testAiForagesFromStock() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    lw::Resources& resources = lone.world.resources();
+    const long long before = resources.forestTotal();
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool foraged = false;
+    for (int minute = 0; minute < 12 * 60; minute += 10) {
+        lone.run(10);
+        foraged = foraged || registry.get<lw::Mind>(lone.person).action == lw::Action::Forage;
+    }
+    CHECK(foraged);
+    CHECK(resources.forestTotal() < before);
+
+    // Лес пуст — в лес не идут, даже голодные.
+    Lone empty;
+    entt::registry& emptyRegistry = empty.world.registry();
+    for (const auto [entity, supplies] : emptyRegistry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    for (const lw::Cell spot : forageSpots(empty.world)) {
+        while (empty.world.resources().takeForest(spot)) {
+        }
+    }
+    emptyRegistry.get<lw::Needs>(empty.person).hunger = 0.9f;
+    CHECK(lw::evaluateActions(empty.world, empty.person)[static_cast<std::size_t>(
+              lw::Action::Forage)] == 0.0f);
+    bool wentToForest = false;
+    for (int minute = 0; minute < 6 * 60; minute += 10) {
+        empty.run(10);
+        wentToForest = wentToForest ||
+                       emptyRegistry.get<lw::Mind>(empty.person).action == lw::Action::Forage;
+    }
+    CHECK(!wentToForest);
+}
+
 void testChronicle() {
     lw::Chronicle chronicle;
     CHECK(chronicle.eventsOf(5).empty());
@@ -1953,6 +2126,9 @@ int main() {
     testAiStocksUp();
     testAiSleepsWhereStranded();
     testAiSurvives();
+    testResources();
+    testRainFillsBarrels();
+    testAiForagesFromStock();
     testChronicle();
     testChronicleRecords();
 

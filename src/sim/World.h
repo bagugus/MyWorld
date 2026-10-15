@@ -4,6 +4,7 @@
 #include "sim/Id.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
+#include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
@@ -91,6 +92,9 @@ public:
     Pathfinder& pathfinder() { return pathfinder_; }
     // Поселения, здания, места для питья и сбора — справочник для решений людей.
     const Places& places() const { return places_; }
+    // Возобновляемые ресурсы: ягоды и грибы в лесу, дождевая вода.
+    Resources& resources() { return resources_; }
+    const Resources& resources() const { return resources_; }
     // Летопись: значимые события по id участников.
     Chronicle& chronicle() { return chronicle_; }
     const Chronicle& chronicle() const { return chronicle_; }
@@ -124,6 +128,7 @@ private:
     NavGraph graph_;
     Pathfinder pathfinder_{nav_, graph_};
     Places places_;
+    Resources resources_;
 
     // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
     SpatialIndex spatial_;

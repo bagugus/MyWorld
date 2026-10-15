@@ -85,6 +85,10 @@ void drawCellInfo(const World& world, Cell cell) {
     } else {
         ImGui::Text("Местность: %s%s", kGround[static_cast<int>(map.ground.at(cell.x, cell.y))],
                     map.cover.at(cell.x, cell.y) == Cover::Forest ? ", лес" : "");
+        if (map.cover.at(cell.x, cell.y) == Cover::Forest) {
+            ImGui::Text("Ягоды и грибы в округе: %d из %d", world.resources().forestAt(cell),
+                        Resources::kForestMax);
+        }
     }
 
     const Road road = map.road.at(cell.x, cell.y);

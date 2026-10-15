@@ -8,6 +8,7 @@
 #include <entt/entt.hpp>
 
 #include <cstddef>
+#include <functional>
 #include <optional>
 #include <vector>
 
@@ -54,17 +55,23 @@ public:
     // Ближайшее место, где можно напиться (брод через реку или берег реки и
     // озера), достижимое из from и не дальше maxDistance метров по прямой.
     std::optional<Cell> nearestWater(const NavGrid& nav, Cell from, float maxDistance) const;
-    // То же для клетки леса, где можно собирать ягоды и грибы.
-    std::optional<Cell> nearestForage(const NavGrid& nav, Cell from, float maxDistance) const;
+    // То же для клетки леса, где можно собирать ягоды и грибы. accept отсеивает
+    // места (например, где всё уже собрано); пустой — подходит любое.
+    std::optional<Cell> nearestForage(const NavGrid& nav, Cell from, float maxDistance,
+                                      const std::function<bool(Cell)>& accept = {}) const;
+
+    // Не больше одного места на блок kSpotBlock × kSpotBlock клеток.
+    using SpotGrid = Grid<std::optional<Cell>>;
+    // Места для сбора по блокам: по ним Resources заводит запас леса.
+    const SpotGrid& forageSpots() const { return forage_; }
 
     std::size_t waterSpotCount() const { return waterCount_; }
     std::size_t forageSpotCount() const { return forageCount_; }
 
 private:
-    // Не больше одного места на блок kSpotBlock × kSpotBlock клеток.
-    using SpotGrid = Grid<std::optional<Cell>>;
     static std::optional<Cell> nearestSpot(const SpotGrid& spots, const NavGrid& nav, Cell from,
-                                           float maxDistance);
+                                           float maxDistance,
+                                           const std::function<bool(Cell)>& accept);
 
     std::vector<SettlementPlace> settlements_;
     SpotGrid water_;
