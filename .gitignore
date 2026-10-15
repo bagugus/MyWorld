@@ -1,3 +1,10 @@
+# Build output and IDE state
+build/
+out/
+.vs/
+CMakeUserPresets.json
+imgui.ini
+
 # Prerequisites
 *.d
 
