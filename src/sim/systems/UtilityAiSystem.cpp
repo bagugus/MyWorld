@@ -6,6 +6,7 @@
 #include "sim/systems/MovementSystem.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <limits>
 #include <optional>
@@ -50,6 +51,9 @@ constexpr float kWaterPortion = 0.5f;  // порция воды — стольк
 constexpr float kForageMeal = 0.25f;   // найденное в лесу и съеденное на месте
 constexpr std::uint8_t kCarryFoodMax = 8;
 constexpr std::uint8_t kCarryWaterMax = 6;
+// Запасливый идёт за едой, когда дома (с несомым) меньше kStockLow порций.
+constexpr int kStockLow = 2;
+constexpr float kStockWeight = 0.25f;
 // Поесть и попить из найденного сразу, если голод (жажда) больше этого.
 constexpr float kSnackThreshold = 0.2f;
 
@@ -301,9 +305,11 @@ Option evalScavenge(const Context& ctx) {
     if (!waterAtHand) {
         need = std::max(need, kScavengeWaterWeight * urge(ctx.needs.thirst, start));
     }
-    // Запасливый идёт за едой, пока дома кончается, а не когда уже голоден.
-    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food < 2 && !ctx.night) {
-        need = std::max(need, 0.25f * ctx.traits.prudence);
+    // Запасливый идёт за едой, пока дома кончается, а не когда уже голоден;
+    // несомое домой тоже считается, с полными руками не ходят.
+    if (ctx.homeSupplies != nullptr && ctx.homeSupplies->food + ctx.carry.food < kStockLow &&
+        !ctx.night) {
+        need = std::max(need, kStockWeight * ctx.traits.prudence);
     }
     const Places::SettlementPlace* settlement = ctx.world.places().settlement(ctx.settlement);
     if (need <= 0.0f || settlement == nullptr) {
@@ -419,6 +425,14 @@ constexpr std::size_t kActionCount = static_cast<std::size_t>(Action::Count);
 Action actionAt(std::size_t index) {
     return static_cast<Action>(index);
 }
+
+struct Candidate {
+    Action action = Action::Idle;
+    Option option;
+};
+
+// Сколько действий пробовать начать за одно решение.
+constexpr int kStartAttempts = 3;
 
 // --- Выбор цели при выполнении -------------------------------------------
 
@@ -539,30 +553,27 @@ public:
     }
 
 private:
-    // Выбрать лучшее действие и начать его.
+    // Выбрать лучшее действие и начать его. Не начинается (некуда идти, нет
+    // пути) — следующее по оценке; ничего не вышло — отдых.
     void think() {
         const Context ctx = makeContext(world_, entity_);
-        Option bestOption;
-        Action best = Action::Idle;
+        std::array<Candidate, kActionCount> candidates;
         for (std::size_t i = 0; i < kActionCount; ++i) {
             Option option = evaluate(ctx, actionAt(i));
             option.score *= 1.0f + rng_.range(-kJitter, kJitter);
             if (actionAt(i) == Action::Wander) {
                 option.score *= rng_.range(kWanderMoodMin, kWanderMoodMax);
             }
-            if (option.score > bestOption.score) {
-                bestOption = option;
-                best = actionAt(i);
-            }
+            candidates[i] = {actionAt(i), option};
         }
-        if (bestOption.score <= 0.0f) {
-            bestOption = evalIdle(ctx);
-            best = Action::Idle;
+        if (startBest(ctx, candidates, 0.0f)) {
+            return;
         }
-        begin(ctx, best, bestOption);
+        fail();
     }
 
-    // Пересмотр посреди действия: сменить, если другое заметно важнее.
+    // Пересмотр посреди действия: сменить, если другое заметно важнее. Если
+    // ни одно из более важных не начинается, текущее продолжается.
     void reconsider() {
         const Context ctx = makeContext(world_, entity_);
         const float current = evaluate(ctx, mind_.action).score;
@@ -577,15 +588,19 @@ private:
         if (person_.asleep) {
             keep = std::max(keep, kNightSleepBase + inertia);
         }
+        std::array<Candidate, kActionCount> candidates;
         for (std::size_t i = 0; i < kActionCount; ++i) {
-            if (actionAt(i) == mind_.action) {
-                continue;
-            }
-            if (evaluate(ctx, actionAt(i)).score > keep) {
-                stop();
-                think();
-                return;
-            }
+            candidates[i] = {actionAt(i), actionAt(i) == mind_.action ? Option{}
+                                                                       : evaluate(ctx, actionAt(i))};
+        }
+        if (startBest(ctx, candidates, keep)) {
+            return;
+        }
+        // Неудачная попытка проложить путь останавливает человека: тогда
+        // начатое не продолжить, нужно решать заново.
+        if (mind_.phase == ActionPhase::Travel && !registry_.get<Walker>(entity_).moving()) {
+            think();
+            return;
         }
         mind_.nextThink = tick_ + minutes(mind_.action == Action::Sleep && mind_.phase ==
                                                                                ActionPhase::Perform
@@ -593,44 +608,79 @@ private:
                                               : kThinkMinutes);
     }
 
-    void begin(const Context& ctx, Action action, Option option) {
+    // Начать лучшее из действий с оценкой выше threshold; пробуется не больше
+    // kStartAttempts — каждая попытка может стоить поиска пути.
+    bool startBest(const Context& ctx, std::array<Candidate, kActionCount>& candidates,
+                   float threshold) {
+        // Устойчивая сортировка: при равных оценках — порядок перечисления Action.
+        std::stable_sort(candidates.begin(), candidates.end(),
+                         [](const Candidate& a, const Candidate& b) {
+                             return a.option.score > b.option.score;
+                         });
+        int attempts = 0;
+        for (const Candidate& candidate : candidates) {
+            if (candidate.option.score <= threshold || attempts == kStartAttempts) {
+                break;
+            }
+            ++attempts;
+            if (tryStart(ctx, candidate.action, candidate.option)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Начать действие. false — некуда идти или нет пути; тогда Mind не меняется
+    // (но идущий человек останавливается: так устроен startWalk).
+    bool tryStart(const Context& ctx, Action action, Option option) {
+        if (action == Action::Scavenge) {
+            const auto building = pickScavengeTarget(ctx, mind_, rng_);
+            if (!building) {
+                return false;
+            }
+            option.target = building->id;
+            option.spot = building->door;
+        } else if (action == Action::Wander) {
+            const auto door = pickWanderTarget(ctx, rng_);
+            if (!door) {
+                return false;
+            }
+            option.spot = *door;
+        }
+
+        bool here = option.spot == ctx.cell;
+        if (!here && !startWalk(world_, entity_, option.spot)) {
+            if (action != Action::Sleep) {
+                return false;
+            }
+            // До дома не дойти — спать там, где застала ночь.
+            option.spot = ctx.cell;
+            option.target = kInvalidId;
+            here = true;
+        }
+        if (here) {
+            stopWalking();
+        }
+        person_.asleep = false;
         mind_.action = action;
         mind_.score = option.score;
         mind_.target = option.target;
         mind_.spot = option.spot;
-        if (action == Action::Scavenge) {
-            const auto building = pickScavengeTarget(ctx, mind_, rng_);
-            if (!building) {
-                fail();
-                return;
-            }
-            mind_.target = building->id;
-            mind_.spot = building->door;
-        } else if (action == Action::Wander) {
-            const auto door = pickWanderTarget(ctx, rng_);
-            if (!door) {
-                fail();
-                return;
-            }
-            mind_.spot = *door;
-        }
-
-        if (mind_.spot == ctx.cell) {
-            perform();
-            return;
-        }
-        if (!startWalk(world_, entity_, mind_.spot)) {
-            fail();
-            return;
-        }
         mind_.failures = 0;
-        mind_.phase = ActionPhase::Travel;
-        mind_.nextThink = tick_ + minutes(kThinkMinutes);
+        if (here) {
+            perform();
+        } else {
+            mind_.phase = ActionPhase::Travel;
+            mind_.nextThink = tick_ + minutes(kThinkMinutes);
+        }
+        return true;
     }
 
-    // Не дойти: постоять и подумать снова.
+    // Ничего не начать: постоять и подумать снова.
     void fail() {
         ++mind_.failures;
+        stopWalking();
+        person_.asleep = false;
         mind_.action = Action::Idle;
         mind_.score = kIdleScore;
         mind_.target = kInvalidId;
@@ -641,8 +691,8 @@ private:
     }
 
     void arrive() {
-        // Дома — выложить найденное в запасы.
         const Cell cell = cellOf(registry_.get<Position>(entity_));
+        // Дома — выложить найденное в запасы.
         if (const entt::entity home = world_.find(person_.home); home != entt::null) {
             if (cell == registry_.get<Building>(home).door) {
                 Carry& carry = registry_.get<Carry>(entity_);
@@ -652,6 +702,12 @@ private:
                     carry = {};
                 }
             }
+        }
+        // Остановился не там (путь оборвали) — действие здесь не выполнить:
+        // нельзя есть из домашних запасов вдали от дома.
+        if (cell != mind_.spot) {
+            think();
+            return;
         }
         perform();
     }
@@ -698,9 +754,7 @@ private:
         mind_.nextThink = std::min(mind_.until, tick_ + minutes(kThinkMinutes));
     }
 
-    // Прервать действие, не доделав.
-    void stop() {
-        person_.asleep = false;
+    void stopWalking() {
         Walker& walker = registry_.get<Walker>(entity_);
         walker.waypoints.clear();
         walker.next = 0;

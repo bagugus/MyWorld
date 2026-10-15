@@ -1683,6 +1683,133 @@ void testAiCarriesHome() {
     CHECK(supplies.food + supplies.water > 0);
 }
 
+// Путь оборвался не у цели — действие там не выполняется: нельзя поесть из
+// домашних запасов вдали от дома.
+void testAiArrivesElsewhere() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
+    CHECK(away.has_value());
+    if (!away) {
+        return;
+    }
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
+                                               lw::Map::cellCenter(away->y)};
+    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Needs>(lone.person).hunger = 0.7f;
+    registry.get<lw::Walker>(lone.person).waypoints.clear();
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Eat;
+    mind.phase = lw::ActionPhase::Travel;
+    mind.target = registry.get<lw::Id>(lone.home).value;
+    mind.spot = door;
+    lone.world.syncSpatial();
+
+    // Выполняет действие — значит, стоит на его клетке; ест из домашних
+    // запасов — значит, у своей двери.
+    bool inPlace = true;
+    bool ateAtHome = true;
+    std::uint16_t food = registry.get<lw::Supplies>(lone.home).food;
+    for (int i = 0; i < 60 * static_cast<int>(lw::kTicksPerGameMinute); ++i) {
+        lone.world.step();
+        const lw::Position& position = registry.get<lw::Position>(lone.person);
+        const lw::Cell cell = lw::Map::cellAt(position.x, position.y);
+        const lw::Mind& now = registry.get<lw::Mind>(lone.person);
+        inPlace = inPlace && (now.phase != lw::ActionPhase::Perform || cell == now.spot);
+        const std::uint16_t left = registry.get<lw::Supplies>(lone.home).food;
+        ateAtHome = ateAtHome && (left == food || cell == door);
+        food = left;
+    }
+    CHECK(inPlace);
+    CHECK(ateAtHome);
+    CHECK(food < 5); // дошёл и поел
+}
+
+// Запасливый ходит за едой, пока дома пусто, но не с полными руками.
+void testAiStocksUp() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Traits>(lone.person).prudence = 1.0f;
+    registry.get<lw::Supplies>(lone.home).food = 0;
+    const auto scavenge = [&] {
+        return lw::evaluateActions(lone.world, lone.person)[static_cast<std::size_t>(
+            lw::Action::Scavenge)];
+    };
+    CHECK(scavenge() > 0.0f); // 08:00, сыт, но дома пусто
+    registry.get<lw::Carry>(lone.person).food = 8;
+    CHECK(scavenge() == 0.0f);
+}
+
+// До дома не дойти (человек в другой связной области) — ночью он спит там,
+// где стоит, а не пытается без конца проложить путь.
+void testAiSleepsWhereStranded() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    const lw::NavGrid& nav = lone.world.nav();
+    const lw::NavGrid::Region mainRegion =
+        nav.region(registry.get<lw::Building>(lone.home).door);
+    // Клетки других связных областей (острова, закутки между водой и домами).
+    std::vector<lw::Cell> islands;
+    for (int y = 0; y < nav.height(); ++y) {
+        for (int x = 0; x < nav.width(); ++x) {
+            const lw::NavGrid::Region region = nav.region({x, y});
+            if (region != lw::NavGrid::kNoRegion && region != lw::NavGrid::kUnknownRegion &&
+                region != mainRegion) {
+                islands.push_back({x, y});
+            }
+        }
+    }
+    // Здание, от двери которого до такой клетки ближе всего, — новый дом.
+    std::optional<lw::Cell> stranded;
+    entt::entity home = entt::null;
+    long long best = 0;
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        if (nav.region(building.door) != mainRegion) {
+            continue;
+        }
+        for (const lw::Cell cell : islands) {
+            const long long dx = cell.x - building.door.x;
+            const long long dy = cell.y - building.door.y;
+            if (!stranded || dx * dx + dy * dy < best) {
+                stranded = cell;
+                home = entity;
+                best = dx * dx + dy * dy;
+            }
+        }
+    }
+    constexpr long long kMaxCells = 350; // 1,4 км: дом ещё «рядом», ночью к нему идут
+    CHECK(stranded.has_value() && best <= kMaxCells * kMaxCells);
+    if (!stranded || best > kMaxCells * kMaxCells) {
+        return;
+    }
+    registry.get<lw::Person>(lone.person).home = registry.get<lw::Id>(home).value;
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(stranded->x),
+                                               lw::Map::cellCenter(stranded->y)};
+    registry.get<lw::Walker>(lone.person).waypoints.clear();
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = lone.world.tick();
+    lone.world.syncSpatial();
+
+    const std::uint64_t night = lw::nextTimeOfDay(lone.world.tick(), 1, 0);
+    while (lone.world.tick() < night) {
+        lone.world.step();
+    }
+    CHECK(registry.get<lw::Person>(lone.person).asleep);
+    CHECK(registry.get<lw::Mind>(lone.person).action == lw::Action::Sleep);
+}
+
 // Двое суток мира: люди едят, пьют и спят, здоровье не падает; ночью спят.
 void testAiSurvives() {
     lw::WorldConfig config = regionConfig();
@@ -1753,6 +1880,9 @@ int main() {
     testAiFindsWater();
     testAiScavengesWhenHungry();
     testAiCarriesHome();
+    testAiArrivesElsewhere();
+    testAiStocksUp();
+    testAiSleepsWhereStranded();
     testAiSurvives();
 
     if (failures == 0) {
