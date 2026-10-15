@@ -100,7 +100,7 @@ int main(int argc, char** argv) {
             ClearBackground({16, 18, 22, 255});
 
             BeginMode2D(camera.camera());
-            renderer.draw(world, camera.camera());
+            renderer.draw(world, camera.camera(), driver.interpolationAlpha());
             EndMode2D();
             weatherRenderer.draw(environment, world.weather());
             // Отладочные слои — поверх погоды, чтобы их было видно и ночью.

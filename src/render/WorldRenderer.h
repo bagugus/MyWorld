@@ -15,8 +15,10 @@ class WorldRenderer {
 public:
     explicit WorldRenderer(const World& world);
 
-    // Вызывать между BeginMode2D и EndMode2D.
-    void draw(const World& world, const Camera2D& camera);
+    // Вызывать между BeginMode2D и EndMode2D. alpha — доля тика для плавного
+    // движения (SimDriver::interpolationAlpha): существа рисуются между позицией
+    // на начало последнего тика (0) и текущей (1).
+    void draw(const World& world, const Camera2D& camera, float alpha);
 
     const MapRenderer& map() const { return map_; }
 

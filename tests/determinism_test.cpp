@@ -342,6 +342,19 @@ void testSimDriver() {
     driver.advance(1.0);
     CHECK(world.tick() == paused + 1);
 
+    // На паузе отрисовка показывает ровно последний тик.
+    CHECK(driver.interpolationAlpha() == 1.0f);
+
+    // Доля тика для интерполяции: 1,5 тика реального времени — один тик и половина.
+    driver.setPaused(false);
+    driver.setSpeed(1);
+    driver.advance(1.5 / lw::kTicksPerSecond);
+    CHECK(world.tick() == paused + 2);
+    CHECK(std::abs(driver.interpolationAlpha() - 0.5f) < 0.01f);
+    driver.advance(0.25 / lw::kTicksPerSecond);
+    CHECK(world.tick() == paused + 2);
+    CHECK(std::abs(driver.interpolationAlpha() - 0.75f) < 0.01f);
+
     // Исчерпанный бюджет кадра не подвешивает цикл, а отбрасывает отставание.
     driver.setPaused(false);
     driver.setSpeed(100);
@@ -1349,6 +1362,36 @@ void testLongMovementStep() {
     CHECK(velocity.x == 0.0f && velocity.y == 0.0f);
 }
 
+// На этом держится интерполяция при отрисовке: Velocity — смещение за последний
+// тик, делённое на kTickDt, поэтому позиция минус Velocity · kTickDt — позиция
+// на начало тика.
+void testVelocityIsTickDisplacement() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 60;
+    lw::World world(7, config);
+    entt::registry& registry = world.registry();
+    std::vector<std::pair<entt::entity, lw::Position>> before;
+    std::size_t moved = 0;
+    float worst = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        before.clear();
+        for (const auto [entity, position] : registry.view<const lw::Position>().each()) {
+            before.emplace_back(entity, position);
+        }
+        world.step();
+        for (const auto& [entity, start] : before) {
+            const lw::Position& now = registry.get<lw::Position>(entity);
+            const lw::Velocity& velocity = registry.get<lw::Velocity>(entity);
+            const float dx = now.x - velocity.x * lw::kTickDt - start.x;
+            const float dy = now.y - velocity.y * lw::kTickDt - start.y;
+            worst = std::max(worst, std::max(std::abs(dx), std::abs(dy)));
+            moved += now.x != start.x || now.y != start.y ? 1 : 0;
+        }
+    }
+    CHECK(moved > 0);
+    CHECK(worst < 2e-3f); // миллиметры: погрешность float на координатах в километры
+}
+
 // Нужды: скорости в игровых часах, сон, компания, здоровье на пределе.
 void testNeeds() {
     lw::World world(3, smallConfig(2));
@@ -1701,6 +1744,7 @@ int main() {
     testWalkSpeed();
     testPeople();
     testLongMovementStep();
+    testVelocityIsTickDisplacement();
     testNeeds();
     testTraits();
     testPlaces();

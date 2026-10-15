@@ -29,6 +29,12 @@ public:
     // это не влияет — только на то, сколько тиков успело пройти.
     void setFrameBudgetMs(double milliseconds) { frameBudgetMs_ = milliseconds; }
 
+    // Для плавной отрисовки: какая доля следующего тика уже накоплена, 0..1.
+    // Мир хранит состояние на конец последнего тика; отрисовка показывает его
+    // между предпоследним и последним тиком (отстаёт меньше чем на тик) — так
+    // движение не дёргается с частотой тиков. На паузе — 1: ровно последний тик.
+    float interpolationAlpha() const;
+
     int ticksLastFrame() const { return ticksLastFrame_; }
     double measuredTicksPerSecond() const { return measuredTicksPerSecond_; }
     // true, если в последнем кадре симуляция не успела за заданной скоростью.

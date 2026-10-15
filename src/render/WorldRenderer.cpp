@@ -1,6 +1,7 @@
 #include "render/WorldRenderer.h"
 
 #include "sim/Components.h"
+#include "sim/TimeScale.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -66,7 +67,7 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
 
 WorldRenderer::WorldRenderer(const World& world) : map_(world.map()) {}
 
-void WorldRenderer::draw(const World& world, const Camera2D& camera) {
+void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha) {
     const float zoom = camera.zoom;
     const Rectangle bounds = {0.0f, 0.0f, world.width(), world.height()};
 
@@ -99,12 +100,20 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera) {
     // Радиус в метрах, но не меньше нескольких пикселей — чтобы существа
     // было видно и на общем плане.
     const float radius = std::max(kEntityRadiusMeters, kEntityMinRadiusPx / zoom);
-    for (const auto [entity, position] : world.registry().view<const Position>().each()) {
-        if (position.x < topLeft.x - radius || position.x > bottomRight.x + radius ||
-            position.y < topLeft.y - radius || position.y > bottomRight.y + radius) {
+    // Позиция на начало тика — текущая минус смещение за тик (Velocity · kTickDt).
+    const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
+    const entt::registry& registry = world.registry();
+    for (const auto [entity, position] : registry.view<const Position>().each()) {
+        Vector2 at = {position.x, position.y};
+        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
+            at.x -= velocity->x * back;
+            at.y -= velocity->y * back;
+        }
+        if (at.x < topLeft.x - radius || at.x > bottomRight.x + radius ||
+            at.y < topLeft.y - radius || at.y > bottomRight.y + radius) {
             continue;
         }
-        DrawCircleV({position.x, position.y}, radius, entityColor(world.registry(), entity));
+        DrawCircleV(at, radius, entityColor(registry, entity));
     }
 }
 
