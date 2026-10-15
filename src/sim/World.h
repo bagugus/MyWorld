@@ -1,10 +1,17 @@
 #pragma once
 
+#include "sim/Chronicle.h"
 #include "sim/Id.h"
 #include "sim/Map.h"
+#include "sim/Places.h"
+#include "sim/Resources.h"
 #include "sim/Rng.h"
+#include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
 #include "sim/Weather.h"
+#include "sim/nav/NavGraph.h"
+#include "sim/nav/NavGrid.h"
+#include "sim/nav/Pathfinder.h"
 
 #include <entt/entt.hpp>
 
@@ -19,16 +26,18 @@ namespace lw {
 // порядок определяет последовательности уже существующих потоков.
 enum class RngStream : std::uint8_t {
     Spawn,
-    Wander,
+    Behavior, // решения людей (Utility AI); до этапа 4.3 — блуждание тестовых существ
     MapGen,
     Weather,
+    Traits,   // черты характера при рождении
+    Supplies, // припасы в зданиях
     Count
 };
 
 struct WorldConfig {
     int mapWidth = 2048;  // клетки (по Map::kCellSize метров)
     int mapHeight = 2048; // клетки
-    int wanderers = 300;  // тестовые существа этапа 1
+    int people = 300;     // люди; живут в жилых домах
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
@@ -40,6 +49,9 @@ public:
     static constexpr float kTickDt = lw::kTickDt;
 
     explicit World(std::uint64_t seed, const WorldConfig& config = {});
+    // Индекс подписан на сигналы реестра по адресу: мир не копируется и не перемещается.
+    World(const World&) = delete;
+    World& operator=(const World&) = delete;
 
     // Продвигает мир ровно на один тик.
     void step();
@@ -66,13 +78,38 @@ public:
     float width() const { return map_.worldWidth(); }
     float height() const { return map_.worldHeight(); }
     std::size_t entityCount() const { return idToEntity_.size(); }
+    // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
+    const SpatialIndex& spatial() const { return spatial_; }
+    // Привести индекс к текущим позициям — после того, как сущности переставили
+    // вне тика (тесты, будущий редактор). Тик делает это сам.
+    void syncSpatial() { spatial_.sync(registry_); }
+    // Проходимость клеток и граф навигации (дороги и местность) — производные
+    // данные карты и зданий.
+    const NavGrid& nav() const { return nav_; }
+    const NavGraph& navGraph() const { return graph_; }
+    // Поиск пути для систем симуляции. Ответ зависит только от карты, зданий и
+    // запроса, поэтому состояние мира он не меняет и в хеш не входит.
+    Pathfinder& pathfinder() { return pathfinder_; }
+    // Поселения, здания, места для питья и сбора — справочник для решений людей.
+    const Places& places() const { return places_; }
+    // Возобновляемые ресурсы: ягоды и грибы в лесу, дождевая вода.
+    Resources& resources() { return resources_; }
+    const Resources& resources() const { return resources_; }
+    // Летопись: значимые события по id участников.
+    Chronicle& chronicle() { return chronicle_; }
+    const Chronicle& chronicle() const { return chronicle_; }
+    // Записать событие летописи в текущем тике.
+    void record(ChronicleKind kind, EntityId subject, EntityId object = kInvalidId,
+                std::int32_t a = 0, std::int32_t b = 0) {
+        chronicle_.add({tick_, kind, subject, object, a, b});
+    }
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
     std::uint64_t stateHash() const;
 
 private:
-    // Генерирует карту и создаёт сущности поселений и зданий.
+    // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 
     std::uint64_t seed_;
@@ -85,7 +122,16 @@ private:
     std::uint64_t mapHash_ = 0;
 
     Weather weather_;
+    Chronicle chronicle_;
 
+    NavGrid nav_;
+    NavGraph graph_;
+    Pathfinder pathfinder_{nav_, graph_};
+    Places places_;
+    Resources resources_;
+
+    // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
+    SpatialIndex spatial_;
     entt::registry registry_;
     std::vector<Rng> streams_;
     // Только для поиска по id; обходить нельзя — порядок не детерминирован.

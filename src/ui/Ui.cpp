@@ -6,6 +6,7 @@
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
+#include "ui/Format.h"
 
 #include <imgui.h>
 #include <raylib.h>
@@ -13,6 +14,7 @@
 
 #include <algorithm>
 #include <cfloat>
+#include <cmath>
 #include <cstdio>
 
 namespace lw::ui {
@@ -25,20 +27,6 @@ constexpr const char* kFontPath = "C:/Windows/Fonts/segoeui.ttf";
 constexpr float kFontSize = 18.0f;
 
 constexpr int kSpeeds[] = {1, 10, 100};
-
-const char* buildingName(BuildingKind kind) {
-    switch (kind) {
-    case BuildingKind::House:
-        return "дом";
-    case BuildingKind::Barn:
-        return "сарай";
-    case BuildingKind::Apartment:
-        return "многоэтажка";
-    case BuildingKind::Shop:
-        return "магазин";
-    }
-    return "здание";
-}
 
 const char* seasonName(Season season) {
     constexpr const char* kNames[] = {"весна", "лето", "осень", "зима"};
@@ -83,13 +71,6 @@ const char* dayPhaseName(const SunState& sun) {
     return "ночь";
 }
 
-// Полоска-индикатор 0..1 с подписью.
-void meter(const char* label, float value) {
-    char overlay[64];
-    std::snprintf(overlay, sizeof(overlay), "%s %.0f%%", label, value * 100.0f);
-    ImGui::ProgressBar(std::clamp(value, 0.0f, 1.0f), {-FLT_MIN, 0.0f}, overlay);
-}
-
 // Что находится в клетке: местность, вода, дорога, здание.
 void drawCellInfo(const World& world, Cell cell) {
     const Map& map = world.map();
@@ -104,6 +85,10 @@ void drawCellInfo(const World& world, Cell cell) {
     } else {
         ImGui::Text("Местность: %s%s", kGround[static_cast<int>(map.ground.at(cell.x, cell.y))],
                     map.cover.at(cell.x, cell.y) == Cover::Forest ? ", лес" : "");
+        if (map.cover.at(cell.x, cell.y) == Cover::Forest) {
+            ImGui::Text("Ягоды и грибы в округе: %d из %d", world.resources().forestAt(cell),
+                        Resources::kForestMax);
+        }
     }
 
     const Road road = map.road.at(cell.x, cell.y);
@@ -123,6 +108,9 @@ void drawCellInfo(const World& world, Cell cell) {
                     static_cast<unsigned long long>(world.registry().get<Id>(entity).value),
                     buildingName(building.kind),
                     owner != entt::null ? world.registry().get<Settlement>(owner).name.c_str() : "—");
+        if (const auto* supplies = world.registry().try_get<Supplies>(entity)) {
+            ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
+        }
         break;
     }
 }
@@ -302,6 +290,16 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         ImGui::Text("Поселений: %zu, зданий: %zu",
                     world.registry().view<const Settlement>().size(),
                     world.registry().view<const Building>().size());
+        std::size_t walking = 0;
+        for (const auto [entity, walker] : world.registry().view<const Walker>().each()) {
+            walking += walker.moving() ? 1 : 0;
+        }
+        std::size_t asleep = 0;
+        for (const auto [entity, person] : world.registry().view<const Person>().each()) {
+            asleep += person.asleep ? 1 : 0;
+        }
+        ImGui::Text("Людей: %zu, в пути: %zu, спят: %zu",
+                    world.registry().view<const Person>().size(), walking, asleep);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
@@ -309,6 +307,29 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         const Vector2 mouse = GetScreenToWorld2D(GetMousePosition(), camera.camera());
         ImGui::Text("Зум: %.2f пикс/м", camera.zoom());
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
+        // Проверка пространственного индекса: соседи курсора.
+        constexpr float kNeighbourRadius = 50.0f;
+        int neighbours = 0;
+        world.spatial().forEachInRadius(mouse.x, mouse.y, kNeighbourRadius,
+                                        [&neighbours](const SpatialHit&) { ++neighbours; });
+        if (const auto nearest = world.spatial().nearest(mouse.x, mouse.y, 1000.0f)) {
+            ImGui::Text("В радиусе %.0f м: %d, ближайший #%llu в %.0f м", kNeighbourRadius,
+                        neighbours, static_cast<unsigned long long>(nearest->id),
+                        std::sqrt(nearest->distanceSq));
+        } else {
+            ImGui::Text("В радиусе %.0f м: %d, ближе 1 км никого", kNeighbourRadius, neighbours);
+        }
+        // Человек под курсором: не дальше нескольких пикселей.
+        constexpr float kPickPixels = 8.0f;
+        const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
+        if (const auto picked = world.spatial().nearest(
+                mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
+                    return world.registry().all_of<Person>(hit.entity);
+                })) {
+            const auto* mind = world.registry().try_get<Mind>(picked->entity);
+            ImGui::Text("Человек #%llu: %s", static_cast<unsigned long long>(picked->id),
+                        mind != nullptr ? actionName(mind->action) : "—");
+        }
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {
             ImGui::Text("Клетка: %d, %d, высота %.1f м, %+.1f °C", cell.x, cell.y,
@@ -318,7 +339,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         } else {
             ImGui::TextDisabled("Клетка: вне карты");
         }
-        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\nHome — весь мир");
+        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\n"
+                            "Home — весь мир, ЛКМ — инспектор");
     }
     ImGui::End();
 }

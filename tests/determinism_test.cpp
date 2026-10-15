@@ -1,20 +1,36 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
-// драйвер времени, календарь, климат и погода.
+// драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
+#include "sim/Chronicle.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
+#include "sim/Places.h"
+#include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
+#include "sim/SpatialIndex.h"
+#include "sim/Traits.h"
 #include "sim/World.h"
+#include "sim/nav/NavGraph.h"
+#include "sim/nav/NavGrid.h"
+#include "sim/nav/Pathfinder.h"
+#include "sim/systems/MovementSystem.h"
+#include "sim/systems/NeedsSystem.h"
+#include "sim/systems/ResourceSystem.h"
+#include "sim/systems/UtilityAiSystem.h"
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <functional>
+#include <optional>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -30,11 +46,11 @@ int failures = 0;
     } while (false)
 
 // Маленькая карта: тестам не нужен мир размером по умолчанию.
-lw::WorldConfig smallConfig(int wanderers) {
+lw::WorldConfig smallConfig(int people) {
     lw::WorldConfig config;
     config.mapWidth = 64;
     config.mapHeight = 64;
-    config.wanderers = wanderers;
+    config.people = people;
     return config;
 }
 
@@ -145,7 +161,7 @@ lw::WorldConfig regionConfig() {
     lw::WorldConfig config;
     config.mapWidth = 1024;
     config.mapHeight = 1024;
-    config.wanderers = 0;
+    config.people = 0;
     return config;
 }
 
@@ -288,7 +304,7 @@ void testEntitiesStayInWorld() {
     lw::WorldConfig config;
     config.mapWidth = 12;
     config.mapHeight = 8;
-    config.wanderers = 100;
+    config.people = 100;
     lw::World world(5, config);
     for (int i = 0; i < 5000; ++i) {
         world.step();
@@ -328,6 +344,19 @@ void testSimDriver() {
     CHECK(world.tick() == paused + 1);
     driver.advance(1.0);
     CHECK(world.tick() == paused + 1);
+
+    // На паузе отрисовка показывает ровно последний тик.
+    CHECK(driver.interpolationAlpha() == 1.0f);
+
+    // Доля тика для интерполяции: 1,5 тика реального времени — один тик и половина.
+    driver.setPaused(false);
+    driver.setSpeed(1);
+    driver.advance(1.5 / lw::kTicksPerSecond);
+    CHECK(world.tick() == paused + 2);
+    CHECK(std::abs(driver.interpolationAlpha() - 0.5f) < 0.01f);
+    driver.advance(0.25 / lw::kTicksPerSecond);
+    CHECK(world.tick() == paused + 2);
+    CHECK(std::abs(driver.interpolationAlpha() - 0.75f) < 0.01f);
 
     // Исчерпанный бюджет кадра не подвешивает цикл, а отбрасывает отставание.
     driver.setPaused(false);
@@ -497,6 +526,1569 @@ void testWeather() {
     CHECK(same.weather().anomaly != other.weather().anomaly);
 }
 
+
+// --- Пространственный индекс -------------------------------------------------
+
+entt::entity spawnAt(entt::registry& registry, lw::EntityId id, float x, float y) {
+    const entt::entity entity = registry.create();
+    registry.emplace<lw::Id>(entity, id);
+    registry.emplace<lw::Position>(entity, x, y);
+    return entity;
+}
+
+// Эталон — полный перебор. Результат — id по возрастанию.
+std::vector<lw::EntityId> bruteRadius(const entt::registry& registry, float x, float y,
+                                      float radius) {
+    std::vector<lw::EntityId> ids;
+    for (const auto [entity, id, position] :
+         registry.view<const lw::Id, const lw::Position>().each()) {
+        const float dx = position.x - x;
+        const float dy = position.y - y;
+        if (dx * dx + dy * dy <= radius * radius) {
+            ids.push_back(id.value);
+        }
+    }
+    std::sort(ids.begin(), ids.end());
+    return ids;
+}
+
+// Ближайший перебором; при равных расстояниях — меньший id.
+// oddOnly — только сущности с нечётным id.
+lw::EntityId bruteNearest(const entt::registry& registry, float x, float y, float radius,
+                          bool oddOnly) {
+    std::optional<std::pair<float, lw::EntityId>> best;
+    for (const auto [entity, id, position] :
+         registry.view<const lw::Id, const lw::Position>().each()) {
+        const float dx = position.x - x;
+        const float dy = position.y - y;
+        const float distanceSq = dx * dx + dy * dy;
+        if (distanceSq > radius * radius || (oddOnly && id.value % 2 == 0)) {
+            continue;
+        }
+        if (!best || distanceSq < best->first ||
+            (distanceSq == best->first && id.value < best->second)) {
+            best = std::pair{distanceSq, id.value};
+        }
+    }
+    return best ? best->second : lw::kInvalidId;
+}
+
+std::vector<lw::EntityId> hitIds(const std::vector<lw::SpatialHit>& hits) {
+    std::vector<lw::EntityId> ids;
+    for (const lw::SpatialHit& hit : hits) {
+        ids.push_back(hit.id);
+    }
+    return ids;
+}
+
+// Сверяет запросы индекса с перебором в случайных точках, в том числе за краем мира.
+void checkAgainstBruteForce(const entt::registry& registry, const lw::SpatialIndex& index,
+                            lw::Rng& rng, float width, float height) {
+    CHECK(index.size() == registry.view<const lw::Position>().size());
+    std::vector<lw::SpatialHit> hits;
+    for (int q = 0; q < 400; ++q) {
+        float x = rng.range(-60.0f, width + 60.0f);
+        float y = rng.range(-60.0f, height + 60.0f);
+        if (q % 4 == 0) {
+            // Узел решётки или середина между узлами: много равных расстояний.
+            x = static_cast<float>(rng.rangeInt(0, 20)) * 10.0f;
+            y = static_cast<float>(rng.rangeInt(0, 10)) * 10.0f;
+        }
+        const float radius = q % 3 == 0 ? rng.range(0.0f, 8.0f) : rng.range(0.0f, 150.0f);
+
+        index.queryRadius(x, y, radius, hits);
+        std::vector<lw::EntityId> ids = hitIds(hits);
+        std::sort(ids.begin(), ids.end());
+        CHECK(ids == bruteRadius(registry, x, y, radius));
+        for (const lw::SpatialHit& hit : hits) {
+            const lw::Position& position = registry.get<lw::Position>(hit.entity);
+            CHECK(registry.get<lw::Id>(hit.entity).value == hit.id);
+            CHECK(position.x == hit.x && position.y == hit.y);
+        }
+
+        const auto nearest = index.nearest(x, y, radius);
+        CHECK((nearest ? nearest->id : lw::kInvalidId) ==
+              bruteNearest(registry, x, y, radius, false));
+        const auto nearestOdd = index.nearest(
+            x, y, radius, [](const lw::SpatialHit& hit) { return hit.id % 2 == 1; });
+        CHECK((nearestOdd ? nearestOdd->id : lw::kInvalidId) ==
+              bruteNearest(registry, x, y, radius, true));
+    }
+}
+
+void testSpatialIndex() {
+    // 200 × 100 м — 7 × 4 корзины, крайние неполные.
+    constexpr float kWidth = 200.0f;
+    constexpr float kHeight = 100.0f;
+    entt::registry registry;
+    lw::SpatialIndex index(kWidth, kHeight);
+    registry.on_destroy<lw::Position>().connect<&lw::SpatialIndex::onPositionDestroyed>(index);
+    CHECK(index.columns() == 7 && index.rows() == 4);
+
+    lw::Rng rng(11);
+    lw::EntityId nextId = 1;
+    std::vector<entt::entity> entities;
+    for (int i = 0; i < 300; ++i) {
+        // Часть — за краем мира.
+        entities.push_back(spawnAt(registry, nextId++, rng.range(-30.0f, kWidth + 30.0f),
+                                   rng.range(-30.0f, kHeight + 30.0f)));
+    }
+    entities.push_back(spawnAt(registry, nextId++, kWidth, kHeight));
+    entities.push_back(spawnAt(registry, nextId++, 0.0f, 0.0f));
+    for (int gx = 0; gx <= 20; gx += 2) {
+        for (int gy = 0; gy <= 10; gy += 2) {
+            entities.push_back(spawnAt(registry, nextId++, static_cast<float>(gx) * 10.0f,
+                                       static_cast<float>(gy) * 10.0f));
+        }
+    }
+    index.sync(registry);
+    checkAgainstBruteForce(registry, index, rng, kWidth, kHeight);
+
+    // Снимок: без sync индекс помнит старую позицию.
+    lw::Position& moved = registry.get<lw::Position>(entities[0]);
+    const float oldX = moved.x;
+    const float oldY = moved.y;
+    moved.x = oldX + 77.0f;
+    std::vector<lw::SpatialHit> hits;
+    index.queryRadius(oldX, oldY, 0.0f, hits);
+    CHECK(std::any_of(hits.begin(), hits.end(),
+                      [&](const lw::SpatialHit& hit) { return hit.entity == entities[0]; }));
+
+    // Движение (в том числе через границы корзин), удаление, снятие Position,
+    // новые сущности на освободившихся номерах реестра.
+    for (int round = 0; round < 5; ++round) {
+        for (const entt::entity entity : entities) {
+            if (registry.valid(entity) && registry.all_of<lw::Position>(entity) &&
+                rng.below(3) != 0) {
+                lw::Position& position = registry.get<lw::Position>(entity);
+                position.x += rng.range(-40.0f, 40.0f);
+                position.y += rng.range(-40.0f, 40.0f);
+            }
+        }
+        for (int i = 0; i < 15; ++i) {
+            const entt::entity entity =
+                entities[rng.below(static_cast<std::uint32_t>(entities.size()))];
+            if (!registry.valid(entity)) {
+                continue;
+            }
+            const std::size_t before = index.size();
+            const bool hadPosition = registry.all_of<lw::Position>(entity);
+            if (i % 3 == 0) {
+                registry.remove<lw::Position>(entity);
+            } else {
+                registry.destroy(entity);
+            }
+            // Удалённые исчезают сразу, без sync.
+            CHECK(index.size() == before - (hadPosition ? 1u : 0u));
+        }
+        for (int i = 0; i < 10; ++i) {
+            entities.push_back(spawnAt(registry, nextId++, rng.range(0.0f, kWidth),
+                                       rng.range(0.0f, kHeight)));
+        }
+        index.sync(registry);
+        checkAgainstBruteForce(registry, index, rng, kWidth, kHeight);
+    }
+
+    // Отрицательный радиус и NaN ничего не находят.
+    index.queryRadius(50.0f, 50.0f, -1.0f, hits);
+    CHECK(hits.empty());
+    CHECK(!index.nearest(50.0f, 50.0f, -1.0f));
+    index.queryRadius(std::nanf(""), 50.0f, 10.0f, hits);
+    CHECK(hits.empty());
+}
+
+// Содержимое индекса и порядок выдачи не зависят от порядка вставки, истории
+// перемещений и номеров сущностей в реестре — только от id и позиций.
+void testSpatialIndexOrderIndependent() {
+    constexpr float kSize = 300.0f;
+    constexpr std::size_t kCount = 500;
+    std::vector<lw::Position> positions;
+    lw::Rng rng(5);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        positions.push_back({rng.range(0.0f, kSize), rng.range(0.0f, kSize)});
+    }
+
+    entt::registry forward;
+    entt::registry backward;
+    lw::SpatialIndex forwardIndex(kSize, kSize);
+    lw::SpatialIndex backwardIndex(kSize, kSize);
+    std::vector<entt::entity> forwardEntities;
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forwardEntities.push_back(spawnAt(forward, i + 1, positions[i].x, positions[i].y));
+    }
+    for (std::size_t i = kCount; i-- > 0;) {
+        spawnAt(backward, i + 1, positions[i].x, positions[i].y);
+    }
+    // Разная история: первый индекс видел промежуточные позиции, второй — нет.
+    forwardIndex.sync(forward);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forward.get<lw::Position>(forwardEntities[i]).x = static_cast<float>(i % 300);
+    }
+    forwardIndex.sync(forward);
+    for (std::size_t i = 0; i < kCount; ++i) {
+        forward.get<lw::Position>(forwardEntities[i]) = positions[i];
+    }
+    forwardIndex.sync(forward);
+    backwardIndex.sync(backward);
+
+    std::vector<lw::SpatialHit> a;
+    std::vector<lw::SpatialHit> b;
+    bool same = true;
+    for (int q = 0; q < 100; ++q) {
+        const float x = rng.range(0.0f, kSize);
+        const float y = rng.range(0.0f, kSize);
+        const float radius = rng.range(0.0f, 120.0f);
+        forwardIndex.queryRadius(x, y, radius, a);
+        backwardIndex.queryRadius(x, y, radius, b);
+        same = same && !a.empty() == !b.empty() && hitIds(a) == hitIds(b);
+    }
+    CHECK(same);
+}
+
+// Мир синхронизирует индекс в конце тика и убирает удалённые сущности сразу.
+void testWorldSpatialIndex() {
+    lw::World world(3, smallConfig(200));
+    for (int i = 0; i < 300; ++i) {
+        world.step();
+    }
+    const lw::World& readOnly = world;
+    CHECK(world.spatial().size() == 200);
+    std::vector<lw::SpatialHit> hits;
+    bool allFound = true;
+    for (const auto [entity, position] : readOnly.registry().view<const lw::Position>().each()) {
+        world.spatial().queryRadius(position.x, position.y, 0.0f, hits);
+        allFound = allFound &&
+                   std::any_of(hits.begin(), hits.end(),
+                               [&](const lw::SpatialHit& hit) { return hit.entity == entity; });
+    }
+    CHECK(allFound);
+
+    const entt::entity victim = *readOnly.registry().view<const lw::Position>().begin();
+    world.destroy(victim);
+    CHECK(world.spatial().size() == 199);
+}
+
+// --- Навигация ---------------------------------------------------------------
+
+void testSegmentWalk() {
+    const auto walk = [](lw::Cell a, lw::Cell b) {
+        std::vector<lw::Cell> cells;
+        lw::forEachCellOnSegment(a, b, [&](int x, int y) {
+            cells.push_back({x, y});
+            return true;
+        });
+        return cells;
+    };
+    CHECK((walk({2, 3}, {2, 3}) == std::vector<lw::Cell>{{2, 3}}));
+    CHECK((walk({0, 0}, {3, 0}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {2, 0}, {3, 0}}));
+    // Через угол клеток задеты обе клетки по бокам.
+    CHECK((walk({0, 0}, {1, 1}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {0, 1}, {1, 1}}));
+    CHECK((walk({0, 0}, {2, 1}) == std::vector<lw::Cell>{{0, 0}, {1, 0}, {1, 1}, {2, 1}}));
+    CHECK((walk({0, 0}, {3, 1}) ==
+           std::vector<lw::Cell>{{0, 0}, {1, 0}, {2, 0}, {1, 1}, {2, 1}, {3, 1}}));
+    // В обратную сторону — те же клетки.
+    std::vector<lw::Cell> back = walk({3, 1}, {0, 0});
+    std::vector<lw::Cell> forth = walk({0, 0}, {3, 1});
+    const auto byRow = [](lw::Cell l, lw::Cell r) { return l.y != r.y ? l.y < r.y : l.x < r.x; };
+    std::sort(back.begin(), back.end(), byRow);
+    std::sort(forth.begin(), forth.end(), byRow);
+    CHECK(back == forth);
+    // Обход прерывается, как только visit вернул false.
+    int visited = 0;
+    CHECK(!lw::forEachCellOnSegment({0, 0}, {9, 0}, [&](int x, int) {
+        ++visited;
+        return x < 4;
+    }));
+    CHECK(visited == 5);
+}
+
+void testNavGrid() {
+    lw::Map map(16, 12);
+    // Столбец моря x = 8 делит карту на две половины.
+    for (int y = 0; y < 12; ++y) {
+        map.water.at(8, y) = lw::Water::Sea;
+        map.depth.at(8, y) = 30;
+    }
+    map.road.at(1, 1) = lw::Road::Dirt;
+    map.ground.at(2, 1) = lw::Ground::Field;
+    map.ground.at(3, 1) = lw::Ground::Sand;
+    map.cover.at(4, 1) = lw::Cover::Forest;
+    map.ground.at(5, 1) = lw::Ground::Rock;
+    map.ground.at(6, 1) = lw::Ground::Rock;
+    map.cover.at(6, 1) = lw::Cover::Forest;
+    const int depths[] = {4, 12, 25};
+    for (int i = 0; i < 3; ++i) {
+        map.water.at(1 + i, 3) = lw::Water::River;
+        map.depth.at(1 + i, 3) = static_cast<std::uint8_t>(depths[i]);
+    }
+    map.water.at(4, 3) = lw::Water::River; // мост
+    map.depth.at(4, 3) = 25;
+    map.road.at(4, 3) = lw::Road::Asphalt;
+    map.water.at(5, 3) = lw::Water::Lake;
+    map.depth.at(5, 3) = 20;
+
+    entt::registry registry;
+    const entt::entity house = registry.create();
+    registry.emplace<lw::Building>(house, lw::BuildingKind::House, lw::Cell{1, 6}, 2, 3, lw::Cell{3, 7},
+                                   lw::kInvalidId);
+    lw::NavGrid nav;
+    nav.build(map, registry);
+
+    CHECK(nav.width() == 16 && nav.height() == 12);
+    CHECK(nav.cost({0, 0}) == 11);
+    CHECK(nav.cost({1, 1}) == lw::NavGrid::kRoadCost);
+    CHECK(nav.cost({2, 1}) == 13 && nav.cost({3, 1}) == 13);
+    CHECK(nav.cost({4, 1}) == 15);
+    CHECK(nav.cost({5, 1}) == 22 && nav.cost({6, 1}) == 22);
+    CHECK(nav.cost({1, 3}) == 30 && nav.cost({2, 3}) == 60 && nav.cost({3, 3}) == 250);
+    CHECK(nav.cost({4, 3}) == lw::NavGrid::kRoadCost);
+    CHECK(!nav.passable({5, 3}) && !nav.passable({8, 5}));
+    CHECK(!nav.passable({1, 6}) && !nav.passable({2, 8}) && nav.passable({3, 7}));
+    CHECK(!nav.passable({-1, 0}) && !nav.passable({16, 0}));
+
+    CHECK(lw::NavGrid::classOf(0) == lw::NavClass::Blocked);
+    CHECK(lw::NavGrid::classOf(nav.cost({1, 1})) == lw::NavClass::Road);
+    CHECK(lw::NavGrid::classOf(nav.cost({5, 1})) == lw::NavClass::Land);
+    CHECK(lw::NavGrid::classOf(nav.cost({1, 3})) == lw::NavClass::Water);
+
+    // Шаги: по стороне и по диагонали, мимо угла непроходимой клетки — нельзя.
+    CHECK(nav.stepCost({0, 0}, {1, 0}) == lw::NavGrid::kStraightFactor * 22);
+    CHECK(nav.stepCost({0, 0}, {1, 1}) == lw::NavGrid::kDiagonalFactor * (11 + 10 + 11 + 11));
+    CHECK(nav.stepCost({1, 1}, {0, 0}) == nav.stepCost({0, 0}, {1, 1}));
+    CHECK(nav.stepCost({4, 2}, {4, 3}) == lw::NavGrid::kStraightFactor * 21); // на мост
+    CHECK(nav.stepCost({0, 2}, {1, 3}) == lw::NavGrid::kDiagonalFactor * (11 + 30 + 11 + 11)); // в брод
+    CHECK(nav.stepCost({4, 2}, {5, 3}) == 0); // в озеро
+    CHECK(nav.stepCost({5, 2}, {6, 3}) == 0); // мимо угла озера
+    CHECK(nav.stepCost({0, 6}, {1, 5}) == 0); // мимо угла дома
+    CHECK(nav.stepCost({3, 6}, {2, 5}) == 0);
+    CHECK(nav.stepCost({3, 5}, {4, 6}) > 0);
+    CHECK(nav.stepCost({4, 4}, {5, 2}) == 0); // не соседи
+
+    // Области: море делит карту пополам, дом и озеро — нет.
+    CHECK(nav.regionCount() == 2);
+    CHECK(nav.connected({0, 0}, {7, 11}));
+    CHECK(nav.connected({9, 0}, {15, 11}));
+    CHECK(!nav.connected({0, 0}, {15, 0}));
+    CHECK(!nav.connected({0, 0}, {8, 0}));
+    CHECK(nav.region({8, 0}) == lw::NavGrid::kNoRegion);
+
+    // Ближайшая проходимая клетка: из моря — по соседству, при равенстве — верхняя.
+    CHECK((nav.nearestPassable({0, 0}, 3) == lw::Cell{0, 0}));
+    CHECK((nav.nearestPassable({8, 5}, 3) == lw::Cell{7, 5}));
+    CHECK((nav.nearestPassable({1, 7}, 3) == lw::Cell{0, 7}));
+    CHECK(!nav.nearestPassable({8, 5}, 0).has_value());
+}
+
+// Карта со всеми видами местности, водой, дорогами и зданиями — для поиска пути.
+struct NavFixture {
+    NavFixture(std::uint64_t seed, int width, int height) : map(width, height) {
+        lw::Rng rng(seed);
+        for (int y = 0; y < height; ++y) {
+            for (int x = 0; x < width; ++x) {
+                const float roll = rng.unit();
+                map.ground.at(x, y) = roll < 0.7f   ? lw::Ground::Grass
+                                      : roll < 0.8f ? lw::Ground::Field
+                                      : roll < 0.9f ? lw::Ground::Sand
+                                                    : lw::Ground::Rock;
+                map.cover.at(x, y) = rng.chance(0.3f) ? lw::Cover::Forest : lw::Cover::None;
+            }
+        }
+        const auto setWater = [&](int x, int y, lw::Water water, int depth) {
+            if (map.contains({x, y})) {
+                map.water.at(x, y) = water;
+                map.depth.at(x, y) = static_cast<std::uint8_t>(depth);
+                map.cover.at(x, y) = lw::Cover::None;
+            }
+        };
+        // Озёра — прямоугольники; бывают и такие, что отрезают кусок карты.
+        for (int n = rng.rangeInt(2, 5); n > 0; --n) {
+            const int x0 = rng.rangeInt(0, width - 4);
+            const int y0 = rng.rangeInt(0, height - 4);
+            const int w = rng.rangeInt(2, width / 3);
+            const int h = rng.rangeInt(2, height / 3);
+            for (int y = y0; y < y0 + h; ++y) {
+                for (int x = x0; x < x0 + w; ++x) {
+                    setWater(x, y, lw::Water::Lake, 20);
+                }
+            }
+        }
+        // Река с юга на север: ширина и глубина меняются по ходу.
+        int riverX = rng.rangeInt(width / 4, 3 * width / 4);
+        const int depths[] = {4, 12, 25};
+        for (int y = 0; y < height; ++y) {
+            riverX = std::clamp(riverX + rng.rangeInt(-1, 1), 1, width - 4);
+            const int depth = depths[(y / 8 + static_cast<int>(seed)) % 3];
+            for (int k = 0; k < 1 + (y / 5) % 3; ++k) {
+                setWater(riverX + k, y, lw::Water::River, depth);
+            }
+        }
+        // Дороги: прямые, через реку — мосты.
+        for (int n = 0; n < 2; ++n) {
+            const int row = rng.rangeInt(0, height - 1);
+            const int column = rng.rangeInt(0, width - 1);
+            for (int x = 0; x < width; ++x) {
+                if (map.water.at(x, row) != lw::Water::Lake) {
+                    map.road.at(x, row) = lw::Road::Dirt;
+                    map.cover.at(x, row) = lw::Cover::None;
+                }
+            }
+            for (int y = 0; y < height; ++y) {
+                if (map.water.at(column, y) != lw::Water::Lake) {
+                    map.road.at(column, y) = lw::Road::Asphalt;
+                    map.cover.at(column, y) = lw::Cover::None;
+                }
+            }
+        }
+        for (int n = 0; n < width * height / 60; ++n) {
+            const lw::Cell origin{rng.rangeInt(0, width - 3), rng.rangeInt(0, height - 4)};
+            bool free = true;
+            for (int y = origin.y; y < origin.y + 3; ++y) {
+                for (int x = origin.x; x < origin.x + 2; ++x) {
+                    free = free && map.road.at(x, y) == lw::Road::None &&
+                           map.water.at(x, y) == lw::Water::None;
+                }
+            }
+            if (free) {
+                registry.emplace<lw::Building>(registry.create(), lw::BuildingKind::House, origin, 2, 3,
+                                               lw::Cell{origin.x - 1, origin.y}, lw::kInvalidId);
+            }
+        }
+        nav.build(map, registry);
+        graph.build(nav);
+    }
+
+    lw::Cell randomPassable(lw::Rng& rng) const {
+        for (;;) {
+            const lw::Cell cell{rng.rangeInt(0, nav.width() - 1), rng.rangeInt(0, nav.height() - 1)};
+            if (nav.passable(cell)) {
+                return cell;
+            }
+        }
+    }
+
+    lw::Map map;
+    entt::registry registry;
+    lw::NavGrid nav;
+    lw::NavGraph graph;
+};
+
+constexpr std::uint32_t kNoPath = 0xFFFFFFFFu;
+
+// Стоимость кратчайшего пути от source до каждой клетки — Дейкстра по всем клеткам.
+std::vector<std::uint32_t> shortestCosts(const lw::NavGrid& nav, lw::Cell source) {
+    const int width = nav.width();
+    std::vector<std::uint32_t> cost(static_cast<std::size_t>(width) * static_cast<std::size_t>(nav.height()),
+                                    kNoPath);
+    using Entry = std::pair<std::uint32_t, std::uint32_t>;
+    std::vector<Entry> heap;
+    const auto index = [width](int x, int y) { return static_cast<std::uint32_t>(y * width + x); };
+    cost[index(source.x, source.y)] = 0;
+    heap.emplace_back(0, index(source.x, source.y));
+    while (!heap.empty()) {
+        std::pop_heap(heap.begin(), heap.end(), std::greater<>{});
+        const auto [g, i] = heap.back();
+        heap.pop_back();
+        if (g != cost[i]) {
+            continue;
+        }
+        const int x = static_cast<int>(i) % width;
+        const int y = static_cast<int>(i) / width;
+        for (int d = 0; d < 8; ++d) {
+            const std::uint32_t step = nav.stepCost(x, y, d);
+            if (step == 0) {
+                continue;
+            }
+            const std::uint32_t n = index(x + lw::kNavDx[d], y + lw::kNavDy[d]);
+            if (g + step < cost[n]) {
+                cost[n] = g + step;
+                heap.emplace_back(g + step, n);
+                std::push_heap(heap.begin(), heap.end(), std::greater<>{});
+            }
+        }
+    }
+    return cost;
+}
+
+// Путь связен, начинается и кончается где надо, его стоимость сходится,
+// сглаженные отрезки проходимы, а их концы — клетки пути по порядку.
+bool validPath(const lw::NavGrid& nav, const lw::Path& path, lw::Cell start, lw::Cell goal) {
+    if (path.cells.empty() || !(path.cells.front() == start) || !(path.cells.back() == goal)) {
+        return false;
+    }
+    std::uint64_t sum = 0;
+    for (std::size_t i = 1; i < path.cells.size(); ++i) {
+        const std::uint32_t step = nav.stepCost(path.cells[i - 1], path.cells[i]);
+        if (step == 0) {
+            return false;
+        }
+        sum += step;
+    }
+    if (sum != path.cost || path.waypoints.empty() || !(path.waypoints.front() == start) ||
+        !(path.waypoints.back() == goal)) {
+        return false;
+    }
+    std::size_t next = 0;
+    for (std::size_t i = 0; i < path.waypoints.size(); ++i) {
+        if (i > 0 && !nav.segmentPassable(path.waypoints[i - 1], path.waypoints[i])) {
+            return false;
+        }
+        while (next < path.cells.size() && !(path.cells[next] == path.waypoints[i])) {
+            ++next;
+        }
+        if (next == path.cells.size()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Граф навигации: узлы — куски клеток одного вида в своём секторе, каждая
+// проходимая клетка принадлежит ровно одному узлу, рёбра симметричны.
+void checkNavGraph(const lw::NavGrid& nav, const lw::NavGraph& graph) {
+    const std::vector<lw::NavGraph::Node>& nodes = graph.nodes();
+    CHECK(!nodes.empty());
+    bool nodesOk = true;
+    bool edgesOk = true;
+    for (std::uint32_t i = 0; i < nodes.size(); ++i) {
+        const lw::NavGraph::Node& node = nodes[i];
+        nodesOk = nodesOk && lw::NavGrid::classOf(nav.cost(node.cell)) == node.kind &&
+                  graph.nodeOf(nav, node.cell) == i && node.cost >= lw::NavGrid::kRoadCost;
+        for (const lw::NavGraph::Edge& edge : graph.edges(i)) {
+            const auto back = graph.edges(edge.to);
+            const bool symmetric = std::any_of(back.begin(), back.end(), [&](const lw::NavGraph::Edge& e) {
+                return e.to == i && e.cost == edge.cost;
+            });
+            const lw::Cell a = node.cell;
+            const lw::Cell b = nodes[edge.to].cell;
+            const auto dx = static_cast<std::uint32_t>(std::abs(a.x - b.x));
+            const auto dy = static_cast<std::uint32_t>(std::abs(a.y - b.y));
+            const std::uint32_t octile = lw::NavGrid::kRoadStraightStep * (std::max(dx, dy) - std::min(dx, dy)) +
+                                         lw::NavGrid::kRoadDiagonalStep * std::min(dx, dy);
+            edgesOk = edgesOk && symmetric && edge.to != i && edge.cost >= octile;
+        }
+    }
+    CHECK(nodesOk);
+    CHECK(edgesOk);
+
+    bool cellsOk = true;
+    for (int y = 0; y < nav.height(); ++y) {
+        for (int x = 0; x < nav.width(); ++x) {
+            const std::uint32_t node = graph.nodeOf(nav, {x, y});
+            if (!nav.passable({x, y})) {
+                cellsOk = cellsOk && node == lw::NavGraph::kNoNode;
+                continue;
+            }
+            cellsOk = cellsOk && node < nodes.size() &&
+                      nodes[node].kind == lw::NavGrid::classOf(nav.cost({x, y})) &&
+                      (nodes[node].cell.x >> lw::NavGraph::kSectorShift) == (x >> lw::NavGraph::kSectorShift) &&
+                      (nodes[node].cell.y >> lw::NavGraph::kSectorShift) == (y >> lw::NavGraph::kSectorShift);
+        }
+    }
+    CHECK(cellsOk);
+}
+
+// Прямой поиск оптимален, граф даёт верный путь не дешевле оптимального, пути нет —
+// только между разными областями. Проверяется на случайных картах.
+void testPathfinderOnRandomMaps() {
+    lw::PathfinderSettings graphOnly;
+    graphOnly.directRange = -1;    // всегда через граф
+    graphOnly.corridorMargin = 0;  // коридор — только секторы маршрута
+    graphOnly.refineSpan = 5;      // много промежуточных целей
+    lw::PathfinderSettings graphWide;
+    graphWide.directRange = -1;
+    graphWide.corridorMargin = 16;
+    graphWide.refineSpan = 1000;
+
+    for (std::uint64_t seed = 1; seed <= 6; ++seed) {
+        const NavFixture fixture(seed, 72, 56);
+        const lw::NavGrid& nav = fixture.nav;
+        checkNavGraph(nav, fixture.graph);
+
+        lw::Pathfinder direct(nav, fixture.graph);
+        lw::Pathfinder viaGraph(nav, fixture.graph, graphOnly);
+        lw::Pathfinder viaWideGraph(nav, fixture.graph, graphWide);
+        lw::Rng rng(seed * 977);
+        bool optimal = true;
+        bool valid = true;
+        bool graphOk = true;
+        bool reachability = true;
+        int unreachable = 0;
+        for (int q = 0; q < 25; ++q) {
+            const lw::Cell start = fixture.randomPassable(rng);
+            const std::vector<std::uint32_t> best = shortestCosts(nav, start);
+            for (int k = 0; k < 6; ++k) {
+                const lw::Cell goal = fixture.randomPassable(rng);
+                const std::uint32_t expected =
+                    best[static_cast<std::size_t>(goal.y * nav.width() + goal.x)];
+                const lw::Path a = direct.find(start, goal);
+                const lw::Path b = viaGraph.find(start, goal);
+                const lw::Path c = viaWideGraph.find(start, goal);
+                if (expected == kNoPath) {
+                    ++unreachable;
+                    reachability = reachability && a.status == lw::PathStatus::Unreachable &&
+                                   b.status == lw::PathStatus::Unreachable && a.expanded == 0;
+                    continue;
+                }
+                optimal = optimal && a.found() && a.method == lw::PathMethod::Direct && a.cost == expected;
+                valid = valid && validPath(nav, a, start, goal) && validPath(nav, b, start, goal) &&
+                        validPath(nav, c, start, goal);
+                graphOk = graphOk && b.method == lw::PathMethod::Graph && b.cost >= expected &&
+                          c.method == lw::PathMethod::Graph && c.cost >= expected;
+            }
+        }
+        CHECK(optimal);
+        CHECK(valid);
+        CHECK(graphOk);
+        CHECK(reachability);
+        (void)unreachable;
+    }
+
+    // Непроходимые начало или цель; путь в саму себя.
+    const NavFixture fixture(3, 72, 56);
+    lw::Pathfinder finder(fixture.nav, fixture.graph);
+    lw::Cell blocked{-1, -1};
+    for (const auto [entity, building] : fixture.registry.view<const lw::Building>().each()) {
+        blocked = building.origin;
+        break;
+    }
+    lw::Rng rng(5);
+    const lw::Cell somewhere = fixture.randomPassable(rng);
+    CHECK(finder.find(blocked, somewhere).status == lw::PathStatus::Blocked);
+    CHECK(finder.find(somewhere, blocked).status == lw::PathStatus::Blocked);
+    CHECK(finder.find(somewhere, {-5, 3}).status == lw::PathStatus::Blocked);
+    const lw::Path self = finder.find(somewhere, somewhere);
+    CHECK(self.found() && self.cost == 0 && self.cells.size() == 1 && self.waypoints.size() == 1);
+
+    // Без графа остаётся запасной поиск по всей карте.
+    const lw::NavGraph empty;
+    lw::PathfinderSettings noDirect;
+    noDirect.directRange = -1;
+    lw::Pathfinder fallback(fixture.nav, empty, noDirect);
+    lw::Pathfinder reference(fixture.nav, fixture.graph);
+    for (int q = 0; q < 10; ++q) {
+        const lw::Cell start = fixture.randomPassable(rng);
+        const lw::Cell goal = fixture.randomPassable(rng);
+        const lw::Path path = fallback.find(start, goal);
+        const lw::Path best = reference.find(start, goal);
+        CHECK(path.status == best.status);
+        if (path.found()) {
+            CHECK(path.method == lw::PathMethod::Full && path.cost == best.cost);
+        }
+    }
+}
+
+// Ответ не зависит от предыдущих запросов и от того, какой Pathfinder его считает.
+void testPathfinderDeterminism() {
+    const NavFixture fixture(11, 96, 80);
+    lw::PathfinderSettings settings;
+    settings.directRange = 20; // и прямой поиск, и граф
+    lw::Pathfinder first(fixture.nav, fixture.graph, settings);
+    lw::Pathfinder second(fixture.nav, fixture.graph, settings);
+    lw::Rng rng(21);
+    std::vector<std::pair<lw::Cell, lw::Cell>> queries;
+    for (int i = 0; i < 40; ++i) {
+        queries.emplace_back(fixture.randomPassable(rng), fixture.randomPassable(rng));
+    }
+    std::vector<lw::Path> forward;
+    for (const auto& [start, goal] : queries) {
+        forward.push_back(first.find(start, goal));
+    }
+    bool same = true;
+    for (std::size_t i = queries.size(); i-- > 0;) {
+        const lw::Path path = second.find(queries[i].first, queries[i].second);
+        same = same && path.status == forward[i].status && path.method == forward[i].method &&
+               path.cost == forward[i].cost && path.cells == forward[i].cells &&
+               path.waypoints == forward[i].waypoints;
+    }
+    CHECK(same);
+}
+
+// Навигация сгенерированного мира: дома непроходимы, двери и центры поселений
+// связаны, пути между поселениями идут по графу и почти не дороже оптимальных.
+void testWorldNavigation() {
+    const lw::World world(7, regionConfig());
+    const lw::NavGrid& nav = world.nav();
+    const entt::registry& registry = world.registry();
+
+    std::vector<lw::Cell> centers;
+    for (const auto [entity, settlement] : registry.view<const lw::Settlement>().each()) {
+        centers.push_back(settlement.center);
+    }
+    bool buildings = true;
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        buildings = buildings && !nav.passable(building.origin) && nav.passable(building.door) &&
+                    nav.connected(building.door, centers.front());
+    }
+    CHECK(buildings);
+    checkNavGraph(nav, world.navGraph());
+
+    lw::Pathfinder finder(nav, world.navGraph());
+    const std::vector<std::uint32_t> best = shortestCosts(nav, centers.front());
+    bool found = true;
+    bool valid = true;
+    bool viaGraph = false;
+    double worst = 0.0;
+    for (std::size_t i = 1; i < centers.size(); ++i) {
+        const lw::Cell goal = centers[i];
+        const lw::Path path = finder.find(centers.front(), goal);
+        const std::uint32_t optimum = best[static_cast<std::size_t>(goal.y * nav.width() + goal.x)];
+        found = found && path.found();
+        if (!path.found()) {
+            continue;
+        }
+        valid = valid && validPath(nav, path, centers.front(), goal) && path.cost >= optimum;
+        viaGraph = viaGraph || path.method == lw::PathMethod::Graph;
+        worst = std::max(worst, static_cast<double>(path.cost) / optimum);
+    }
+    CHECK(found);
+    CHECK(valid);
+    CHECK(viaGraph);
+    CHECK(worst < 1.1);
+
+    // Тот же мир — те же пути.
+    const lw::World twin(7, regionConfig());
+    lw::Pathfinder twinFinder(twin.nav(), twin.navGraph());
+    const lw::Path a = finder.find(centers.front(), centers.back());
+    const lw::Path b = twinFinder.find(centers.front(), centers.back());
+    CHECK(a.cells == b.cells && a.cost == b.cost);
+}
+
+
+// --- Люди --------------------------------------------------------------------
+
+void testWalkSpeed() {
+    CHECK(lw::walkSpeedFactor(lw::NavGrid::kBlocked) == 0.0f);
+    CHECK(lw::walkSpeedFactor(lw::NavGrid::kRoadCost) == 1.0f);
+    CHECK(lw::walkSpeedFactor(11) < 1.0f && lw::walkSpeedFactor(15) < lw::walkSpeedFactor(11));
+    const float ford = lw::walkSpeedFactor(lw::NavGrid::kWaterCost);
+    const float swim = lw::walkSpeedFactor(250);
+    CHECK(ford < lw::walkSpeedFactor(15) && swim < ford && swim > 0.0f);
+}
+
+void testPeople() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 150;
+    lw::World world(7, config);
+    const entt::registry& registry = world.registry();
+    const lw::NavGrid& nav = world.nav();
+
+    // Все живут в жилых домах и начинают у своей двери.
+    bool housed = true;
+    for (const auto [entity, person, position] :
+         registry.view<const lw::Person, const lw::Position>().each()) {
+        const entt::entity home = world.find(person.home);
+        housed = housed && home != entt::null;
+        if (home == entt::null) {
+            continue;
+        }
+        const lw::Building& building = registry.get<lw::Building>(home);
+        housed = housed &&
+                 (building.kind == lw::BuildingKind::House ||
+                  building.kind == lw::BuildingKind::Apartment) &&
+                 lw::Map::cellAt(position.x, position.y) == building.door;
+    }
+    CHECK(registry.view<const lw::Person>().size() == 150);
+    CHECK(housed);
+
+    const auto atHome = [&]() {
+        std::size_t count = 0;
+        for (const auto [entity, person, position] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            const lw::Building& building = registry.get<lw::Building>(world.find(person.home));
+            count += lw::Map::cellAt(position.x, position.y) == building.door ? 1 : 0;
+        }
+        return count;
+    };
+
+    // Тот же seed — те же маршруты.
+    lw::World twin(7, config);
+    for (int i = 0; i < 3000; ++i) {
+        world.step();
+        twin.step();
+    }
+    CHECK(world.stateHash() == twin.stateHash());
+
+    // Днём (до 12:00) люди расходятся и ходят только по проходимым клеткам.
+    bool onLand = true;
+    std::size_t walked = 0;
+    while (lw::calendarAt(world.tick()).hour < 12) {
+        world.step();
+        if (world.tick() % 100 == 0) {
+            for (const auto [entity, position, walker] :
+                 registry.view<const lw::Position, const lw::Walker>().each()) {
+                onLand = onLand && nav.passable(lw::Map::cellAt(position.x, position.y));
+                walked += walker.moving() ? 1 : 0;
+            }
+        }
+    }
+    CHECK(onLand);
+    CHECK(walked > 0);
+    CHECK(atHome() < 120);
+
+    // К трём часам ночи почти все дома.
+    const std::uint64_t night = lw::nextTimeOfDay(world.tick(), 3, 0);
+    while (world.tick() < night) {
+        world.step();
+    }
+    CHECK(atHome() >= 140);
+}
+
+// Шаг движения может быть длиннее тика: за один шаг человек проходит весь путь.
+void testLongMovementStep() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 1;
+    lw::World world(7, config);
+    entt::registry& registry = world.registry();
+    const entt::entity person = *registry.view<lw::Person>().begin();
+
+    lw::Cell goal{};
+    float farthest = 0.0f;
+    const lw::Position start = registry.get<lw::Position>(person);
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        const float dx = lw::Map::cellCenter(building.door.x) - start.x;
+        const float dy = lw::Map::cellCenter(building.door.y) - start.y;
+        if (dx * dx + dy * dy > farthest && world.nav().connected(building.door,
+                                                                  lw::Map::cellAt(start.x, start.y))) {
+            farthest = dx * dx + dy * dy;
+            goal = building.door;
+        }
+    }
+    CHECK(farthest > 0.0f);
+    CHECK(lw::startWalk(world, person, goal));
+    CHECK(registry.get<lw::Walker>(person).moving());
+    lw::updateMovement(world, 1.0e6f);
+    const lw::Position& end = registry.get<lw::Position>(person);
+    CHECK(lw::Map::cellAt(end.x, end.y) == goal);
+    CHECK(!registry.get<lw::Walker>(person).moving());
+    lw::updateMovement(world, lw::kTickDt);
+    const lw::Velocity& velocity = registry.get<lw::Velocity>(person);
+    CHECK(velocity.x == 0.0f && velocity.y == 0.0f);
+}
+
+// На этом держится интерполяция при отрисовке: Velocity — смещение за последний
+// тик, делённое на kTickDt, поэтому позиция минус Velocity · kTickDt — позиция
+// на начало тика.
+void testVelocityIsTickDisplacement() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 60;
+    lw::World world(7, config);
+    entt::registry& registry = world.registry();
+    std::vector<std::pair<entt::entity, lw::Position>> before;
+    std::size_t moved = 0;
+    float worst = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        before.clear();
+        for (const auto [entity, position] : registry.view<const lw::Position>().each()) {
+            before.emplace_back(entity, position);
+        }
+        world.step();
+        for (const auto& [entity, start] : before) {
+            const lw::Position& now = registry.get<lw::Position>(entity);
+            const lw::Velocity& velocity = registry.get<lw::Velocity>(entity);
+            const float dx = now.x - velocity.x * lw::kTickDt - start.x;
+            const float dy = now.y - velocity.y * lw::kTickDt - start.y;
+            worst = std::max(worst, std::max(std::abs(dx), std::abs(dy)));
+            moved += now.x != start.x || now.y != start.y ? 1 : 0;
+        }
+    }
+    CHECK(moved > 0);
+    CHECK(worst < 2e-3f); // миллиметры: погрешность float на координатах в километры
+}
+
+// Нужды: скорости в игровых часах, сон, компания, здоровье на пределе.
+void testNeeds() {
+    lw::World world(3, smallConfig(2));
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> people;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        people.push_back(entity);
+    }
+    CHECK(people.size() == 2);
+    if (people.size() != 2) {
+        return;
+    }
+    const entt::entity a = people[0];
+    const entt::entity b = people[1];
+    // Далеко друг от друга, днём, без дома: одиноки и не боятся.
+    registry.get<lw::Position>(a) = {20.0f, 20.0f};
+    registry.get<lw::Position>(b) = {200.0f, 200.0f};
+    registry.get<lw::Needs>(a) = {};
+    registry.get<lw::Needs>(b) = {};
+    registry.get<lw::Traits>(a) = {}; // средний характер: скорости без поправок
+    registry.get<lw::Traits>(b) = {};
+    registry.get<lw::Person>(b).asleep = true;
+    registry.get<lw::Needs>(b).fatigue = 0.8f;
+    world.syncSpatial();
+
+    for (int i = 0; i < 120; ++i) {
+        lw::updateNeeds(world, 1.0f);
+    }
+    const lw::Needs awake = registry.get<lw::Needs>(a);
+    const lw::Needs sleeping = registry.get<lw::Needs>(b);
+    // Два часа: голод — 2/48, жажда — 2/30, усталость — 2/18.
+    CHECK(std::abs(awake.hunger - 2.0f / 48.0f) < 1e-3f);
+    CHECK(std::abs(awake.thirst - 2.0f / 30.0f) < 1e-3f);
+    CHECK(std::abs(awake.fatigue - 2.0f / 18.0f) < 1e-3f);
+    CHECK(awake.loneliness > 0.05f && sleeping.loneliness == 0.0f);
+    CHECK(sleeping.hunger < awake.hunger && sleeping.fatigue < 0.8f - 0.15f);
+    CHECK(awake.health == 1.0f);
+
+    // Один шаг на два часа — то же, что 120 шагов по минуте.
+    registry.get<lw::Needs>(a) = {};
+    lw::updateNeeds(world, 120.0f);
+    const lw::Needs coarse = registry.get<lw::Needs>(a);
+    CHECK(std::abs(coarse.hunger - awake.hunger) < 1e-4f);
+    CHECK(std::abs(coarse.fatigue - awake.fatigue) < 1e-4f);
+
+    // Рядом — компания: одиночество уходит.
+    registry.get<lw::Needs>(a).loneliness = 0.5f;
+    registry.get<lw::Position>(b) = {25.0f, 20.0f};
+    world.syncSpatial();
+    lw::updateNeeds(world, 60.0f);
+    CHECK(registry.get<lw::Needs>(a).loneliness < 0.5f - 0.2f);
+
+    // На пределе голода и жажды здоровье уходит, в норме — восстанавливается.
+    lw::Needs& starving = registry.get<lw::Needs>(a);
+    starving = {};
+    starving.hunger = 1.0f;
+    starving.thirst = 1.0f;
+    lw::updateNeeds(world, 60.0f * 12.0f);
+    const float hurt = registry.get<lw::Needs>(a).health;
+    CHECK(hurt < 1.0f - 0.4f);
+    CHECK(registry.get<lw::Needs>(a).fear > 0.1f); // плохо — страшно
+    registry.get<lw::Needs>(a).hunger = 0.0f;
+    registry.get<lw::Needs>(a).thirst = 0.0f;
+    lw::updateNeeds(world, 60.0f);
+    CHECK(registry.get<lw::Needs>(a).health > hurt);
+}
+
+// Черты: колокол вокруг 0,5, лидерство тянется к смелости, один seed — одни характеры.
+void testTraits() {
+    lw::Rng rng(17);
+    constexpr int kCount = 4000;
+    std::vector<lw::Traits> all;
+    for (int i = 0; i < kCount; ++i) {
+        all.push_back(lw::generateTraits(rng));
+    }
+    bool inRange = true;
+    double meanBravery = 0.0;
+    double meanLeadership = 0.0;
+    int extreme = 0;
+    for (const lw::Traits& t : all) {
+        for (const float v : {t.bravery, t.greed, t.altruism, t.aggression, t.leadership,
+                              t.sociability, t.curiosity, t.prudence, t.chronotype}) {
+            inRange = inRange && v >= 0.0f && v <= 1.0f;
+        }
+        meanBravery += t.bravery;
+        meanLeadership += t.leadership;
+        extreme += t.curiosity < 0.1f || t.curiosity > 0.9f ? 1 : 0;
+    }
+    meanBravery /= kCount;
+    meanLeadership /= kCount;
+    CHECK(inRange);
+    CHECK(std::abs(meanBravery - 0.5) < 0.02);
+    CHECK(extreme < kCount / 50); // у колокола края редки: около 0,9 %
+    double covariance = 0.0;
+    for (const lw::Traits& t : all) {
+        covariance += (t.bravery - meanBravery) * (t.leadership - meanLeadership);
+    }
+    CHECK(covariance > 0.0);
+
+    // Люди мира получают черты при рождении, один seed — одни характеры.
+    const lw::World a(5, smallConfig(20));
+    const lw::World b(5, smallConfig(20));
+    std::vector<float> braveryA;
+    std::vector<float> braveryB;
+    for (const auto [entity, traits] : a.registry().view<const lw::Traits>().each()) {
+        braveryA.push_back(traits.bravery);
+    }
+    for (const auto [entity, traits] : b.registry().view<const lw::Traits>().each()) {
+        braveryB.push_back(traits.bravery);
+    }
+    CHECK(braveryA.size() == 20);
+    CHECK(braveryA == braveryB);
+}
+
+// --- Utility AI --------------------------------------------------------------
+
+// Справочник мест: поселения с зданиями, места для питья и сбора достижимы и
+// лежат там, где обещано.
+void testPlaces() {
+    const lw::World world(7, regionConfig());
+    const lw::Places& places = world.places();
+    const lw::Map& map = world.map();
+    const lw::NavGrid& nav = world.nav();
+    CHECK(!places.settlements().empty());
+    CHECK(places.waterSpotCount() > 0 && places.forageSpotCount() > 0);
+    std::size_t buildings = 0;
+    bool sorted = true;
+    for (const auto& settlement : places.settlements()) {
+        buildings += settlement.buildings.size();
+        sorted = sorted && std::is_sorted(settlement.buildings.begin(), settlement.buildings.end(),
+                                          [](const auto& a, const auto& b) { return a.id < b.id; });
+        CHECK(places.settlement(settlement.id) == &settlement);
+    }
+    CHECK(buildings == world.registry().view<const lw::Building>().size());
+    CHECK(sorted);
+
+    const auto fresh = [&](lw::Cell c) {
+        const lw::Water w = map.water.at(c.x, c.y);
+        return w == lw::Water::Lake || w == lw::Water::River;
+    };
+    lw::Rng rng(3);
+    int found = 0;
+    bool valid = true;
+    for (int i = 0; i < 200; ++i) {
+        const lw::Cell from{static_cast<int>(rng.below(1024)), static_cast<int>(rng.below(1024))};
+        if (!nav.passable(from)) {
+            continue;
+        }
+        if (const auto water = places.nearestWater(nav, from, 1500.0f)) {
+            ++found;
+            bool shore = fresh(*water);
+            for (int d = 0; d < 4; ++d) {
+                const lw::Cell next{water->x + lw::kNavDx[d], water->y + lw::kNavDy[d]};
+                shore = shore || (map.contains(next) && fresh(next));
+            }
+            const float dx = lw::Map::cellCenter(water->x) - lw::Map::cellCenter(from.x);
+            const float dy = lw::Map::cellCenter(water->y) - lw::Map::cellCenter(from.y);
+            valid = valid && shore && nav.connected(from, *water) &&
+                    dx * dx + dy * dy <= 1500.0f * 1500.0f;
+        }
+        if (const auto forest = places.nearestForage(nav, from, 1500.0f)) {
+            valid = valid && map.cover.at(forest->x, forest->y) == lw::Cover::Forest &&
+                    nav.connected(from, *forest);
+        }
+    }
+    CHECK(found > 0);
+    CHECK(valid);
+}
+
+void testPersonalNight() {
+    // Жаворонок: 21:00–5:30, сова: 23:30–8:00.
+    CHECK(lw::isPersonalNight(0.0f, 21 * 60) && lw::isPersonalNight(0.0f, 3 * 60));
+    CHECK(!lw::isPersonalNight(0.0f, 6 * 60) && !lw::isPersonalNight(0.0f, 20 * 60));
+    CHECK(!lw::isPersonalNight(1.0f, 22 * 60) && lw::isPersonalNight(1.0f, 7 * 60));
+    CHECK(lw::isPersonalNight(1.0f, 23 * 60 + 45) && !lw::isPersonalNight(1.0f, 8 * 60 + 5));
+}
+
+// Мир из одного человека: его сущность и дом.
+struct Lone {
+    lw::World world;
+    entt::entity person = entt::null;
+    entt::entity home = entt::null;
+
+    Lone() : world(7, [] {
+                 lw::WorldConfig config = regionConfig();
+                 config.people = 1;
+                 return config;
+             }()) {
+        entt::registry& registry = world.registry();
+        person = *registry.view<lw::Person>().begin();
+        home = world.find(registry.get<lw::Person>(person).home);
+        registry.get<lw::Traits>(person) = {};
+        registry.get<lw::Needs>(person) = {};
+    }
+
+    void run(int gameMinutes) {
+        const std::uint64_t end =
+            world.tick() + static_cast<std::uint64_t>(gameMinutes) * lw::kTicksPerGameMinute;
+        while (world.tick() < end) {
+            world.step();
+        }
+    }
+};
+
+// Голодный дома ест из своих запасов.
+void testAiEatsAtHome() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    CHECK(lone.home != entt::null);
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Needs>(lone.person).hunger = 0.9f;
+    const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Eat)] >
+          scores[static_cast<std::size_t>(lw::Action::Wander)]);
+    lone.run(90);
+    CHECK(registry.get<lw::Needs>(lone.person).hunger < 0.6f);
+    CHECK(registry.get<lw::Supplies>(lone.home).food < 5);
+}
+
+// Дома нет воды — жажду утоляют у реки или в чужих домах.
+void testAiFindsWater() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home).water = 0;
+    registry.get<lw::Needs>(lone.person).thirst = 0.95f;
+    lone.run(8 * 60);
+    CHECK(registry.get<lw::Needs>(lone.person).thirst < 0.6f);
+    CHECK(registry.get<lw::Needs>(lone.person).health > 0.9f);
+}
+
+// В домах нет еды — человек идёт искать её в чужих зданиях или в лес и
+// помнит, где уже искал.
+void testAiScavengesWhenHungry() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool searched = false;
+    for (int minute = 0; minute < 8 * 60; minute += 10) {
+        lone.run(10);
+        const lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+        searched = searched || mind.action == lw::Action::Scavenge ||
+                   mind.action == lw::Action::Forage;
+    }
+    CHECK(searched);
+    const lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    const bool remembers = std::any_of(std::begin(mind.searched), std::end(mind.searched),
+                                       [](lw::EntityId id) { return id != lw::kInvalidId; });
+    CHECK(remembers || mind.action == lw::Action::Forage);
+}
+
+// Найденное в чужом доме несут домой и выкладывают в запасы.
+void testAiCarriesHome() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home) = {};
+    registry.get<lw::Carry>(lone.person) = {3, 2};
+    // Уйти от дома и вернуться: на пороге запасы перекладываются.
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
+    CHECK(away.has_value());
+    if (!away) {
+        return;
+    }
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
+                                               lw::Map::cellCenter(away->y)};
+    registry.get<lw::Needs>(lone.person).fear = 1.0f; // страшно — домой
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.phase = lw::ActionPhase::Perform;
+    mind.action = lw::Action::Idle;
+    mind.until = lone.world.tick();
+    lone.world.syncSpatial();
+    lone.run(60);
+    const lw::Supplies& supplies = registry.get<lw::Supplies>(lone.home);
+    const lw::Carry& carry = registry.get<lw::Carry>(lone.person);
+    // Что-то могли уже съесть и выпить, но остальное — дома, а не в руках.
+    CHECK(carry.food == 0 && carry.water == 0);
+    CHECK(supplies.food + supplies.water > 0);
+}
+
+// Путь оборвался не у цели — действие там не выполняется: нельзя поесть из
+// домашних запасов вдали от дома.
+void testAiArrivesElsewhere() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
+    CHECK(away.has_value());
+    if (!away) {
+        return;
+    }
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
+                                               lw::Map::cellCenter(away->y)};
+    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Needs>(lone.person).hunger = 0.7f;
+    registry.get<lw::Walker>(lone.person).waypoints.clear();
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Eat;
+    mind.phase = lw::ActionPhase::Travel;
+    mind.target = registry.get<lw::Id>(lone.home).value;
+    mind.spot = door;
+    lone.world.syncSpatial();
+
+    // Выполняет действие — значит, стоит на его клетке; ест из домашних
+    // запасов — значит, у своей двери.
+    bool inPlace = true;
+    bool ateAtHome = true;
+    std::uint16_t food = registry.get<lw::Supplies>(lone.home).food;
+    for (int i = 0; i < 60 * static_cast<int>(lw::kTicksPerGameMinute); ++i) {
+        lone.world.step();
+        const lw::Position& position = registry.get<lw::Position>(lone.person);
+        const lw::Cell cell = lw::Map::cellAt(position.x, position.y);
+        const lw::Mind& now = registry.get<lw::Mind>(lone.person);
+        inPlace = inPlace && (now.phase != lw::ActionPhase::Perform || cell == now.spot);
+        const std::uint16_t left = registry.get<lw::Supplies>(lone.home).food;
+        ateAtHome = ateAtHome && (left == food || cell == door);
+        food = left;
+    }
+    CHECK(inPlace);
+    CHECK(ateAtHome);
+    CHECK(food < 5); // дошёл и поел
+}
+
+// Запасливый ходит за едой, пока дома пусто, но не с полными руками.
+void testAiStocksUp() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Traits>(lone.person).prudence = 1.0f;
+    registry.get<lw::Supplies>(lone.home).food = 0;
+    const auto scavenge = [&] {
+        return lw::evaluateActions(lone.world, lone.person)[static_cast<std::size_t>(
+            lw::Action::Scavenge)];
+    };
+    CHECK(scavenge() > 0.0f); // 08:00, сыт, но дома пусто
+    registry.get<lw::Carry>(lone.person).food = 8;
+    CHECK(scavenge() == 0.0f);
+}
+
+// До дома не дойти (человек в другой связной области) — ночью он спит там,
+// где стоит, а не пытается без конца проложить путь.
+void testAiSleepsWhereStranded() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    const lw::NavGrid& nav = lone.world.nav();
+    const lw::NavGrid::Region mainRegion =
+        nav.region(registry.get<lw::Building>(lone.home).door);
+    // Клетки других связных областей (острова, закутки между водой и домами).
+    std::vector<lw::Cell> islands;
+    for (int y = 0; y < nav.height(); ++y) {
+        for (int x = 0; x < nav.width(); ++x) {
+            const lw::NavGrid::Region region = nav.region({x, y});
+            if (region != lw::NavGrid::kNoRegion && region != lw::NavGrid::kUnknownRegion &&
+                region != mainRegion) {
+                islands.push_back({x, y});
+            }
+        }
+    }
+    // Здание, от двери которого до такой клетки ближе всего, — новый дом.
+    std::optional<lw::Cell> stranded;
+    entt::entity home = entt::null;
+    long long best = 0;
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        if (nav.region(building.door) != mainRegion) {
+            continue;
+        }
+        for (const lw::Cell cell : islands) {
+            const long long dx = cell.x - building.door.x;
+            const long long dy = cell.y - building.door.y;
+            if (!stranded || dx * dx + dy * dy < best) {
+                stranded = cell;
+                home = entity;
+                best = dx * dx + dy * dy;
+            }
+        }
+    }
+    constexpr long long kMaxCells = 350; // 1,4 км: дом ещё «рядом», ночью к нему идут
+    CHECK(stranded.has_value() && best <= kMaxCells * kMaxCells);
+    if (!stranded || best > kMaxCells * kMaxCells) {
+        return;
+    }
+    registry.get<lw::Person>(lone.person).home = registry.get<lw::Id>(home).value;
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(stranded->x),
+                                               lw::Map::cellCenter(stranded->y)};
+    registry.get<lw::Walker>(lone.person).waypoints.clear();
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = lone.world.tick();
+    lone.world.syncSpatial();
+
+    const std::uint64_t night = lw::nextTimeOfDay(lone.world.tick(), 1, 0);
+    while (lone.world.tick() < night) {
+        lone.world.step();
+    }
+    CHECK(registry.get<lw::Person>(lone.person).asleep);
+    CHECK(registry.get<lw::Mind>(lone.person).action == lw::Action::Sleep);
+}
+
+// Двое суток мира: люди едят, пьют и спят, здоровье не падает; ночью спят.
+// Летопись: биография по id (субъект и объект), счётчики, накопленный хеш.
+// Все лесные места по блокам Places.
+std::vector<lw::Cell> forageSpots(const lw::World& world) {
+    std::vector<lw::Cell> spots;
+    for (const auto& spot : world.places().forageSpots().cells()) {
+        if (spot) {
+            spots.push_back(*spot);
+        }
+    }
+    return spots;
+}
+
+// Запас леса: убывает при сборе, растёт по сезону до предела, зимой пропадает;
+// дождь копится долями порции.
+void testResources() {
+    lw::World world(7, regionConfig());
+    lw::Resources& resources = world.resources();
+    const std::vector<lw::Cell> spots = forageSpots(world);
+    CHECK(!spots.empty() && resources.forestBlocks() == static_cast<int>(spots.size()));
+    if (spots.empty()) {
+        return;
+    }
+    const lw::Cell spot = spots.front();
+    CHECK(resources.forestAt(spot) == lw::Resources::kForestStart);
+    CHECK(resources.forestTotal() ==
+          static_cast<long long>(spots.size()) * lw::Resources::kForestStart);
+    CHECK(resources.forestAt({-1, -1}) == 0 && resources.forestAt({100000, 5}) == 0);
+    // Нелесной блок: запаса нет.
+    bool barrenFound = false;
+    for (int y = 0; y < world.map().height() && !barrenFound; y += lw::Places::kSpotBlock) {
+        for (int x = 0; x < world.map().width() && !barrenFound; x += lw::Places::kSpotBlock) {
+            if (!world.places().forageSpots().at(x / lw::Places::kSpotBlock,
+                                                 y / lw::Places::kSpotBlock)) {
+                barrenFound = true;
+                CHECK(resources.forestAt({x, y}) == 0 && !resources.takeForest({x, y}));
+            }
+        }
+    }
+    CHECK(barrenFound);
+
+    // Сбор: до нуля, дальше пусто.
+    for (int i = 0; i < lw::Resources::kForestStart; ++i) {
+        CHECK(resources.takeForest(spot));
+    }
+    CHECK(resources.forestAt(spot) == 0 && !resources.takeForest(spot));
+    CHECK(resources.forestEmpty() == 1);
+    // Пустое место ближайшим не считается.
+    const auto nearest = world.places().nearestForage(world.nav(), spot, 500.0f);
+    const auto stocked = world.places().nearestForage(
+        world.nav(), spot, 500.0f, [&](lw::Cell c) { return resources.forestAt(c) > 0; });
+    CHECK(nearest && *nearest == spot);
+    CHECK(!stocked || !(*stocked == spot));
+
+    // Весной порция за двое суток, летом — каждые сутки, до предела.
+    resources.growForest(lw::Season::Spring, 1);
+    CHECK(resources.forestAt(spot) == 0);
+    resources.growForest(lw::Season::Spring, 2);
+    CHECK(resources.forestAt(spot) == 1);
+    for (int day = 0; day < 10; ++day) {
+        resources.growForest(lw::Season::Summer, day);
+    }
+    CHECK(resources.forestAt(spot) == lw::Resources::kForestMax);
+    CHECK(resources.forestEmpty() == 0);
+    // Зима: за kForestMax суток пусто везде.
+    for (int day = 0; day < lw::Resources::kForestMax; ++day) {
+        resources.growForest(lw::Season::Winter, day);
+    }
+    CHECK(resources.forestTotal() == 0);
+    CHECK(resources.forestEmpty() == resources.forestBlocks());
+
+    // Ливень наполняет порцию за 180 минут, вполсилы — вдвое дольше.
+    int portions = 0;
+    for (int minute = 0; minute < 180; ++minute) {
+        portions += resources.collectRain(1.0f, 1.0f);
+    }
+    CHECK(portions == 1);
+    for (int minute = 0; minute < 350; ++minute) {
+        portions += resources.collectRain(0.5f, 1.0f);
+    }
+    CHECK(portions == 1);
+    for (int minute = 0; minute < 20; ++minute) {
+        portions += resources.collectRain(0.5f, 1.0f);
+    }
+    CHECK(portions == 2 && resources.rainPortions() == 2);
+    CHECK(resources.collectRain(0.0f, 1000.0f) == 0);
+
+    // Запас — часть состояния.
+    const lw::World other(7, regionConfig());
+    CHECK(world.resources().hash() != other.resources().hash());
+}
+
+// Тёплый ливень наполняет бочки домов, многоэтажек и сараев до предела;
+// в магазинах воды не прибавляется.
+void testRainFillsBarrels() {
+    lw::World world(7, regionConfig());
+    entt::registry& registry = world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.water = 0;
+    }
+    lw::Weather& weather = world.weather();
+    weather.kind = lw::WeatherKind::Storm;
+    weather.minutesLeft = 100000;
+    weather.cloudCover = 1.0f;
+    weather.precipitation = 1.0f;
+    weather.anomaly = 20.0f; // тепло: дождь, а не снег
+    const std::uint64_t end = world.tick() + 24 * lw::kTicksPerGameHour;
+    while (world.tick() < end) {
+        world.step();
+    }
+    CHECK(world.resources().rainPortions() >= 4);
+    bool filled = false;
+    bool withinBarrel = true;
+    bool shopsDry = true;
+    for (const auto [entity, building, supplies] :
+         registry.view<const lw::Building, const lw::Supplies>().each()) {
+        const std::uint16_t barrel = lw::rainBarrel(building.kind);
+        filled = filled || supplies.water > 0;
+        withinBarrel = withinBarrel && supplies.water <= barrel;
+        shopsDry = shopsDry && (building.kind != lw::BuildingKind::Shop || supplies.water == 0);
+    }
+    CHECK(filled && withinBarrel && shopsDry);
+    // Сутки ливня — дом полон.
+    for (const auto [entity, building, supplies] :
+         registry.view<const lw::Building, const lw::Supplies>().each()) {
+        if (building.kind == lw::BuildingKind::House) {
+            CHECK(supplies.water == lw::rainBarrel(building.kind));
+            break;
+        }
+    }
+}
+
+// Голодный в обобранной округе после обыска без еды идёт в лес и вычерпывает
+// запас; в обобранный лес не ходит.
+void testAiForagesFromStock() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    lw::Resources& resources = lone.world.resources();
+    const long long before = resources.forestTotal();
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool foraged = false;
+    for (int minute = 0; minute < 12 * 60; minute += 10) {
+        lone.run(10);
+        foraged = foraged || registry.get<lw::Mind>(lone.person).action == lw::Action::Forage;
+    }
+    CHECK(foraged);
+    CHECK(resources.forestTotal() < before);
+
+    // Лес пуст — в лес не идут, даже голодные.
+    Lone empty;
+    entt::registry& emptyRegistry = empty.world.registry();
+    for (const auto [entity, supplies] : emptyRegistry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    for (const lw::Cell spot : forageSpots(empty.world)) {
+        while (empty.world.resources().takeForest(spot)) {
+        }
+    }
+    emptyRegistry.get<lw::Needs>(empty.person).hunger = 0.9f;
+    CHECK(lw::evaluateActions(empty.world, empty.person)[static_cast<std::size_t>(
+              lw::Action::Forage)] == 0.0f);
+    bool wentToForest = false;
+    for (int minute = 0; minute < 6 * 60; minute += 10) {
+        empty.run(10);
+        wentToForest = wentToForest ||
+                       emptyRegistry.get<lw::Mind>(empty.person).action == lw::Action::Forage;
+    }
+    CHECK(!wentToForest);
+}
+
+void testChronicle() {
+    lw::Chronicle chronicle;
+    CHECK(chronicle.eventsOf(5).empty());
+    const std::uint64_t empty = chronicle.hash();
+    chronicle.add({10, lw::ChronicleKind::Settled, 5, 100, 0, 0});
+    chronicle.add({20, lw::ChronicleKind::Scavenged, 6, 100, 2, 1});
+    chronicle.add({30, lw::ChronicleKind::Starving, 5, lw::kInvalidId, 0, 0});
+    chronicle.add({40, lw::ChronicleKind::Settled, 7, 7, 0, 0}); // объект — он сам
+    CHECK(chronicle.events().size() == 4);
+    CHECK(chronicle.eventsOf(5).size() == 2);
+    CHECK(chronicle.eventsOf(5)[0] == 0 && chronicle.eventsOf(5)[1] == 2);
+    CHECK(chronicle.eventsOf(100).size() == 2);
+    CHECK(chronicle.eventsOf(7).size() == 1);
+    CHECK(chronicle.eventsOf(lw::kInvalidId).empty());
+    CHECK(chronicle.countOf(lw::ChronicleKind::Settled) == 2);
+    CHECK(chronicle.countOf(lw::ChronicleKind::Dying) == 0);
+    CHECK(chronicle.hash() != empty);
+
+    // Тот же набор в другом порядке — другой хеш: порядок событий — часть истории.
+    lw::Chronicle reordered;
+    reordered.add({20, lw::ChronicleKind::Scavenged, 6, 100, 2, 1});
+    reordered.add({10, lw::ChronicleKind::Settled, 5, 100, 0, 0});
+    reordered.add({30, lw::ChronicleKind::Starving, 5, lw::kInvalidId, 0, 0});
+    reordered.add({40, lw::ChronicleKind::Settled, 7, 7, 0, 0});
+    CHECK(reordered.hash() != chronicle.hash());
+}
+
+// Системы пишут в летопись: появление, последняя еда дома, голод.
+void testChronicleRecords() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    const lw::EntityId id = registry.get<lw::Id>(lone.person).value;
+    const lw::Chronicle& chronicle = lone.world.chronicle();
+    const auto has = [&](lw::ChronicleKind kind, lw::EntityId object) {
+        for (const std::uint32_t index : chronicle.eventsOf(id)) {
+            const lw::ChronicleEvent& event = chronicle.events()[index];
+            if (event.kind == kind && event.subject == id && event.object == object) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const lw::EntityId homeId = registry.get<lw::Person>(lone.person).home;
+    CHECK(has(lw::ChronicleKind::Settled, homeId));
+    CHECK(chronicle.countOf(lw::ChronicleKind::Settled) == 1);
+    if (lone.home == entt::null) {
+        return;
+    }
+
+    // Последняя порция дома.
+    registry.get<lw::Supplies>(lone.home).food = 1;
+    registry.get<lw::Needs>(lone.person).hunger = 0.9f;
+    lone.run(90);
+    CHECK(registry.get<lw::Supplies>(lone.home).food == 0);
+    CHECK(has(lw::ChronicleKind::AteLastFood, homeId));
+    CHECK(chronicle.eventsOf(homeId).size() >= 2); // и дом помнит
+
+    // Голод доходит до предела — одно событие, а не по событию каждую минуту.
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    registry.get<lw::Carry>(lone.person) = {};
+    registry.get<lw::Needs>(lone.person).hunger = 0.995f;
+    lone.run(30);
+    CHECK(chronicle.countOf(lw::ChronicleKind::Starving) == 1);
+}
+
+void testAiSurvives() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 120;
+    lw::World world(7, config);
+    const entt::registry& registry = world.registry();
+    std::size_t asleepAtNight = 0;
+    const std::uint64_t night = lw::nextTimeOfDay(world.tick(), 2, 0);
+    const std::uint64_t end = world.tick() + 2 * lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+        if (world.tick() == night) {
+            for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+                asleepAtNight += person.asleep ? 1 : 0;
+            }
+        }
+    }
+    float worst = 1.0f;
+    float hunger = 0.0f;
+    float thirst = 0.0f;
+    std::size_t actions = 0;
+    bool kinds[static_cast<std::size_t>(lw::Action::Count)] = {};
+    for (const auto [entity, needs, mind] : registry.view<const lw::Needs, const lw::Mind>().each()) {
+        worst = std::min(worst, needs.health);
+        hunger = std::max(hunger, needs.hunger);
+        thirst = std::max(thirst, needs.thirst);
+        kinds[static_cast<std::size_t>(mind.action)] = true;
+    }
+    for (const bool kind : kinds) {
+        actions += kind ? 1 : 0;
+    }
+    CHECK(asleepAtNight >= 110);
+    CHECK(worst > 0.95f);
+    CHECK(hunger < 0.9f && thirst < 0.9f);
+    CHECK(actions >= 3); // люди заняты разным
+}
+
 } // namespace
 
 int main() {
@@ -510,6 +2102,35 @@ int main() {
     testCalendar();
     testClimate();
     testWeather();
+    testSpatialIndex();
+    testSpatialIndexOrderIndependent();
+    testWorldSpatialIndex();
+    testSegmentWalk();
+    testNavGrid();
+    testPathfinderOnRandomMaps();
+    testPathfinderDeterminism();
+    testWorldNavigation();
+    testWalkSpeed();
+    testPeople();
+    testLongMovementStep();
+    testVelocityIsTickDisplacement();
+    testNeeds();
+    testTraits();
+    testPlaces();
+    testPersonalNight();
+    testAiEatsAtHome();
+    testAiFindsWater();
+    testAiScavengesWhenHungry();
+    testAiCarriesHome();
+    testAiArrivesElsewhere();
+    testAiStocksUp();
+    testAiSleepsWhereStranded();
+    testAiSurvives();
+    testResources();
+    testRainFillsBarrels();
+    testAiForagesFromStock();
+    testChronicle();
+    testChronicleRecords();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

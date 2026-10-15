@@ -33,6 +33,8 @@ endif()
 add_library(lw_sim STATIC
     src/sim/Calendar.cpp
     src/sim/Calendar.h
+    src/sim/Chronicle.cpp
+    src/sim/Chronicle.h
     src/sim/Climate.cpp
     src/sim/Climate.h
     src/sim/Components.h
@@ -41,11 +43,21 @@ add_library(lw_sim STATIC
     src/sim/Id.h
     src/sim/Map.cpp
     src/sim/Map.h
+    src/sim/Places.cpp
+    src/sim/Places.h
+    src/sim/Population.cpp
+    src/sim/Population.h
+    src/sim/Resources.cpp
+    src/sim/Resources.h
     src/sim/Rng.cpp
     src/sim/Rng.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
+    src/sim/SpatialIndex.cpp
+    src/sim/SpatialIndex.h
     src/sim/TimeScale.h
+    src/sim/Traits.cpp
+    src/sim/Traits.h
     src/sim/Weather.h
     src/sim/World.cpp
     src/sim/World.h
@@ -56,8 +68,21 @@ add_library(lw_sim STATIC
     src/sim/gen/Settlements.cpp
     src/sim/gen/Streets.cpp
     src/sim/gen/Terrain.cpp
-    src/sim/systems/WanderSystem.cpp
-    src/sim/systems/WanderSystem.h
+    src/sim/nav/NavGraph.cpp
+    src/sim/nav/NavGraph.h
+    src/sim/nav/NavGrid.cpp
+    src/sim/nav/NavGrid.h
+    src/sim/nav/Pathfinder.cpp
+    src/sim/nav/Pathfinder.h
+    src/sim/nav/SearchSpace.h
+    src/sim/systems/MovementSystem.cpp
+    src/sim/systems/MovementSystem.h
+    src/sim/systems/NeedsSystem.cpp
+    src/sim/systems/NeedsSystem.h
+    src/sim/systems/ResourceSystem.cpp
+    src/sim/systems/ResourceSystem.h
+    src/sim/systems/UtilityAiSystem.cpp
+    src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp
     src/sim/systems/WeatherSystem.h
 )
@@ -76,9 +101,17 @@ if(LW_BUILD_APP)
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
         src/render/WeatherRenderer.cpp
-    src/render/WeatherRenderer.h
-    src/render/WorldRenderer.cpp
+        src/render/WeatherRenderer.h
+        src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
+        src/ui/ChronicleView.cpp
+        src/ui/ChronicleView.h
+        src/ui/Format.cpp
+        src/ui/Format.h
+        src/ui/Inspector.cpp
+        src/ui/Inspector.h
+        src/ui/PathTool.cpp
+        src/ui/PathTool.h
         src/ui/Ui.cpp
         src/ui/Ui.h
     )

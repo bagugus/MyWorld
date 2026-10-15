@@ -1,6 +1,7 @@
 #include "render/WorldRenderer.h"
 
 #include "sim/Components.h"
+#include "sim/TimeScale.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -10,7 +11,12 @@ namespace lw {
 namespace {
 
 constexpr Color kBorderColor = {190, 190, 190, 255};
-constexpr Color kEntityColor = {236, 200, 92, 255};
+constexpr Color kEntityColor = {236, 200, 92, 255};   // в пути
+constexpr Color kRestingColor = {150, 205, 225, 255};  // на месте
+constexpr Color kSleepingColor = {70, 84, 140, 255};
+constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
+constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
+constexpr Color kSocialColor = {226, 128, 196, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
@@ -31,11 +37,37 @@ Color buildingColor(BuildingKind kind) {
     return {198, 164, 124, 255};
 }
 
+// Люди в пути — жёлтые, на месте — по занятию.
+Color entityColor(const entt::registry& registry, entt::entity entity) {
+    const auto* walker = registry.try_get<Walker>(entity);
+    if (walker == nullptr || walker->moving()) {
+        return kEntityColor;
+    }
+    const auto* mind = registry.try_get<Mind>(entity);
+    if (mind == nullptr || mind->phase == ActionPhase::Travel) {
+        return kRestingColor;
+    }
+    switch (mind->action) {
+    case Action::Sleep:
+        return kSleepingColor;
+    case Action::Eat:
+    case Action::Drink:
+        return kEatingColor;
+    case Action::Scavenge:
+    case Action::Forage:
+        return kSearchingColor;
+    case Action::Socialize:
+        return kSocialColor;
+    default:
+        return kRestingColor;
+    }
+}
+
 } // namespace
 
 WorldRenderer::WorldRenderer(const World& world) : map_(world.map()) {}
 
-void WorldRenderer::draw(const World& world, const Camera2D& camera) {
+void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha) {
     const float zoom = camera.zoom;
     const Rectangle bounds = {0.0f, 0.0f, world.width(), world.height()};
 
@@ -68,12 +100,20 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera) {
     // Радиус в метрах, но не меньше нескольких пикселей — чтобы существа
     // было видно и на общем плане.
     const float radius = std::max(kEntityRadiusMeters, kEntityMinRadiusPx / zoom);
-    for (const auto [entity, position] : world.registry().view<const Position>().each()) {
-        if (position.x < topLeft.x - radius || position.x > bottomRight.x + radius ||
-            position.y < topLeft.y - radius || position.y > bottomRight.y + radius) {
+    // Позиция на начало тика — текущая минус смещение за тик (Velocity · kTickDt).
+    const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
+    const entt::registry& registry = world.registry();
+    for (const auto [entity, position] : registry.view<const Position>().each()) {
+        Vector2 at = {position.x, position.y};
+        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
+            at.x -= velocity->x * back;
+            at.y -= velocity->y * back;
+        }
+        if (at.x < topLeft.x - radius || at.x > bottomRight.x + radius ||
+            at.y < topLeft.y - radius || at.y > bottomRight.y + radius) {
             continue;
         }
-        DrawCircleV({position.x, position.y}, radius, kEntityColor);
+        DrawCircleV(at, radius, entityColor(registry, entity));
     }
 }
 

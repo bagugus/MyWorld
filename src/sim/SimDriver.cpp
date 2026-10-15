@@ -63,6 +63,14 @@ void SimDriver::advance(double realDt) {
     updateStats(realDt);
 }
 
+float SimDriver::interpolationAlpha() const {
+    if (paused_) {
+        return 1.0f;
+    }
+    const double alpha = accumulator_ * World::kTicksPerSecond;
+    return static_cast<float>(std::clamp(alpha, 0.0, 1.0));
+}
+
 void SimDriver::updateStats(double realDt) {
     statsTime_ += realDt;
     statsTicks_ += ticksLastFrame_;
