@@ -26,6 +26,7 @@ enum class RngStream : std::uint8_t {
     Behavior, // распорядок людей (до этапа 4.3 — блуждание тестовых существ)
     MapGen,
     Weather,
+    Traits, // черты характера при рождении
     Count
 };
 

@@ -15,6 +15,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <utility>
 
 namespace lw::ui {
 
@@ -146,6 +147,24 @@ void drawPersonInfo(const World& world, entt::entity entity, EntityId id) {
         meter("Страх", needs->fear);
         meter("Одиночество", needs->loneliness);
         meter("Здоровье", needs->health);
+    }
+    if (const auto* traits = registry.try_get<Traits>(entity)) {
+        const std::pair<const char*, float> rows[] = {
+            {"Смелость", traits->bravery},       {"Жадность", traits->greed},
+            {"Альтруизм", traits->altruism},     {"Агрессия", traits->aggression},
+            {"Лидерство", traits->leadership},   {"Общительность", traits->sociability},
+            {"Любопытство", traits->curiosity},  {"Запасливость", traits->prudence},
+            {"Сова", traits->chronotype},
+        };
+        if (ImGui::BeginTable("traits", 4, ImGuiTableFlags_SizingStretchProp)) {
+            for (const auto& [name, value] : rows) {
+                ImGui::TableNextColumn();
+                ImGui::TextUnformatted(name);
+                ImGui::TableNextColumn();
+                ImGui::Text("%.0f", value * 100.0f);
+            }
+            ImGui::EndTable();
+        }
     }
 }
 

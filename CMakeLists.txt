@@ -48,6 +48,8 @@ add_library(lw_sim STATIC
     src/sim/SpatialIndex.cpp
     src/sim/SpatialIndex.h
     src/sim/TimeScale.h
+    src/sim/Traits.cpp
+    src/sim/Traits.h
     src/sim/Weather.h
     src/sim/World.cpp
     src/sim/World.h

@@ -61,6 +61,8 @@ void updateNeeds(World& world, float minutes) {
 
     auto view = registry.view<const Id, const Person, Needs, const Walker, const Position>();
     for (const auto [entity, id, person, needs, walker, position] : view.each()) {
+        const Traits* traits = registry.try_get<Traits>(entity);
+        const Traits character = traits != nullptr ? *traits : Traits{};
         const bool walking = walker.moving();
         bool atHome = false;
         if (const entt::entity home = world.find(person.home); home != entt::null) {
@@ -86,10 +88,12 @@ void updateNeeds(World& world, float minutes) {
                 clamp01(needs.fatigue + hours / kAwakeHours * (walking ? kWalkFatigue : 1.0f));
         }
 
+        // Общительному одиночество тяжелее (до 1,6 раза), нелюдимому — легче (от 0,4).
+        const float sociability = 0.4f + 1.2f * character.sociability;
         if (company) {
             needs.loneliness = clamp01(needs.loneliness - hours / kCompanyHours);
         } else if (!person.asleep) {
-            needs.loneliness = clamp01(needs.loneliness + hours / kLonelyHours);
+            needs.loneliness = clamp01(needs.loneliness + hours / kLonelyHours * sociability);
         }
 
         float damage = 0.0f;
@@ -104,9 +108,11 @@ void updateNeeds(World& world, float minutes) {
         }
 
         // Страх — после здоровья: раны пугают сразу.
-        float fearTarget = kWoundFear * (1.0f - needs.health);
+        // Смелый боится вдвое меньше среднего, трус — в полтора раза больше.
+        const float timidity = 1.5f - character.bravery;
+        float fearTarget = kWoundFear * (1.0f - needs.health) * timidity;
         if (dark && !atHome && !company) {
-            fearTarget += kDarkFear;
+            fearTarget += kDarkFear * timidity;
         }
         needs.fear = clamp01(needs.fear + (fearTarget - needs.fear) *
                                               std::min(1.0f, hours / kFearResponseHours));

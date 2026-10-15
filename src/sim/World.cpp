@@ -167,6 +167,18 @@ std::uint64_t World::stateHash() const {
             hasher.add(needs->loneliness);
             hasher.add(needs->health);
         }
+        if (const auto* traits = registry_.try_get<Traits>(entity)) {
+            hasher.add(std::uint64_t{10});
+            hasher.add(traits->bravery);
+            hasher.add(traits->greed);
+            hasher.add(traits->altruism);
+            hasher.add(traits->aggression);
+            hasher.add(traits->leadership);
+            hasher.add(traits->sociability);
+            hasher.add(traits->curiosity);
+            hasher.add(traits->prudence);
+            hasher.add(traits->chronotype);
+        }
         if (const auto* walker = registry_.try_get<Walker>(entity)) {
             hasher.add(std::uint64_t{7});
             hasher.add(walker->speed);

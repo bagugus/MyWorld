@@ -10,6 +10,7 @@
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
+#include "sim/Traits.h"
 #include "sim/World.h"
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
@@ -1365,6 +1366,8 @@ void testNeeds() {
     registry.get<lw::Position>(b) = {200.0f, 200.0f};
     registry.get<lw::Needs>(a) = {};
     registry.get<lw::Needs>(b) = {};
+    registry.get<lw::Traits>(a) = {}; // средний характер: скорости без поправок
+    registry.get<lw::Traits>(b) = {};
     registry.get<lw::Person>(b).asleep = true;
     registry.get<lw::Needs>(b).fatigue = 0.8f;
     world.syncSpatial();
@@ -1411,6 +1414,53 @@ void testNeeds() {
     CHECK(registry.get<lw::Needs>(a).health > hurt);
 }
 
+// Черты: колокол вокруг 0,5, лидерство тянется к смелости, один seed — одни характеры.
+void testTraits() {
+    lw::Rng rng(17);
+    constexpr int kCount = 4000;
+    std::vector<lw::Traits> all;
+    for (int i = 0; i < kCount; ++i) {
+        all.push_back(lw::generateTraits(rng));
+    }
+    bool inRange = true;
+    double meanBravery = 0.0;
+    double meanLeadership = 0.0;
+    int extreme = 0;
+    for (const lw::Traits& t : all) {
+        for (const float v : {t.bravery, t.greed, t.altruism, t.aggression, t.leadership,
+                              t.sociability, t.curiosity, t.prudence, t.chronotype}) {
+            inRange = inRange && v >= 0.0f && v <= 1.0f;
+        }
+        meanBravery += t.bravery;
+        meanLeadership += t.leadership;
+        extreme += t.curiosity < 0.1f || t.curiosity > 0.9f ? 1 : 0;
+    }
+    meanBravery /= kCount;
+    meanLeadership /= kCount;
+    CHECK(inRange);
+    CHECK(std::abs(meanBravery - 0.5) < 0.02);
+    CHECK(extreme < kCount / 50); // у колокола края редки: около 0,9 %
+    double covariance = 0.0;
+    for (const lw::Traits& t : all) {
+        covariance += (t.bravery - meanBravery) * (t.leadership - meanLeadership);
+    }
+    CHECK(covariance > 0.0);
+
+    // Люди мира получают черты при рождении, один seed — одни характеры.
+    const lw::World a(5, smallConfig(20));
+    const lw::World b(5, smallConfig(20));
+    std::vector<float> braveryA;
+    std::vector<float> braveryB;
+    for (const auto [entity, traits] : a.registry().view<const lw::Traits>().each()) {
+        braveryA.push_back(traits.bravery);
+    }
+    for (const auto [entity, traits] : b.registry().view<const lw::Traits>().each()) {
+        braveryB.push_back(traits.bravery);
+    }
+    CHECK(braveryA.size() == 20);
+    CHECK(braveryA == braveryB);
+}
+
 } // namespace
 
 int main() {
@@ -1436,6 +1486,7 @@ int main() {
     testPeople();
     testLongMovementStep();
     testNeeds();
+    testTraits();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

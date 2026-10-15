@@ -17,8 +17,8 @@ struct Routine {
     Activity activity = Activity::Rest;
     // Тик мира, когда кончается отдых.
     std::uint64_t restUntil = 0;
-    // Ночь человека: с bedtime до wakeTime (минуты суток). У каждого свои,
-    // поэтому люди не прокладывают пути все в один тик.
+    // Ночь человека: с bedtime до wakeTime (минуты суток). У каждого свои — по
+    // черте chronotype, — поэтому люди не прокладывают пути все в один тик.
     std::int32_t bedtime = 22 * 60;
     std::int32_t wakeTime = 7 * 60;
 };

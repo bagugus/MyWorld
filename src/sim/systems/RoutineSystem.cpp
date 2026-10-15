@@ -2,6 +2,7 @@
 
 #include "sim/Calendar.h"
 #include "sim/Components.h"
+#include "sim/Traits.h"
 #include "sim/World.h"
 #include "sim/systems/MovementSystem.h"
 
@@ -137,6 +138,7 @@ std::optional<Cell> pickDestination(World& world, Rng& rng, EntityId own, bool n
 
 void spawnPeople(World& world, int count) {
     Rng& rng = world.rng(RngStream::Spawn);
+    Rng& character = world.rng(RngStream::Traits);
     entt::registry& registry = world.registry();
     const NavGrid& nav = world.nav();
 
@@ -188,8 +190,11 @@ void spawnPeople(World& world, int count) {
         walker.speed = rng.range(1.2f, 1.6f);
         Routine routine;
         routine.restUntil = world.tick() + rng.below(static_cast<std::uint32_t>(gameMinutes(120)));
-        routine.bedtime = rng.rangeInt(21 * 60, 23 * 60 + 30);
-        routine.wakeTime = rng.rangeInt(5 * 60 + 30, 8 * 60);
+        // Жаворонки ложатся в 21:00 и встают в 5:30, совы — на 2,5 ч позже.
+        const Traits traits = generateTraits(character);
+        const int shift = static_cast<int>(traits.chronotype * 150.0f);
+        routine.bedtime = 21 * 60 + shift;
+        routine.wakeTime = 5 * 60 + 30 + shift;
 
         // Утро: кто-то давно не ел, кто-то не выспался.
         Needs needs;
@@ -204,6 +209,7 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Person>(entity, person);
         registry.emplace<Walker>(entity, std::move(walker));
         registry.emplace<Needs>(entity, needs);
+        registry.emplace<Traits>(entity, traits);
         registry.emplace<Routine>(entity, routine);
     }
 }
