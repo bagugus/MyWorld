@@ -275,15 +275,29 @@ void printCombat(const lw::World& world) {
     std::size_t bitten = 0;
     for (const auto [entity, wounds] : registry.view<const lw::Wounds>().each()) {
         bleeding += wounds.bleeding > 0.0f ? 1 : 0;
-        bitten += wounds.bites > 0 ? 1 : 0;
+        bitten += wounds.infection > 0.0f ? 1 : 0;
+    }
+    // Погибшие люди по причинам — по летописи: тела со временем исчезают.
+    constexpr const char* kCauses[] = {"wounds", "bleeding", "starvation", "dehydration",
+                                       "exhaustion", "infection"};
+    static_assert(std::size(kCauses) == static_cast<std::size_t>(lw::DeathCause::Count));
+    std::size_t causes[std::size(kCauses)] = {};
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Died) {
+            ++causes[static_cast<std::size_t>(event.a)];
+        }
     }
     std::size_t bodies[3] = {};
     for (const auto [entity, corpse] : registry.view<const lw::Corpse>().each()) {
         ++bodies[static_cast<std::size_t>(corpse.kind)];
     }
-    std::printf("combat: firearms %zu (ammo %lld), melee weapons %zu; bleeding %zu, bitten %zu; "
+    std::printf("combat: firearms %zu (ammo %lld), melee weapons %zu; bleeding %zu, infected %zu; "
                 "bodies: people %zu, zombies %zu, animals %zu\n",
                 firearms, ammo, melee, bleeding, bitten, bodies[0], bodies[1], bodies[2]);
+    std::printf("  people died:");
+    for (std::size_t i = 0; i < std::size(kCauses); ++i) {
+        std::printf(" %s %zu%s", kCauses[i], causes[i], i + 1 < std::size(kCauses) ? "," : "\n");
+    }
 }
 
 // Летопись: сколько событий каждого вида.

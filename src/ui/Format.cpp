@@ -76,7 +76,8 @@ const char* weaponName(WeaponKind kind) {
 }
 
 const char* deathCauseName(DeathCause cause) {
-    constexpr const char* kNames[] = {"убит в схватке", "истёк кровью"};
+    constexpr const char* kNames[] = {"убит в схватке", "истёк кровью",   "умер от голода",
+                                      "умер от жажды",  "умер от изнеможения", "сгорел от заражения"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(DeathCause::Count));
     const auto index = static_cast<std::size_t>(cause);
     return index < std::size(kNames) ? kNames[index] : "—";

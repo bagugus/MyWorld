@@ -323,10 +323,11 @@ struct Combat {
 };
 
 // Раны человека (этап 5.4): кровотечение отнимает здоровье, пока не
-// остановится само; укусы зомби.
+// остановится само; укусы зомби заражают (этап 5.5).
 struct Wounds {
     float bleeding = 0.0f;           // здоровья в игровой час
     std::uint8_t bites = 0;          // сколько раз укушен
+    float infection = 0.0f;          // заражение от укуса: 0..1, на пределе — смерть
     std::uint64_t hurtAt = 0;        // когда последний раз ранен
     EntityId hurtBy = kInvalidId;    // кем
 };
@@ -334,8 +335,12 @@ struct Wounds {
 // Отчего наступила смерть. Значения попадают в хеш и сохранения: новые
 // добавлять только в конец (перед Count).
 enum class DeathCause : std::uint8_t {
-    Wounds,   // убит в бою
-    Bleeding, // истёк кровью
+    Wounds,      // убит в бою
+    Bleeding,    // истёк кровью
+    Starvation,  // умер от голода (этап 5.5)
+    Dehydration, // умер от жажды
+    Exhaustion,  // умер от изнеможения
+    Infection,   // сгорел от заражения после укуса
     Count
 };
 
@@ -351,6 +356,8 @@ struct Corpse {
     EntityId killer = kInvalidId;
     std::uint64_t diedAt = 0;
     std::uint8_t meat = 0; // порций мяса в туше: её можно разделать
+    // Укушенный встанет зомби в этот тик (этап 5.5); 0 — не встанет.
+    std::uint64_t turnsAt = 0;
 };
 
 } // namespace lw

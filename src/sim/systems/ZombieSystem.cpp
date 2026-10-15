@@ -752,7 +752,13 @@ entt::entity createZombie(World& world, Cell cell, Rng& rng) {
     const float jitter = Map::kCellSize * 0.35f;
     registry.emplace<Position>(entity, Map::cellCenter(cell.x) + rng.range(-jitter, jitter),
                                Map::cellCenter(cell.y) + rng.range(-jitter, jitter));
-    registry.emplace<Velocity>(entity);
+    raiseZombie(world, entity, cell, rng);
+    return entity;
+}
+
+void raiseZombie(World& world, entt::entity entity, Cell cell, Rng& rng) {
+    entt::registry& registry = world.registry();
+    registry.emplace_or_replace<Velocity>(entity);
     Walker walker;
     walker.speed = rng.range(kZombieMinSpeed, kZombieMaxSpeed);
     setSpeed(walker, kZombieRoamSpeed);
@@ -765,7 +771,6 @@ entt::entity createZombie(World& world, Cell cell, Rng& rng) {
     zombie.goal = cell;
     zombie.until = world.tick() + seconds(rng.rangeInt(0, kIdleMaxSeconds));
     registry.emplace<Zombie>(entity, zombie);
-    return entity;
 }
 
 EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered) {

@@ -35,6 +35,8 @@ enum class ChronicleKind : std::uint8_t {
     Hunted,        // добыл животное object; a — вид (AnimalKind)
     Died,          // погиб; object — убийца (если есть), a — причина (DeathCause), b — что за тело (CorpseKind)
     Butchered,     // разделал тушу object: a порций мяса
+    Turned,        // встал зомби после смерти от укуса
+    Feverish,      // заражение после укуса перешло в лихорадку
     Count
 };
 

@@ -1,6 +1,7 @@
 #include "sim/World.h"
 
 #include "sim/Components.h"
+#include "sim/Death.h"
 #include "sim/Hash.h"
 #include "sim/Population.h"
 #include "sim/gen/MapGenerator.h"
@@ -75,6 +76,8 @@ void World::step() {
     updateWeather(*this);
     updateResources(*this);
     tickNeeds(*this);
+    // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
+    updateBodies(*this);
     // До решений и движения: восприятие видит мир на начало тика.
     updatePerception(*this);
     // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
@@ -350,6 +353,7 @@ std::uint64_t World::stateHash() const {
             hasher.add(std::uint64_t{22});
             hasher.add(wounds->bleeding);
             hasher.add(wounds->bites);
+            hasher.add(wounds->infection);
             hasher.add(wounds->hurtAt);
             hasher.add(wounds->hurtBy);
         }
@@ -361,6 +365,7 @@ std::uint64_t World::stateHash() const {
             hasher.add(corpse->killer);
             hasher.add(corpse->diedAt);
             hasher.add(corpse->meat);
+            hasher.add(corpse->turnsAt);
         }
     }
     return hasher.value();

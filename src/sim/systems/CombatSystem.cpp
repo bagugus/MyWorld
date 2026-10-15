@@ -68,11 +68,12 @@ std::uint64_t intervalTicks(float seconds) {
 } // namespace
 
 const AttackSpec* attackOf(const entt::registry& registry, entt::entity attacker) {
-    if (const auto* weapon = registry.try_get<Weapon>(attacker)) {
-        return &attackSpec(*weapon);
-    }
+    // Обратившийся носит при себе оружие, но бьёт как зомби.
     if (registry.all_of<Zombie>(attacker)) {
         return &zombieAttack();
+    }
+    if (const auto* weapon = registry.try_get<Weapon>(attacker)) {
+        return &attackSpec(*weapon);
     }
     if (const auto* animal = registry.try_get<Animal>(attacker);
         animal != nullptr && animal->kind == AnimalKind::Boar) {
@@ -179,6 +180,7 @@ void updateCombat(World& world) {
             if (registry.all_of<Zombie>(entity) && rng.chance(kBiteChance)) {
                 ++wounds.bites;
                 wounds.bleeding += kBiteBleeding;
+                wounds.infection = std::min(1.0f, wounds.infection + kBiteInfection);
                 world.record(ChronicleKind::Bitten, combat.target, id.value);
             }
             world.emitSound(at.x, at.y, kScreamLoudness, SoundKind::Scream, combat.target);
@@ -188,7 +190,8 @@ void updateCombat(World& world) {
         }
 
         if (*health <= 0.0f) {
-            if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+            if (const auto* weapon = registry.try_get<Weapon>(entity);
+                weapon != nullptr && registry.all_of<Person>(entity)) {
                 if (registry.all_of<Zombie>(target)) {
                     world.record(ChronicleKind::KilledZombie, id.value, combat.target,
                                  static_cast<std::int32_t>(weapon->kind));

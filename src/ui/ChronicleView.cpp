@@ -115,11 +115,25 @@ Phrase phraseOf(const ChronicleEvent& event) {
             std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
                           deathCauseName(static_cast<DeathCause>(event.a)));
         } else {
-            phrase.verb = static_cast<DeathCause>(event.a) == DeathCause::Bleeding
-                              ? "истёк кровью после нападения"
-                              : "погиб в схватке с";
+            switch (static_cast<DeathCause>(event.a)) {
+            case DeathCause::Bleeding:
+                phrase.verb = "истёк кровью после нападения";
+                break;
+            case DeathCause::Infection:
+                phrase.verb = "сгорел от заражения после укуса";
+                break;
+            default:
+                phrase.verb = "погиб в схватке с";
+                break;
+            }
             phrase.withObject = true;
         }
+        break;
+    case ChronicleKind::Turned:
+        phrase.verb = "встал зомби";
+        break;
+    case ChronicleKind::Feverish:
+        phrase.verb = "слёг в лихорадке от укуса";
         break;
     case ChronicleKind::Butchered:
         phrase.verb = "разделал тушу";

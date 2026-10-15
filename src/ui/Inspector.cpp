@@ -486,6 +486,9 @@ void Inspector::drawPerson(entt::entity entity) {
         if (wounds->bites > 0) {
             ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "Укушен: %d раз", wounds->bites);
         }
+        if (wounds->infection > 0.0f) {
+            meter("Заражение", wounds->infection);
+        }
     }
 
     if (const auto* needs = registry.try_get<Needs>(entity)) {
@@ -692,6 +695,9 @@ void Inspector::drawZombie(entt::entity entity) {
         ImGui::Text("Погоня: %.2f м/с, сейчас темп %.0f%%", walker->speed, walker->pace * 100.0f);
     }
     meter("Здоровье", zombie.health);
+    if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+        ImGui::Text("При себе с прошлой жизни: %s", weaponName(weapon->kind));
+    }
     if (!drawPerception(entity)) {
         return;
     }
@@ -822,6 +828,10 @@ void Inspector::drawCorpse(entt::entity entity) {
     }
     formatGameDuration(duration, sizeof(duration), world_.tick() - corpse.diedAt);
     ImGui::Text("Погиб %s назад: %s", duration, deathCauseName(corpse.cause));
+    if (corpse.turnsAt > world_.tick()) {
+        formatGameDuration(duration, sizeof(duration), corpse.turnsAt - world_.tick());
+        ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "Укушен: встанет зомби через %s", duration);
+    }
     if (corpse.killer != kInvalidId) {
         ImGui::TextUnformatted("Кто убил:");
         ImGui::SameLine();

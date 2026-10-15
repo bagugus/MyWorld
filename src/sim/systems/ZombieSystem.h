@@ -54,6 +54,9 @@ Threat threatOf(const World& world, entt::entity person);
 
 // Создать зомби в клетке: так их селит мир и ставят тесты.
 entt::entity createZombie(World& world, Cell cell, Rng& rng);
+// Сделать зомби из существующей сущности (тело укушенного встаёт, этап 5.5):
+// поведение зомби, родные места — anchor. Позиция у сущности уже есть.
+void raiseZombie(World& world, entt::entity entity, Cell anchor, Rng& rng);
 // Собрать орду из зомби (любой порядок; вожак — с меньшим id). gathered —
 // сбежались на шум, иначе орда с начала мира. Возвращает id орды.
 EntityId formHorde(World& world, std::vector<EntityId> members, bool gathered);

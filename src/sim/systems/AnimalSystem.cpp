@@ -61,6 +61,10 @@ constexpr float kFlightSpeed = 10.0f; // м/с
 constexpr float kHopMin = 300.0f;      // перелёт, метры
 constexpr float kHopMax = 800.0f;
 constexpr int kHopAttempts = 8;
+// Перелетая сама, стая садится у ближайшего тела не дальше kCarrionRange (этап 5.5):
+// вороны над полем выдают, где кто-то погиб.
+constexpr float kCarrionRange = 1500.0f;
+constexpr float kCarrionOffset = 4.0f;
 constexpr int kPerchMinMinutes = 60;   // сидит на месте, игровые минуты
 constexpr int kPerchMaxMinutes = 240;
 
@@ -382,7 +386,21 @@ void updateFlocks(World& world, Rng& rng) {
         if (!alarm && tick < flock.until) {
             continue;
         }
-        if (const auto perch = pickPerch(world, position, rng)) {
+        std::optional<std::pair<float, float>> perch;
+        if (!alarm) {
+            const entt::registry& registry = world.registry();
+            if (const auto carrion = world.spatial().nearest(
+                    position.x, position.y, kCarrionRange,
+                    [&](const SpatialHit& hit) { return registry.all_of<Corpse>(hit.entity); });
+                carrion && carrion->distanceSq > kFlockStartle * kFlockStartle) {
+                perch = std::make_pair(carrion->x + rng.range(-kCarrionOffset, kCarrionOffset),
+                                       carrion->y + rng.range(-kCarrionOffset, kCarrionOffset));
+            }
+        }
+        if (!perch) {
+            perch = pickPerch(world, position, rng);
+        }
+        if (perch) {
             flock.flying = true;
             flock.toX = perch->first;
             flock.toY = perch->second;

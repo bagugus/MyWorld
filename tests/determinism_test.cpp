@@ -1,12 +1,13 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
-// животные и птицы, бой.
+// животные и птицы, бой, смерть и тела.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
 #include "sim/Chronicle.h"
 #include "sim/Climate.h"
+#include "sim/Death.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
@@ -16,11 +17,13 @@
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
 #include "sim/Traits.h"
+#include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/AnimalSystem.h"
+#include "sim/systems/CombatSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
@@ -3174,6 +3177,145 @@ void testHunting() {
     }
 }
 
+
+// --- Смерть, тела, заражение (этап 5.5) ---------------------------------------
+
+// Укушенный сгорает от заражения и встаёт зомби той же сущностью; оружие при нём.
+void testInfectionTurns() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    const lw::EntityId id = field.id(person);
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Weapon>(person) = {lw::WeaponKind::Knife, 0};
+    lw::Wounds& wounds = registry.get<lw::Wounds>(person);
+    wounds.bites = 1;
+    wounds.infection = 0.97f;
+    for (int minute = 0; minute < 120 && !registry.all_of<lw::Corpse>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(registry.all_of<lw::Corpse>(person));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(person)) {
+        CHECK(corpse->cause == lw::DeathCause::Infection);
+        CHECK(corpse->turnsAt >= corpse->diedAt + lw::kTurnMinMinutes * lw::kTicksPerGameMinute);
+        CHECK(corpse->turnsAt <= corpse->diedAt + lw::kTurnMaxMinutes * lw::kTicksPerGameMinute);
+    }
+    for (int minute = 0; minute < 60 && !registry.all_of<lw::Zombie>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(field.world.find(id) == person);
+    CHECK((registry.all_of<lw::Zombie, lw::Walker, lw::Senses, lw::Awareness, lw::Combat>(person)));
+    CHECK(!registry.all_of<lw::Corpse>(person));
+    CHECK(registry.all_of<lw::Weapon>(person));
+    CHECK(field.count(lw::ChronicleKind::Turned) == 1);
+    CHECK(field.count(lw::ChronicleKind::Died) == 1);
+    // Обратившийся бьёт как зомби, а не ножом.
+    const lw::AttackSpec* spec = lw::attackOf(registry, person);
+    CHECK(spec == &lw::zombieAttack());
+    field.steps(100);
+}
+
+// Здоровье кончилось от голода — смерть от голода; неукушенный не встаёт.
+void testStarvationDeath() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    entt::registry& registry = field.world.registry();
+    lw::Needs& needs = registry.get<lw::Needs>(person);
+    needs.hunger = 1.0f;
+    needs.thirst = 0.5f;
+    needs.health = 0.0001f;
+    field.steps(2 * lw::kTicksPerGameMinute);
+    CHECK(registry.all_of<lw::Corpse>(person));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(person)) {
+        CHECK(corpse->cause == lw::DeathCause::Starvation);
+        CHECK(corpse->turnsAt == 0);
+    }
+}
+
+// Мясо в туше портится, тела разлагаются и исчезают.
+void testBodiesDecay() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity deer = lw::createAnimal(world, lw::AnimalKind::Deer, field.at(0), field.rng);
+    const entt::entity zombie = field.zombie(10);
+    lw::die(world, deer, lw::DeathCause::Wounds, lw::kInvalidId);
+    lw::die(world, zombie, lw::DeathCause::Wounds, lw::kInvalidId);
+    const lw::EntityId deerId = field.id(deer);
+    const lw::EntityId zombieId = field.id(zombie);
+    CHECK(registry.get<lw::Corpse>(deer).meat == lw::carcassMeat(lw::AnimalKind::Deer));
+    // Состарить: туше — сутки, телу — почти до разложения.
+    const std::uint64_t now = world.tick();
+    registry.get<lw::Corpse>(deer).diedAt = now - lw::kMeatSpoilTicks;
+    registry.get<lw::Corpse>(zombie).diedAt = now - lw::kBodyDecayTicks + 2 * lw::kTicksPerGameMinute;
+    field.steps(lw::kTicksPerGameMinute + 1);
+    CHECK(world.find(deerId) != entt::null && registry.get<lw::Corpse>(deer).meat == 0);
+    CHECK(world.find(zombieId) != entt::null);
+    // Беззнаковая разность: «умер столько-то тиков назад» верно и в начале мира.
+    registry.get<lw::Corpse>(deer).diedAt = world.tick() - lw::kCarcassDecayTicks;
+    field.steps(2 * lw::kTicksPerGameMinute);
+    CHECK(world.find(deerId) == entt::null);
+    CHECK(world.find(zombieId) == entt::null);
+}
+
+// Тело человека рядом пугает.
+void testBodyScares() {
+    Field field(2);
+    CHECK(field.open && field.people.size() == 2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    const entt::entity alive = field.people[0];
+    const entt::entity dead = field.people[1];
+    field.freeze(alive, 0);
+    field.freeze(dead, 1);
+    entt::registry& registry = field.world.registry();
+    registry.get<lw::Traits>(alive) = {};
+    registry.get<lw::Needs>(alive) = {};
+    lw::die(field.world, dead, lw::DeathCause::Wounds, lw::kInvalidId);
+    field.steps(60 * lw::kTicksPerGameMinute);
+    CHECK(registry.get<lw::Needs>(alive).fear > 0.1f);
+}
+
+// Перелетая сама, стая садится у тела.
+void testCrowsFlyToBody() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity zombie = field.zombie(29);
+    lw::die(world, zombie, lw::DeathCause::Wounds, lw::kInvalidId);
+    const entt::entity flock = lw::createFlock(world, field.at(0), 10, field.rng);
+    registry.get<lw::Flock>(flock).until = world.tick();
+    world.syncSpatial();
+    for (std::uint64_t i = 0; i < lw::kAnimalThinkTicks && !registry.get<lw::Flock>(flock).flying; ++i) {
+        field.steps(1);
+    }
+    CHECK(registry.get<lw::Flock>(flock).flying);
+    for (int second = 0; second < 30 && registry.get<lw::Flock>(flock).flying; ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(field.distance(flock, zombie) <= 6.0f);
+}
+
 } // namespace
 
 int main() {
@@ -3237,6 +3379,11 @@ int main() {
     testZombieKillsPerson();
     testPersonFightsZombie();
     testHunting();
+    testInfectionTurns();
+    testStarvationDeath();
+    testBodiesDecay();
+    testBodyScares();
+    testCrowsFlyToBody();
 
     if (failures == 0) {
         std::printf("all tests passed\n");
