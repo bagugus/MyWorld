@@ -2,6 +2,7 @@
 
 #include "sim/Id.h"
 #include "sim/Map.h"
+#include "sim/Sound.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -134,6 +135,45 @@ struct Mind {
     // Обысканные здания, кольцевой буфер.
     EntityId searched[kSearchedMemory] = {};
     std::uint8_t searchedNext = 0;
+};
+
+// Органы чувств существа (PerceptionSystem). Есть у всех, кто воспринимает
+// мир, и только их замечают другие: предметы пока невидимы.
+struct Senses {
+    // Дальность зрения, метры: днём на открытом месте человека видно настолько.
+    // Ночь, туман, лес и стены сокращают её (sim/Perception.h).
+    float sight = 150.0f;
+    // Острота слуха: множитель громкости всего, что слышно.
+    float hearing = 1.0f;
+};
+
+// Кого существо заметило: увидело или услышало.
+struct Contact {
+    EntityId id = kInvalidId;
+    float x = 0.0f;           // где заметило в последний раз, метры
+    float y = 0.0f;
+    std::uint64_t tick = 0;   // когда
+    bool seen = false;        // тогда видело
+    SoundKind heard = SoundKind::None; // тогда слышало; None — не слышало
+};
+
+// Что существо знает об окружающих: несколько самых заметных контактов.
+// Обновляется раз в kPerceptionIntervalTicks; потерянный из виду контакт
+// помнится ещё kContactMemoryTicks — с местом, где его заметили последний раз.
+struct Awareness {
+    static constexpr std::size_t kMaxContacts = 8;
+
+    Contact contacts[kMaxContacts] = {};
+    std::uint8_t count = 0;
+
+    const Contact* find(EntityId id) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (contacts[i].id == id) {
+                return &contacts[i];
+            }
+        }
+        return nullptr;
+    }
 };
 
 // Движение пешком по пути (MovementSystem).

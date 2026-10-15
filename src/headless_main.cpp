@@ -7,6 +7,7 @@
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Perception.h"
 #include "sim/Rng.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -144,6 +145,42 @@ void printPeople(const lw::World& world) {
                     mean.hunger / n, mean.thirst / n, mean.fatigue / n, mean.fear / n,
                     mean.loneliness / n, mean.health / n, worstHealth);
     }
+}
+
+// Восприятие: сколько контактов у существ и как они замечены.
+void printPerception(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t creatures = 0;
+    std::size_t contacts = 0;
+    std::size_t seen = 0;
+    std::size_t heard = 0;
+    std::size_t remembered = 0;
+    std::size_t aware = 0; // замечают хоть кого-то сейчас
+    for (const auto [entity, awareness] : registry.view<const lw::Awareness>().each()) {
+        ++creatures;
+        contacts += awareness.count;
+        bool any = false;
+        for (std::size_t i = 0; i < awareness.count; ++i) {
+            const lw::Contact& contact = awareness.contacts[i];
+            if (!lw::isFresh(contact, world.tick())) {
+                ++remembered;
+                continue;
+            }
+            any = true;
+            seen += contact.seen ? 1 : 0;
+            heard += contact.heard != lw::SoundKind::None ? 1 : 0;
+        }
+        aware += any ? 1 : 0;
+    }
+    if (creatures == 0) {
+        return;
+    }
+    const lw::SenseConditions conditions = lw::senseConditions(world);
+    std::printf("perception: sight x%.2f, hearing x%.2f; %zu of %zu notice someone; "
+                "contacts %.2f per creature (seen %zu, heard %zu, remembered %zu); sounds %zu\n",
+                conditions.sight, conditions.hearing, aware, creatures,
+                static_cast<double>(contacts) / static_cast<double>(creatures), seen, heard,
+                remembered, world.sounds().size());
 }
 
 // Летопись: сколько событий каждого вида.
@@ -435,6 +472,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printPerception(world);
     printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

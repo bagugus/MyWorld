@@ -38,6 +38,13 @@ const char* actionName(Action action) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* soundName(SoundKind kind) {
+    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(SoundKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
 void meter(const char* label, float value) {
     char overlay[64];
     std::snprintf(overlay, sizeof(overlay), "%s %.0f%%", label, value * 100.0f);

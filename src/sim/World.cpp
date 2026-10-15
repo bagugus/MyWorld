@@ -6,6 +6,7 @@
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
@@ -65,6 +66,8 @@ void World::step() {
     updateWeather(*this);
     updateResources(*this);
     tickNeeds(*this);
+    // До решений и движения: восприятие видит мир на начало тика.
+    updatePerception(*this);
     updateUtilityAi(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
@@ -86,6 +89,12 @@ void World::destroy(entt::entity entity) {
     }
     idToEntity_.erase(registry_.get<Id>(entity).value);
     registry_.destroy(entity);
+}
+
+void World::forgetSounds(std::uint64_t before) {
+    const auto keep = std::find_if(sounds_.begin(), sounds_.end(),
+                                   [before](const Sound& sound) { return sound.tick >= before; });
+    sounds_.erase(sounds_.begin(), keep);
 }
 
 entt::entity World::find(EntityId id) const {
@@ -118,6 +127,15 @@ std::uint64_t World::stateHash() const {
     hasher.add(static_cast<std::uint64_t>(chronicle_.events().size()));
     hasher.add(chronicle_.hash());
     hasher.add(resources_.hash());
+    hasher.add(static_cast<std::uint64_t>(sounds_.size()));
+    for (const Sound& sound : sounds_) {
+        hasher.add(sound.tick);
+        hasher.add(sound.x);
+        hasher.add(sound.y);
+        hasher.add(sound.loudness);
+        hasher.add(sound.source);
+        hasher.add(static_cast<std::uint8_t>(sound.kind));
+    }
 
     std::vector<std::pair<EntityId, entt::entity>> order;
     order.reserve(idToEntity_.size());
@@ -224,6 +242,24 @@ std::uint64_t World::stateHash() const {
                 hasher.add(building);
             }
             hasher.add(mind->searchedNext);
+        }
+        if (const auto* senses = registry_.try_get<Senses>(entity)) {
+            hasher.add(std::uint64_t{14});
+            hasher.add(senses->sight);
+            hasher.add(senses->hearing);
+        }
+        if (const auto* awareness = registry_.try_get<Awareness>(entity)) {
+            hasher.add(std::uint64_t{15});
+            hasher.add(awareness->count);
+            for (std::size_t i = 0; i < awareness->count; ++i) {
+                const Contact& contact = awareness->contacts[i];
+                hasher.add(contact.id);
+                hasher.add(contact.x);
+                hasher.add(contact.y);
+                hasher.add(contact.tick);
+                hasher.add(static_cast<std::uint8_t>(contact.seen));
+                hasher.add(static_cast<std::uint8_t>(contact.heard));
+            }
         }
     }
     return hasher.value();

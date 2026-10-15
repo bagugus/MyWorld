@@ -1,6 +1,6 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение, нужды, черты, Utility AI, ресурсы, летопись.
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -8,6 +8,7 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
+#include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
@@ -20,6 +21,7 @@
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 
@@ -2089,6 +2091,286 @@ void testAiSurvives() {
     CHECK(actions >= 3); // люди заняты разным
 }
 
+// Индекс шире 64 корзин: карта занятости — несколько слов на строку.
+void testSpatialIndexWide() {
+    constexpr float kWidth = 4000.0f; // 125 корзин по x
+    constexpr float kHeight = 300.0f;
+    entt::registry registry;
+    lw::SpatialIndex index(kWidth, kHeight);
+    registry.on_destroy<lw::Position>().connect<&lw::SpatialIndex::onPositionDestroyed>(index);
+    lw::Rng rng(5);
+    lw::EntityId nextId = 1;
+    std::vector<entt::entity> entities;
+    for (int i = 0; i < 400; ++i) {
+        entities.push_back(spawnAt(registry, nextId++, rng.range(-20.0f, kWidth + 20.0f),
+                                   rng.range(0.0f, kHeight)));
+    }
+    index.sync(registry);
+    // Часть сущностей удалена: опустевшие корзины не должны мешать.
+    for (std::size_t i = 0; i < 150; ++i) {
+        registry.destroy(entities[i * 2]);
+    }
+    for (int query = 0; query < 200; ++query) {
+        const float x = rng.range(-50.0f, kWidth + 50.0f);
+        const float y = rng.range(0.0f, kHeight);
+        const float radius = rng.range(0.0f, 2500.0f);
+        std::vector<lw::EntityId> found;
+        index.forEachInRadius(x, y, radius,
+                              [&](const lw::SpatialHit& hit) { found.push_back(hit.id); });
+        std::vector<lw::EntityId> expected;
+        for (const auto [entity, id, position] :
+             registry.view<const lw::Id, const lw::Position>().each()) {
+            const float dx = position.x - x;
+            const float dy = position.y - y;
+            if (dx * dx + dy * dy <= radius * radius) {
+                expected.push_back(id.value);
+            }
+        }
+        std::sort(found.begin(), found.end());
+        std::sort(expected.begin(), expected.end());
+        CHECK(found == expected);
+    }
+}
+
+// Условия зрения и слуха: ночь, луна, туман, дождь и ветер.
+void testSenseConditions() {
+    const lw::Weather calm;
+    const lw::SenseConditions day = lw::senseConditions(1.0f, calm);
+    CHECK(day.sight == 1.0f && day.hearing == 1.0f);
+    CHECK(lw::senseConditions(0.3f, calm).sight == 1.0f); // пасмурный день — как ясный
+    const float dark = lw::senseConditions(0.015f, calm).sight;
+    const float moon = lw::senseConditions(0.11f, calm).sight;
+    CHECK(dark >= 0.08f && dark < 0.15f);
+    CHECK(moon > 0.4f && moon < 0.55f);
+    CHECK(lw::senseConditions(0.0f, calm).sight == 0.08f);
+
+    lw::Weather fog;
+    fog.fog = 1.0f;
+    CHECK(std::abs(lw::senseConditions(1.0f, fog).sight - 0.2f) < 1e-5f);
+    lw::Weather storm;
+    storm.precipitation = 1.0f;
+    storm.windSpeed = 15.0f;
+    const lw::SenseConditions stormy = lw::senseConditions(1.0f, storm);
+    CHECK(stormy.sight < 0.75f && stormy.hearing < 0.55f && stormy.hearing > 0.4f);
+
+    const lw::Senses senses;
+    CHECK(lw::sightRange(senses, false, day) == senses.sight);
+    CHECK(lw::sightRange(senses, true, day) == 0.0f);
+    CHECK(lw::hearingFactor(senses, true, day) < lw::hearingFactor(senses, false, day));
+}
+
+// Луч зрения: стены закрывают, лес съедает дальность, вода — нет.
+void testSightCost() {
+    lw::Map map(40, 12);
+    // Ряд y = 2: лес в клетках 10..14 (5 клеток).
+    for (int x = 10; x < 15; ++x) {
+        map.cover.at(x, 2) = lw::Cover::Forest;
+    }
+    // Ряд y = 6: озеро в клетках 10..19.
+    for (int x = 10; x < 20; ++x) {
+        map.water.at(x, 6) = lw::Water::Lake;
+        map.depth.at(x, 6) = 20;
+    }
+    entt::registry registry;
+    // Дом 2 × 3 клетки: x = 10..11, y = 9..11.
+    const entt::entity house = registry.create();
+    registry.emplace<lw::Building>(house, lw::BuildingKind::House, lw::Cell{10, 9}, 2, 3,
+                                   lw::Cell{12, 10}, lw::kInvalidId);
+    lw::NavGrid nav;
+    nav.build(map, registry);
+    const auto at = [](int cell) { return lw::Map::cellCenter(cell); };
+
+    // Открытое место: цена — расстояние.
+    CHECK(std::abs(lw::sightCost(map, nav, at(2), at(0), at(30), at(0)) - 112.0f) < 1e-3f);
+    // Через лес: плюс штраф за 5 клеток.
+    CHECK(std::abs(lw::sightCost(map, nav, at(2), at(2), at(30), at(2)) -
+                   (112.0f + 5.0f * lw::kForestSightPenalty)) < 1e-3f);
+    // Клетки наблюдателя и цели не считаются: из леса в соседнюю клетку леса — без штрафа.
+    CHECK(std::abs(lw::sightCost(map, nav, at(10), at(2), at(11), at(2)) - 4.0f) < 1e-3f);
+    // Через озеро видно.
+    CHECK(std::abs(lw::sightCost(map, nav, at(5), at(6), at(25), at(6)) - 80.0f) < 1e-3f);
+    // Через дом — нет; у стены — видно вдоль неё.
+    CHECK(lw::sightCost(map, nav, at(5), at(10), at(25), at(10)) == lw::kNoSight);
+    CHECK(lw::sightCost(map, nav, at(5), at(8), at(25), at(8)) < lw::kNoSight);
+    // Дальше предела — kNoSight, даже на открытом месте.
+    CHECK(lw::sightCost(map, nav, at(2), at(0), at(30), at(0), 100.0f) == lw::kNoSight);
+    CHECK(lw::sightCost(map, nav, at(2), at(2), at(30), at(2), 150.0f) == lw::kNoSight);
+}
+
+// Мир из двух человек на открытом месте: A смотрит, B — цель.
+struct Pair {
+    static constexpr int kRowLength = 30;
+
+    lw::World world;
+    entt::entity a = entt::null;
+    entt::entity b = entt::null;
+    lw::EntityId idA = lw::kInvalidId;
+    lw::EntityId idB = lw::kInvalidId;
+    lw::Cell row; // начало ряда клеток без леса, воды и зданий
+    bool open = false;
+
+    Pair() : world(7, [] {
+                 lw::WorldConfig config = regionConfig();
+                 config.people = 2;
+                 return config;
+             }()) {
+        entt::registry& registry = world.registry();
+        std::vector<entt::entity> people;
+        for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+            people.push_back(entity);
+        }
+        if (people.size() != 2) {
+            return;
+        }
+        a = people[0];
+        b = people[1];
+        idA = registry.get<lw::Id>(a).value;
+        idB = registry.get<lw::Id>(b).value;
+        const lw::Map& map = world.map();
+        const lw::NavGrid& nav = world.nav();
+        for (int y = 0; y < map.height() && !open; ++y) {
+            int run = 0;
+            for (int x = 0; x < map.width() && !open; ++x) {
+                const bool clear = nav.passable({x, y}) && map.water.at(x, y) == lw::Water::None &&
+                                   map.cover.at(x, y) == lw::Cover::None;
+                run = clear ? run + 1 : 0;
+                if (run == kRowLength) {
+                    row = {x - kRowLength + 1, y};
+                    open = true;
+                }
+            }
+        }
+        // Оба стоят и ничего не делают: шума нет.
+        for (const entt::entity entity : {a, b}) {
+            registry.get<lw::Velocity>(entity) = {};
+            registry.get<lw::Mind>(entity).action = lw::Action::Idle;
+            registry.get<lw::Person>(entity).asleep = false;
+        }
+        place(a, 0);
+        place(b, 20);
+    }
+
+    // Поставить в клетку ряда со сдвигом offset клеток.
+    void place(entt::entity entity, int offset) {
+        world.registry().get<lw::Position>(entity) = {lw::Map::cellCenter(row.x + offset),
+                                                      lw::Map::cellCenter(row.y)};
+        world.syncSpatial();
+    }
+
+    const lw::Contact* contact() const {
+        return world.registry().get<lw::Awareness>(a).find(idB);
+    }
+};
+
+void testPerception() {
+    Pair pair;
+    CHECK(pair.open);
+    if (!pair.open) {
+        return;
+    }
+    entt::registry& registry = pair.world.registry();
+    const lw::SenseConditions day{1.0f, 1.0f};
+    const lw::SenseConditions night{0.1f, 1.0f}; // 15 м
+
+    // Днём стоящего в 80 м видно, шагов не слышно.
+    lw::perceive(pair.world, pair.a, day);
+    const lw::Contact* contact = pair.contact();
+    CHECK(contact != nullptr && contact->seen && contact->heard == lw::SoundKind::None);
+    CHECK(contact != nullptr && contact->tick == pair.world.tick());
+
+    // Ночью не видно; идущего слышно только вблизи.
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, night);
+    CHECK(pair.contact() == nullptr);
+    registry.get<lw::Velocity>(pair.b) = {1.4f, 0.0f};
+    pair.place(pair.b, 2); // 8 м
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && contact->seen && contact->heard == lw::SoundKind::Footsteps);
+
+    // Спящий не видит и слышит шаги только совсем рядом.
+    registry.get<lw::Person>(pair.a).asleep = true;
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, day);
+    CHECK(pair.contact() == nullptr);
+    pair.place(pair.b, 0); // в той же клетке
+    lw::perceive(pair.world, pair.a, day);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Footsteps);
+    registry.get<lw::Person>(pair.a).asleep = false;
+
+    // Обыск слышно дальше шагов.
+    registry.get<lw::Velocity>(pair.b) = {};
+    registry.get<lw::Mind>(pair.b).action = lw::Action::Scavenge;
+    registry.get<lw::Mind>(pair.b).phase = lw::ActionPhase::Perform;
+    pair.place(pair.b, 7); // 28 м
+    registry.get<lw::Awareness>(pair.a) = {};
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Rummage);
+    registry.get<lw::Mind>(pair.b).action = lw::Action::Idle;
+
+    // Разовый звук: слышен в пределах громкости, контакт — там, где прозвучал;
+    // звук без живого источника (или чужой издалека) контакта не даёт.
+    pair.place(pair.b, 25); // 100 м
+    registry.get<lw::Awareness>(pair.a) = {};
+    const float ax = registry.get<lw::Position>(pair.a).x;
+    const float ay = registry.get<lw::Position>(pair.a).y;
+    pair.world.emitSound(ax + 50.0f, ay, 60.0f, lw::SoundKind::Voice, pair.idB);
+    pair.world.emitSound(ax + 80.0f, ay, 60.0f, lw::SoundKind::Voice, 999999);
+    pair.world.emitSound(ax + 10.0f, ay, 60.0f, lw::SoundKind::Voice);
+    lw::perceive(pair.world, pair.a, night);
+    contact = pair.contact();
+    CHECK(contact != nullptr && !contact->seen && contact->heard == lw::SoundKind::Voice);
+    CHECK(contact != nullptr && contact->x == ax + 50.0f);
+    CHECK(registry.get<lw::Awareness>(pair.a).find(999999) == nullptr);
+    CHECK(registry.get<lw::Awareness>(pair.a).count == 1);
+}
+
+// В мире: за kPerceptionIntervalTicks восприятие обновляется у всех, звуки
+// забываются, потерянный контакт помнится kContactMemoryTicks.
+void testPerceptionInWorld() {
+    Pair pair;
+    if (!pair.open) {
+        return;
+    }
+    entt::registry& registry = pair.world.registry();
+    pair.place(pair.b, 3);
+    // Пусть стоят, пока смотрим: решения — не раньше чем через час.
+    for (const entt::entity entity : {pair.a, pair.b}) {
+        lw::Mind& mind = registry.get<lw::Mind>(entity);
+        mind.phase = lw::ActionPhase::Perform;
+        mind.nextThink = pair.world.tick() + lw::kTicksPerGameHour;
+        mind.until = mind.nextThink;
+    }
+    pair.world.emitSound(0.0f, 0.0f, 10.0f, lw::SoundKind::Voice, pair.idB);
+    for (std::uint64_t i = 0; i < lw::kPerceptionIntervalTicks; ++i) {
+        pair.world.step();
+    }
+    const lw::Contact* seen = pair.contact();
+    const lw::Contact* back = registry.get<lw::Awareness>(pair.b).find(pair.idA);
+    CHECK(seen != nullptr && seen->seen && lw::isFresh(*seen, pair.world.tick()));
+    CHECK(back != nullptr && back->seen);
+    for (std::uint64_t i = 0; i < lw::kSoundLifetimeTicks; ++i) {
+        pair.world.step();
+    }
+    CHECK(pair.world.sounds().empty());
+
+    // Унести B за пределы зрения и слуха: контакт помнится, потом забывается.
+    const lw::Position where = registry.get<lw::Position>(pair.b);
+    registry.get<lw::Position>(pair.b) = {where.x + 2000.0f, where.y};
+    pair.world.syncSpatial();
+    for (std::uint64_t i = 0; i < lw::kPerceptionIntervalTicks; ++i) {
+        pair.world.step();
+    }
+    seen = pair.contact();
+    CHECK(seen != nullptr && seen->x == where.x && !lw::isFresh(*seen, pair.world.tick()));
+    for (std::uint64_t i = 0; i < lw::kContactMemoryTicks; ++i) {
+        pair.world.step();
+    }
+    CHECK(pair.contact() == nullptr);
+}
+
 } // namespace
 
 int main() {
@@ -2131,6 +2413,11 @@ int main() {
     testAiForagesFromStock();
     testChronicle();
     testChronicleRecords();
+    testSpatialIndexWide();
+    testSenseConditions();
+    testSightCost();
+    testPerception();
+    testPerceptionInWorld();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

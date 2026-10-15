@@ -3,6 +3,7 @@
 #include "render/CameraController.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
+#include "sim/Perception.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 #include "sim/systems/ResourceSystem.h"
@@ -30,6 +31,12 @@ constexpr Color kSelectionColor = {255, 255, 255, 255};
 constexpr Color kPathColor = {255, 236, 140, 220};
 constexpr Color kTargetColor = {255, 120, 90, 255};
 constexpr Color kHomeColor = {120, 220, 255, 255};
+// Восприятие: дальность зрения и слуха, линии к замеченным.
+constexpr Color kSightColor = {170, 255, 170, 70};
+constexpr Color kHearingColor = {255, 220, 120, 70};
+constexpr Color kSeenColor = {120, 255, 120, 220};
+constexpr Color kHeardColor = {255, 210, 90, 220};
+constexpr Color kRememberedColor = {170, 170, 170, 160};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -161,6 +168,36 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
     }
 
     const Vector2 at = drawnPosition(registry, entity, alpha);
+    // Восприятие: круги — дальность зрения (идущего по открытому месту) и
+    // слышимость шагов, линии — к замеченным: зелёные — видит, жёлтые —
+    // слышит, серые — помнит, где видел в последний раз.
+    if (const auto* senses = registry.try_get<Senses>(entity)) {
+        const SenseConditions conditions = senseConditions(world_);
+        const bool asleep = isAsleep(registry, entity);
+        const float sight = sightRange(*senses, asleep, conditions);
+        if (sight > 0.0f) {
+            DrawRing(at, sight - line, sight, 0.0f, 360.0f, 96, kSightColor);
+        }
+        const float footsteps = kFootstepsLoudness * hearingFactor(*senses, asleep, conditions);
+        DrawRing(at, footsteps - line, footsteps, 0.0f, 360.0f, 64, kHearingColor);
+    }
+    if (const auto* awareness = registry.try_get<Awareness>(entity)) {
+        const std::uint64_t tick = world_.tick();
+        for (std::size_t i = 0; i < awareness->count; ++i) {
+            const Contact& contact = awareness->contacts[i];
+            Vector2 to = {contact.x, contact.y};
+            Color color = kRememberedColor;
+            if (isFresh(contact, tick)) {
+                color = contact.seen ? kSeenColor : kHeardColor;
+                // Видимого — к тому месту, где он нарисован сейчас.
+                if (const entt::entity other = world_.find(contact.id);
+                    contact.seen && other != entt::null && registry.all_of<Position>(other)) {
+                    to = drawnPosition(registry, other, alpha);
+                }
+            }
+            DrawLineEx(at, to, line, color);
+        }
+    }
     // Дом — рамкой, место текущего действия — крестиком, оставшийся путь — линией.
     if (const auto* person = registry.try_get<Person>(entity)) {
         if (const entt::entity home = world_.find(person->home); home != entt::null) {
@@ -336,6 +373,10 @@ void Inspector::drawPerson(entt::entity entity) {
         meter("Здоровье", needs->health);
     }
 
+    if (!drawPerception(entity)) {
+        return;
+    }
+
     if (const auto* traits = registry.try_get<Traits>(entity);
         traits != nullptr && ImGui::CollapsingHeader("Черты характера", ImGuiTreeNodeFlags_DefaultOpen)) {
         const std::pair<const char*, float> rows[] = {
@@ -414,6 +455,65 @@ void Inspector::drawPerson(entt::entity entity) {
             ImGui::TextDisabled("пусто");
         }
     }
+}
+
+bool Inspector::drawPerception(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* senses = registry.try_get<Senses>(entity);
+    const auto* awareness = registry.try_get<Awareness>(entity);
+    if (senses == nullptr || awareness == nullptr ||
+        !ImGui::CollapsingHeader("Восприятие", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    const SenseConditions conditions = senseConditions(world_);
+    const bool asleep = isAsleep(registry, entity);
+    const float sight = sightRange(*senses, asleep, conditions);
+    const float hearing = hearingFactor(*senses, asleep, conditions);
+    if (sight > 0.0f) {
+        ImGui::Text("Видит идущего до %.0f м (стоящего — до %.0f м)", sight,
+                    sight * kStillVisibility);
+    } else {
+        ImGui::TextUnformatted("Спит: не видит, слышит хуже");
+    }
+    ImGui::Text("Слышит шаги до %.0f м, обыск до %.0f м", kFootstepsLoudness * hearing,
+                kRummageLoudness * hearing);
+    if (awareness->count == 0) {
+        ImGui::TextDisabled("никого не замечает");
+        return true;
+    }
+    const Position& position = registry.get<Position>(entity);
+    const std::uint64_t tick = world_.tick();
+    if (!ImGui::BeginTable("contacts", 3, ImGuiTableFlags_SizingFixedFit)) {
+        return true;
+    }
+    EntityId clicked = kInvalidId;
+    char ago[32];
+    for (std::size_t i = 0; i < awareness->count; ++i) {
+        const Contact& contact = awareness->contacts[i];
+        ImGui::TableNextColumn();
+        if (idLink(contact.id)) {
+            clicked = contact.id;
+        }
+        ImGui::TableNextColumn();
+        if (!isFresh(contact, tick)) {
+            formatGameDuration(ago, sizeof(ago), tick - contact.tick);
+            ImGui::TextDisabled("помнит, %s назад", ago);
+        } else if (contact.seen && contact.heard != SoundKind::None) {
+            ImGui::Text("видит, слышит: %s", soundName(contact.heard));
+        } else if (contact.seen) {
+            ImGui::TextUnformatted("видит");
+        } else {
+            ImGui::Text("слышит: %s", soundName(contact.heard));
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%.0f м", std::hypot(contact.x - position.x, contact.y - position.y));
+    }
+    ImGui::EndTable();
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
 }
 
 void Inspector::drawBuilding(entt::entity entity) {

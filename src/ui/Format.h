@@ -14,6 +14,8 @@ const char* buildingName(BuildingKind kind);
 const char* settlementKindName(SettlementKind kind);
 // Занятие человека: «спит», «ищет припасы».
 const char* actionName(Action action);
+// Что слышно: «шаги», «обыск».
+const char* soundName(SoundKind kind);
 
 // Полоска-индикатор 0..1 с подписью.
 void meter(const char* label, float value);

@@ -6,6 +6,7 @@
 #include "sim/Places.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
+#include "sim/Sound.h"
 #include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
 #include "sim/Weather.h"
@@ -103,6 +104,15 @@ public:
                 std::int32_t a = 0, std::int32_t b = 0) {
         chronicle_.add({tick_, kind, subject, object, a, b});
     }
+    // Разовые звуки последних тиков: выстрелы, крики (см. sim/Sound.h).
+    const std::vector<Sound>& sounds() const { return sounds_; }
+    // Издать звук в текущем тике: слышен в loudness метрах в тихую погоду.
+    void emitSound(float x, float y, float loudness, SoundKind kind,
+                   EntityId source = kInvalidId) {
+        sounds_.push_back({tick_, x, y, loudness, source, kind});
+    }
+    // Забыть звуки, прозвучавшие раньше тика before (их больше никто не услышит).
+    void forgetSounds(std::uint64_t before);
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
@@ -123,6 +133,8 @@ private:
 
     Weather weather_;
     Chronicle chronicle_;
+    // По порядку издания, то есть по тикам.
+    std::vector<Sound> sounds_;
 
     NavGrid nav_;
     NavGraph graph_;

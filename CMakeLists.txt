@@ -43,6 +43,8 @@ add_library(lw_sim STATIC
     src/sim/Id.h
     src/sim/Map.cpp
     src/sim/Map.h
+    src/sim/Perception.cpp
+    src/sim/Perception.h
     src/sim/Places.cpp
     src/sim/Places.h
     src/sim/Population.cpp
@@ -53,6 +55,7 @@ add_library(lw_sim STATIC
     src/sim/Rng.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
+    src/sim/Sound.h
     src/sim/SpatialIndex.cpp
     src/sim/SpatialIndex.h
     src/sim/TimeScale.h
@@ -79,6 +82,8 @@ add_library(lw_sim STATIC
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp
     src/sim/systems/NeedsSystem.h
+    src/sim/systems/PerceptionSystem.cpp
+    src/sim/systems/PerceptionSystem.h
     src/sim/systems/ResourceSystem.cpp
     src/sim/systems/ResourceSystem.h
     src/sim/systems/UtilityAiSystem.cpp

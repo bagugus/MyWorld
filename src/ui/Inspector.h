@@ -40,6 +40,9 @@ private:
     // Человек под точкой (с запасом в несколько пикселей), иначе здание; kInvalidId — ничего.
     EntityId pick(float x, float y, float zoom) const;
     void drawPerson(entt::entity entity);
+    // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по
+    // ссылке и выбор сменился.
+    bool drawPerception(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.
