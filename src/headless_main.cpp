@@ -142,6 +142,19 @@ void printPeople(const lw::World& world) {
     }
 }
 
+// Летопись: сколько событий каждого вида.
+void printChronicle(const lw::World& world) {
+    const lw::Chronicle& chronicle = world.chronicle();
+    std::printf("chronicle %zu events:", chronicle.events().size());
+    const char* separator = " ";
+    for (std::size_t i = 0; i < static_cast<std::size_t>(lw::ChronicleKind::Count); ++i) {
+        const auto kind = static_cast<lw::ChronicleKind>(i);
+        std::printf("%s%s %zu", separator, lw::chronicleKindName(kind), chronicle.countOf(kind));
+        separator = ", ";
+    }
+    std::printf("\n");
+}
+
 void printWeather(const lw::World& world) {
     const lw::Environment environment = lw::environmentAt(world);
     const lw::CalendarTime& time = environment.time;
@@ -418,6 +431,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());

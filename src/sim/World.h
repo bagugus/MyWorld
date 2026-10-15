@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sim/Chronicle.h"
 #include "sim/Id.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
@@ -90,6 +91,14 @@ public:
     Pathfinder& pathfinder() { return pathfinder_; }
     // Поселения, здания, места для питья и сбора — справочник для решений людей.
     const Places& places() const { return places_; }
+    // Летопись: значимые события по id участников.
+    Chronicle& chronicle() { return chronicle_; }
+    const Chronicle& chronicle() const { return chronicle_; }
+    // Записать событие летописи в текущем тике.
+    void record(ChronicleKind kind, EntityId subject, EntityId object = kInvalidId,
+                std::int32_t a = 0, std::int32_t b = 0) {
+        chronicle_.add({tick_, kind, subject, object, a, b});
+    }
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
@@ -109,6 +118,7 @@ private:
     std::uint64_t mapHash_ = 0;
 
     Weather weather_;
+    Chronicle chronicle_;
 
     NavGrid nav_;
     NavGraph graph_;

@@ -33,6 +33,8 @@ endif()
 add_library(lw_sim STATIC
     src/sim/Calendar.cpp
     src/sim/Calendar.h
+    src/sim/Chronicle.cpp
+    src/sim/Chronicle.h
     src/sim/Climate.cpp
     src/sim/Climate.h
     src/sim/Components.h
@@ -98,6 +100,8 @@ if(LW_BUILD_APP)
         src/render/WeatherRenderer.h
         src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
+        src/ui/ChronicleView.cpp
+        src/ui/ChronicleView.h
         src/ui/Format.cpp
         src/ui/Format.h
         src/ui/Inspector.cpp

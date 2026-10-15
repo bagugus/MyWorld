@@ -518,6 +518,7 @@ public:
           entity_(entity),
           rng_(rng),
           tick_(world.tick()),
+          id_(registry_.get<Id>(entity).value),
           mind_(registry_.get<Mind>(entity)),
           person_(registry_.get<Person>(entity)),
           needs_(registry_.get<Needs>(entity)) {}
@@ -697,6 +698,10 @@ private:
             if (cell == registry_.get<Building>(home).door) {
                 Carry& carry = registry_.get<Carry>(entity_);
                 if (auto* supplies = registry_.try_get<Supplies>(home)) {
+                    if (carry.food > 0 || carry.water > 0) {
+                        world_.record(ChronicleKind::BroughtHome, id_, person_.home, carry.food,
+                                      carry.water);
+                    }
                     supplies->food = static_cast<std::uint16_t>(supplies->food + carry.food);
                     supplies->water = static_cast<std::uint16_t>(supplies->water + carry.water);
                     carry = {};
@@ -721,6 +726,11 @@ private:
             break;
         case Action::Sleep:
             person_.asleep = true;
+            // Ночлег не дома — событие; для бездомного это обычная ночь.
+            if (mind_.target == kInvalidId && person_.home != kInvalidId) {
+                world_.record(ChronicleKind::SleptOutside, id_, kInvalidId, mind_.spot.x,
+                              mind_.spot.y);
+            }
             mind_.until = std::numeric_limits<std::uint64_t>::max();
             mind_.nextThink = tick_ + minutes(kSleepThinkMinutes);
             return;
@@ -776,6 +786,9 @@ private:
             } else if (supplies != nullptr && supplies->food > 0) {
                 --supplies->food;
                 needs_.hunger = clamp01(needs_.hunger - kMeal);
+                if (supplies->food == 0) {
+                    world_.record(ChronicleKind::AteLastFood, id_, mind_.target);
+                }
             }
             break;
         case Action::Drink:
@@ -787,12 +800,17 @@ private:
             } else if (supplies != nullptr && supplies->water > 0) {
                 --supplies->water;
                 needs_.thirst = clamp01(needs_.thirst - kWaterPortion);
+                if (supplies->water == 0) {
+                    world_.record(ChronicleKind::DrankLastWater, id_, mind_.target);
+                }
             }
             break;
         case Action::Scavenge:
             remember(mind_, mind_.target);
             if (supplies != nullptr) {
                 takeSupplies(*supplies, carry);
+            } else {
+                world_.record(ChronicleKind::Scavenged, id_, mind_.target);
             }
             break;
         case Action::Forage:
@@ -815,6 +833,7 @@ private:
         int water = std::min<int>(supplies.water, wantWater);
         supplies.food = static_cast<std::uint16_t>(supplies.food - food);
         supplies.water = static_cast<std::uint16_t>(supplies.water - water);
+        world_.record(ChronicleKind::Scavenged, id_, mind_.target, food, water);
         if (food > 0 && needs_.hunger > kSnackThreshold) {
             --food;
             needs_.hunger = clamp01(needs_.hunger - kMeal);
@@ -850,6 +869,7 @@ private:
     entt::entity entity_;
     Rng& rng_;
     std::uint64_t tick_;
+    EntityId id_;
     Mind& mind_;
     Person& person_;
     Needs& needs_;

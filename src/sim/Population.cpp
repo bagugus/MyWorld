@@ -132,6 +132,7 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Traits>(entity, generateTraits(character));
         registry.emplace<Mind>(entity, mind);
         registry.emplace<Carry>(entity);
+        world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
 }
 

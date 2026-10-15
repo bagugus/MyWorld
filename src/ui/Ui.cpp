@@ -335,8 +335,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         } else {
             ImGui::TextDisabled("Клетка: вне карты");
         }
-        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\nHome — весь мир,\n"
-                            "ЛКМ — выбрать для инспектора");
+        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\n"
+                            "Home — весь мир, ЛКМ — инспектор");
     }
     ImGui::End();
 }

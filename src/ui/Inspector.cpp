@@ -6,6 +6,7 @@
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "ui/ChronicleView.h"
 #include "ui/Format.h"
 
 #include <imgui.h>
@@ -15,6 +16,7 @@
 #include <cmath>
 #include <cstdio>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -220,8 +222,43 @@ void Inspector::drawPanel() {
                 ImGui::Text("Объект #%llu", static_cast<unsigned long long>(selected_));
             }
         }
+        if (selected_ != kInvalidId) {
+            drawBiography();
+        }
     }
     ImGui::End();
+}
+
+void Inspector::drawBiography() {
+    const Chronicle& chronicle = world_.chronicle();
+    const std::span<const std::uint32_t> indices = chronicle.eventsOf(selected_);
+    char header[64];
+    std::snprintf(header, sizeof(header), "Летопись: %zu###biography", indices.size());
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    if (indices.empty()) {
+        ImGui::TextDisabled("событий нет");
+        return;
+    }
+    EntityId clicked = kInvalidId;
+    // Новые сверху; рисуются только видимые строки.
+    ImGuiListClipper clipper;
+    clipper.Begin(static_cast<int>(indices.size()));
+    while (clipper.Step()) {
+        for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+            const std::uint32_t index = indices[indices.size() - 1 - static_cast<std::size_t>(row)];
+            ImGui::PushID(static_cast<int>(index));
+            const EntityId id = drawChronicleEvent(chronicle.events()[index], selected_);
+            ImGui::PopID();
+            if (id != kInvalidId) {
+                clicked = id;
+            }
+        }
+    }
+    if (clicked != kInvalidId) {
+        select(clicked);
+    }
 }
 
 void Inspector::drawPerson(entt::entity entity) {

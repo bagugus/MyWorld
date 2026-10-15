@@ -4,6 +4,7 @@
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
+#include "sim/Chronicle.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
@@ -1811,6 +1812,74 @@ void testAiSleepsWhereStranded() {
 }
 
 // Двое суток мира: люди едят, пьют и спят, здоровье не падает; ночью спят.
+// Летопись: биография по id (субъект и объект), счётчики, накопленный хеш.
+void testChronicle() {
+    lw::Chronicle chronicle;
+    CHECK(chronicle.eventsOf(5).empty());
+    const std::uint64_t empty = chronicle.hash();
+    chronicle.add({10, lw::ChronicleKind::Settled, 5, 100, 0, 0});
+    chronicle.add({20, lw::ChronicleKind::Scavenged, 6, 100, 2, 1});
+    chronicle.add({30, lw::ChronicleKind::Starving, 5, lw::kInvalidId, 0, 0});
+    chronicle.add({40, lw::ChronicleKind::Settled, 7, 7, 0, 0}); // объект — он сам
+    CHECK(chronicle.events().size() == 4);
+    CHECK(chronicle.eventsOf(5).size() == 2);
+    CHECK(chronicle.eventsOf(5)[0] == 0 && chronicle.eventsOf(5)[1] == 2);
+    CHECK(chronicle.eventsOf(100).size() == 2);
+    CHECK(chronicle.eventsOf(7).size() == 1);
+    CHECK(chronicle.eventsOf(lw::kInvalidId).empty());
+    CHECK(chronicle.countOf(lw::ChronicleKind::Settled) == 2);
+    CHECK(chronicle.countOf(lw::ChronicleKind::Dying) == 0);
+    CHECK(chronicle.hash() != empty);
+
+    // Тот же набор в другом порядке — другой хеш: порядок событий — часть истории.
+    lw::Chronicle reordered;
+    reordered.add({20, lw::ChronicleKind::Scavenged, 6, 100, 2, 1});
+    reordered.add({10, lw::ChronicleKind::Settled, 5, 100, 0, 0});
+    reordered.add({30, lw::ChronicleKind::Starving, 5, lw::kInvalidId, 0, 0});
+    reordered.add({40, lw::ChronicleKind::Settled, 7, 7, 0, 0});
+    CHECK(reordered.hash() != chronicle.hash());
+}
+
+// Системы пишут в летопись: появление, последняя еда дома, голод.
+void testChronicleRecords() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    const lw::EntityId id = registry.get<lw::Id>(lone.person).value;
+    const lw::Chronicle& chronicle = lone.world.chronicle();
+    const auto has = [&](lw::ChronicleKind kind, lw::EntityId object) {
+        for (const std::uint32_t index : chronicle.eventsOf(id)) {
+            const lw::ChronicleEvent& event = chronicle.events()[index];
+            if (event.kind == kind && event.subject == id && event.object == object) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const lw::EntityId homeId = registry.get<lw::Person>(lone.person).home;
+    CHECK(has(lw::ChronicleKind::Settled, homeId));
+    CHECK(chronicle.countOf(lw::ChronicleKind::Settled) == 1);
+    if (lone.home == entt::null) {
+        return;
+    }
+
+    // Последняя порция дома.
+    registry.get<lw::Supplies>(lone.home).food = 1;
+    registry.get<lw::Needs>(lone.person).hunger = 0.9f;
+    lone.run(90);
+    CHECK(registry.get<lw::Supplies>(lone.home).food == 0);
+    CHECK(has(lw::ChronicleKind::AteLastFood, homeId));
+    CHECK(chronicle.eventsOf(homeId).size() >= 2); // и дом помнит
+
+    // Голод доходит до предела — одно событие, а не по событию каждую минуту.
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    registry.get<lw::Carry>(lone.person) = {};
+    registry.get<lw::Needs>(lone.person).hunger = 0.995f;
+    lone.run(30);
+    CHECK(chronicle.countOf(lw::ChronicleKind::Starving) == 1);
+}
+
 void testAiSurvives() {
     lw::WorldConfig config = regionConfig();
     config.people = 120;
@@ -1884,6 +1953,8 @@ int main() {
     testAiStocksUp();
     testAiSleepsWhereStranded();
     testAiSurvives();
+    testChronicle();
+    testChronicleRecords();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

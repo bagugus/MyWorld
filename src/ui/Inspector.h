@@ -14,7 +14,8 @@ class World;
 namespace ui {
 
 // Инспектор: ЛКМ по человеку или зданию выбирает его, в окне — его компоненты,
-// текущее действие и связанные объекты (ссылки «#id» переключают выбор).
+// текущее действие, связанные объекты (ссылки «#id» переключают выбор) и
+// биография из летописи.
 // Выбор хранится по EntityId: исчезнет объект — выбор просто станет пустым.
 // Мир инспектор только читает.
 class Inspector {
@@ -41,6 +42,8 @@ private:
     void drawPerson(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
+    // События летописи с участием выбранного; есть и у исчезнувших объектов.
+    void drawBiography();
 
     const World& world_;
     EntityId selected_ = kInvalidId;

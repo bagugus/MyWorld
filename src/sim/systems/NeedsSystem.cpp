@@ -46,8 +46,35 @@ constexpr float kRecoverHungerMax = 0.8f;
 constexpr float kRecoverThirstMax = 0.8f;
 constexpr float kRecoverFatigueMax = 0.9f;
 
+// Пороги здоровья для летописи.
+constexpr float kWeakHealth = 0.5f;
+constexpr float kDyingHealth = 0.2f;
+
 float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
+}
+
+// Значимые перемены нужд — в летопись: пересечение порога, а не состояние,
+// поэтому каждое событие пишется один раз.
+void recordChanges(World& world, EntityId id, const Needs& before, const Needs& after) {
+    if (before.hunger < 1.0f && after.hunger >= 1.0f) {
+        world.record(ChronicleKind::Starving, id);
+    }
+    if (before.thirst < 1.0f && after.thirst >= 1.0f) {
+        world.record(ChronicleKind::Dehydrated, id);
+    }
+    if (before.fatigue < 1.0f && after.fatigue >= 1.0f) {
+        world.record(ChronicleKind::Exhausted, id);
+    }
+    if (before.health >= kWeakHealth && after.health < kWeakHealth) {
+        world.record(ChronicleKind::Weakened, id);
+    }
+    if (before.health >= kDyingHealth && after.health < kDyingHealth) {
+        world.record(ChronicleKind::Dying, id);
+    }
+    if (before.health < kWeakHealth && after.health >= kWeakHealth) {
+        world.record(ChronicleKind::Recovered, id);
+    }
 }
 
 } // namespace
@@ -75,6 +102,7 @@ void updateNeeds(World& world, float minutes) {
                                                                   registry.all_of<Person>(hit.entity));
                                         });
 
+        const Needs before = needs;
         const float metabolism = person.asleep ? kSleepMetabolism : 1.0f;
         needs.hunger = clamp01(needs.hunger + hours / kHungerHours * metabolism);
         needs.thirst = clamp01(needs.thirst + hours / kThirstHours * metabolism *
@@ -116,6 +144,7 @@ void updateNeeds(World& world, float minutes) {
         }
         needs.fear = clamp01(needs.fear + (fearTarget - needs.fear) *
                                               std::min(1.0f, hours / kFearResponseHours));
+        recordChanges(world, id.value, before, needs);
     }
 }
 

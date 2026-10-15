@@ -112,6 +112,8 @@ std::uint64_t World::stateHash() const {
     hasher.add(weather_.windFrom);
     hasher.add(weather_.anomaly);
     hasher.add(weather_.snowCover);
+    hasher.add(static_cast<std::uint64_t>(chronicle_.events().size()));
+    hasher.add(chronicle_.hash());
 
     std::vector<std::pair<EntityId, entt::entity>> order;
     order.reserve(idToEntity_.size());

@@ -15,6 +15,7 @@
 #include "sim/Climate.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
+#include "ui/ChronicleView.h"
 #include "ui/Inspector.h"
 #include "ui/PathTool.h"
 #include "ui/Ui.h"
@@ -128,6 +129,7 @@ int main(int argc, char** argv) {
             lw::ui::drawStatsPanel(world, environment, driver, camera, renderer);
             pathTool.drawPanel();
             inspector.drawPanel();
+            lw::ui::drawChroniclePanel(world, inspector);
             lw::ui::endFrame();
 
             EndDrawing();
