@@ -3,6 +3,8 @@
 #include "sim/Id.h"
 #include "sim/Map.h"
 #include "sim/Rng.h"
+#include "sim/TimeScale.h"
+#include "sim/Weather.h"
 
 #include <entt/entt.hpp>
 
@@ -19,6 +21,7 @@ enum class RngStream : std::uint8_t {
     Spawn,
     Wander,
     MapGen,
+    Weather,
     Count
 };
 
@@ -32,8 +35,9 @@ struct WorldConfig {
 // Один seed и одно число тиков дают одно и то же состояние.
 class World {
 public:
-    static constexpr int kTicksPerSecond = 20;
-    static constexpr float kTickDt = 1.0f / static_cast<float>(kTicksPerSecond);
+    // Масштаб времени — в sim/TimeScale.h.
+    static constexpr int kTicksPerSecond = lw::kTicksPerSecond;
+    static constexpr float kTickDt = lw::kTickDt;
 
     explicit World(std::uint64_t seed, const WorldConfig& config = {});
 
@@ -52,8 +56,12 @@ public:
 
     std::uint64_t seed() const { return seed_; }
     std::uint64_t tick() const { return tick_; }
+    // Время симуляции в секундах (не игровое: см. sim/TimeScale.h).
     double seconds() const { return static_cast<double>(tick_) / kTicksPerSecond; }
     const Map& map() const { return map_; }
+    // Погода одна на весь мир. Дата, свет и температура — sim/Climate.h.
+    const Weather& weather() const { return weather_; }
+    Weather& weather() { return weather_; }
     // Размер мира в метрах.
     float width() const { return map_.worldWidth(); }
     float height() const { return map_.worldHeight(); }
@@ -75,6 +83,8 @@ private:
     Map map_;
     // Карта после генерации не меняется, поэтому её хеш считается один раз.
     std::uint64_t mapHash_ = 0;
+
+    Weather weather_;
 
     entt::registry registry_;
     std::vector<Rng> streams_;

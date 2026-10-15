@@ -4,6 +4,7 @@
 #include "sim/Hash.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/WanderSystem.h"
+#include "sim/systems/WeatherSystem.h"
 
 #include <algorithm>
 #include <utility>
@@ -22,6 +23,7 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     }
 
     generate();
+    initWeather(*this);
     spawnWanderers(*this, config_.wanderers);
 }
 
@@ -46,6 +48,7 @@ void World::generate() {
 }
 
 void World::step() {
+    updateWeather(*this);
     updateWander(*this);
     ++tick_;
 }
@@ -83,6 +86,16 @@ std::uint64_t World::stateHash() const {
         hasher.add(stream.state());
         hasher.add(stream.increment());
     }
+    hasher.add(static_cast<std::uint8_t>(weather_.kind));
+    hasher.add(weather_.minutesLeft);
+    hasher.add(weather_.cloudCover);
+    hasher.add(weather_.precipitation);
+    hasher.add(weather_.fog);
+    hasher.add(weather_.windSpeed);
+    hasher.add(weather_.windTarget);
+    hasher.add(weather_.windFrom);
+    hasher.add(weather_.anomaly);
+    hasher.add(weather_.snowCover);
 
     std::vector<std::pair<EntityId, entt::entity>> order;
     order.reserve(idToEntity_.size());

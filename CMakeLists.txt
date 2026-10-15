@@ -31,6 +31,10 @@ endif()
 # Зависит только от EnTT. raylib и ImGui сюда не попадают намеренно:
 # include графики в src/sim/ не скомпилируется.
 add_library(lw_sim STATIC
+    src/sim/Calendar.cpp
+    src/sim/Calendar.h
+    src/sim/Climate.cpp
+    src/sim/Climate.h
     src/sim/Components.h
     src/sim/Grid.h
     src/sim/Hash.h
@@ -41,6 +45,8 @@ add_library(lw_sim STATIC
     src/sim/Rng.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
+    src/sim/TimeScale.h
+    src/sim/Weather.h
     src/sim/World.cpp
     src/sim/World.h
     src/sim/gen/GenContext.h
@@ -52,6 +58,8 @@ add_library(lw_sim STATIC
     src/sim/gen/Terrain.cpp
     src/sim/systems/WanderSystem.cpp
     src/sim/systems/WanderSystem.h
+    src/sim/systems/WeatherSystem.cpp
+    src/sim/systems/WeatherSystem.h
 )
 target_include_directories(lw_sim PUBLIC src)
 target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite)
@@ -67,7 +75,9 @@ if(LW_BUILD_APP)
         src/render/CameraController.h
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
-        src/render/WorldRenderer.cpp
+        src/render/WeatherRenderer.cpp
+    src/render/WeatherRenderer.h
+    src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
         src/ui/Ui.cpp
         src/ui/Ui.h

@@ -22,6 +22,8 @@ public:
     // visible — видимая часть мира в метрах, zoom — пикселей на метр.
     // Вызывать между BeginMode2D и EndMode2D.
     void draw(const Rectangle& visible, float zoom);
+    // Снег на суше поверх карты; amount — 0..1. Вызывать после draw.
+    void drawSnow(const Rectangle& visible, float amount);
 
     int chunkCount() const { return static_cast<int>(chunks_.size()); }
     int chunksDrawn() const { return chunksDrawn_; }
@@ -29,6 +31,7 @@ public:
 private:
     struct Chunk {
         Texture2D texture{};
+        Texture2D snow{}; // белая маска: прозрачна на воде, полупрозрачна на лесе и дорогах
         Rectangle bounds{}; // метры
     };
 

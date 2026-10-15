@@ -1,13 +1,17 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
-// драйвер времени.
+// драйвер времени, календарь, климат и погода.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
+#include "sim/Calendar.h"
+#include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
 
+#include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
@@ -334,6 +338,165 @@ void testSimDriver() {
     CHECK(driver.ticksLastFrame() < 500);
 }
 
+void testCalendar() {
+    using lw::kTicksPerGameDay;
+    using lw::kTicksPerGameHour;
+    using lw::kTicksPerGameMinute;
+
+    // Мир начинается в 08:00 первого дня весны первого года.
+    const lw::CalendarTime start = lw::calendarAt(0);
+    CHECK(start.year == 1 && start.day == 1 && start.dayOfYear == 0 && start.dayOfSeason == 0);
+    CHECK(start.season == lw::Season::Spring);
+    CHECK(start.hour == 8 && start.minute == 0 && start.minuteOfDay == 480);
+
+    const lw::CalendarTime later = lw::calendarAt(16 * kTicksPerGameHour + 5 * kTicksPerGameMinute + 99);
+    CHECK(later.day == 2 && later.hour == 0 && later.minute == 5);
+
+    const lw::CalendarTime summer = lw::calendarAt(15 * kTicksPerGameDay);
+    CHECK(summer.season == lw::Season::Summer && summer.dayOfSeason == 0 && summer.day == 16);
+    const lw::CalendarTime winterEnd = lw::calendarAt(60 * kTicksPerGameDay - lw::kStartGameTick - 1);
+    CHECK(winterEnd.season == lw::Season::Winter && winterEnd.dayOfSeason == 14);
+    CHECK(winterEnd.hour == 23 && winterEnd.minute == 59 && winterEnd.year == 1);
+    const lw::CalendarTime nextYear = lw::calendarAt(60 * kTicksPerGameDay - lw::kStartGameTick);
+    CHECK(nextYear.year == 2 && nextYear.dayOfYear == 0 && nextYear.season == lw::Season::Spring);
+    CHECK(nextYear.yearFraction == 0.0);
+    CHECK(winterEnd.yearFraction > 0.99 && winterEnd.yearFraction < 1.0);
+
+    // Ближайшие 06:00 — завтра, ближайшие 20:30 — сегодня, ровно 08:00 — через сутки.
+    CHECK(lw::nextTimeOfDay(0, 6, 0) == 22 * kTicksPerGameHour);
+    CHECK(lw::nextTimeOfDay(0, 20, 30) == 12 * kTicksPerGameHour + 30 * kTicksPerGameMinute);
+    CHECK(lw::nextTimeOfDay(0, 8, 0) == kTicksPerGameDay);
+}
+
+lw::CalendarTime timeAt(int dayOfYear, int hour) {
+    const std::uint64_t gameTick = static_cast<std::uint64_t>(dayOfYear) * lw::kTicksPerGameDay +
+                                   static_cast<std::uint64_t>(hour) * lw::kTicksPerGameHour;
+    return lw::calendarAt(gameTick - lw::kStartGameTick);
+}
+
+void testClimate() {
+    // Приближение косинуса.
+    float worst = 0.0f;
+    for (int i = 0; i <= 1000; ++i) {
+        const double t = i / 1000.0;
+        const auto exact = static_cast<float>(std::cos(6.283185307179586 * t));
+        worst = std::max(worst, std::abs(lw::smoothCycle(t) - exact));
+    }
+    CHECK(worst < 0.03f);
+    CHECK(lw::smoothCycle(0.0) == 1.0f);
+    CHECK(lw::smoothCycle(0.5) == -1.0f);
+    CHECK(lw::smoothCycle(-1.0) == 1.0f);
+
+    // Солнце: летом день длиннее и солнце выше, в полночь — ночь.
+    const lw::SunState summerNoon = lw::sunAt(timeAt(22, 12));
+    const lw::SunState winterNoon = lw::sunAt(timeAt(52, 12));
+    const lw::SunState midnight = lw::sunAt(timeAt(22, 0));
+    const int summerDay = summerNoon.sunsetMinute - summerNoon.sunriseMinute;
+    const int winterDay = winterNoon.sunsetMinute - winterNoon.sunriseMinute;
+    CHECK(summerDay > 15 * 60 && summerDay < 17 * 60);
+    CHECK(winterDay > 7 * 60 && winterDay < 9 * 60);
+    CHECK(summerNoon.elevation > 55.0f);
+    CHECK(winterNoon.elevation > 10.0f && winterNoon.elevation < 25.0f);
+    CHECK(midnight.elevation < -12.0f);
+
+    // Свет: ясный летний полдень — почти 1, ночью темно, облака приглушают.
+    const lw::Weather clear;
+    lw::Weather overcast;
+    overcast.cloudCover = 1.0f;
+    CHECK(lw::lightLevel(summerNoon, clear) > 0.95f);
+    CHECK(lw::lightLevel(midnight, clear) < 0.15f);
+    CHECK(lw::lightLevel(summerNoon, overcast) < lw::lightLevel(summerNoon, clear));
+    CHECK(lw::lightLevel(winterNoon, clear) < lw::lightLevel(summerNoon, clear));
+    // С утренних сумерек до полудня свет только растёт (ночью его задаёт луна,
+    // а её фаза за ночь немного меняется).
+    float previous = -1.0f;
+    bool monotonic = true;
+    for (int minute = 0; minute <= 750; minute += 5) {
+        lw::CalendarTime time = timeAt(22, 0);
+        time.minuteOfDay = minute;
+        const lw::SunState sun = lw::sunAt(time);
+        if (sun.elevation < -6.0f) {
+            continue;
+        }
+        const float light = lw::lightLevel(sun, clear);
+        monotonic = monotonic && light >= previous - 1e-6f;
+        previous = light;
+    }
+    CHECK(monotonic);
+
+    // Температура: лето теплее зимы, день теплее ночи, в горах холоднее.
+    const float summerDayTemp = lw::seaLevelTemperature(timeAt(25, 15), clear);
+    const float summerNightTemp = lw::seaLevelTemperature(timeAt(25, 3), clear);
+    const float winterDayTemp = lw::seaLevelTemperature(timeAt(55, 15), clear);
+    CHECK(summerDayTemp > 18.0f && summerDayTemp < 30.0f);
+    CHECK(summerNightTemp < summerDayTemp);
+    CHECK(winterDayTemp < 3.0f && winterDayTemp > -15.0f);
+    CHECK(lw::temperatureAtElevation(10.0f, 1000.0f) == 10.0f - 6.5f);
+    CHECK(lw::temperatureAtElevation(10.0f, -5.0f) == 10.0f);
+    CHECK(lw::isSnowing(-3.0f) && !lw::isSnowing(5.0f));
+}
+
+// Погода детерминирована, меняется, остаётся в допустимых пределах и следует сезону.
+void testWeather() {
+    lw::World a(11, smallConfig(0));
+    lw::World b(11, smallConfig(0));
+    const lw::Weather& weather = a.weather();
+    CHECK(weather.minutesLeft > 0);
+
+    constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
+    bool seen[kKinds] = {};
+    int changes = 0;
+    lw::WeatherKind last = weather.kind;
+    bool rainFromClear = false;
+    bool inRange = true;
+    float summerSnow = 0.0f; // больше нуля — снег летом не растаял
+    float winterSnow = 0.0f;
+
+    // Год, проверка раз в игровой час.
+    for (int hour = 0; hour < lw::kGameDaysPerYear * 24; ++hour) {
+        for (std::uint64_t i = 0; i < lw::kTicksPerGameHour; ++i) {
+            a.step();
+            b.step();
+        }
+        if (weather.kind != last) {
+            ++changes;
+            rainFromClear = rainFromClear ||
+                            (last == lw::WeatherKind::Clear && weather.kind == lw::WeatherKind::Rain);
+            last = weather.kind;
+        }
+        seen[static_cast<int>(weather.kind)] = true;
+        inRange = inRange && weather.cloudCover >= 0.0f && weather.cloudCover <= 1.0f &&
+                  weather.precipitation >= 0.0f && weather.precipitation <= 1.0f &&
+                  weather.fog >= 0.0f && weather.fog <= 1.0f && weather.snowCover >= 0.0f &&
+                  weather.snowCover <= 1.0f && weather.windSpeed >= 0.0f &&
+                  weather.windFrom >= 0.0f && weather.windFrom < 360.0f;
+
+        const lw::CalendarTime time = lw::calendarAt(a.tick());
+        if (time.season == lw::Season::Summer && time.dayOfSeason >= 5) {
+            summerSnow = std::max(summerSnow, weather.snowCover);
+        }
+        if (time.season == lw::Season::Winter) {
+            winterSnow = std::max(winterSnow, weather.snowCover);
+        }
+    }
+    int kindsSeen = 0;
+    for (const bool s : seen) {
+        kindsSeen += s ? 1 : 0;
+    }
+    CHECK(a.stateHash() == b.stateHash());
+    CHECK(changes > 20);
+    CHECK(kindsSeen >= 5);
+    CHECK(!rainFromClear);
+    CHECK(inRange);
+    CHECK(summerSnow == 0.0f);
+    CHECK(winterSnow > 0.5f);
+
+    // Другой seed — другая погода, даже на той же карте.
+    lw::World same(11, smallConfig(0));
+    lw::World other(12, smallConfig(0));
+    CHECK(same.weather().anomaly != other.weather().anomaly);
+}
+
 } // namespace
 
 int main() {
@@ -344,6 +507,9 @@ int main() {
     testDeterminism();
     testEntitiesStayInWorld();
     testSimDriver();
+    testCalendar();
+    testClimate();
+    testWeather();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

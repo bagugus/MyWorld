@@ -2,6 +2,7 @@
 
 #include "render/CameraController.h"
 #include "render/WorldRenderer.h"
+#include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
@@ -37,6 +38,56 @@ const char* buildingName(BuildingKind kind) {
         return "магазин";
     }
     return "здание";
+}
+
+const char* seasonName(Season season) {
+    constexpr const char* kNames[] = {"весна", "лето", "осень", "зима"};
+    return kNames[static_cast<int>(season)];
+}
+
+const char* weatherName(const Weather& weather, bool snow) {
+    switch (weather.kind) {
+    case WeatherKind::Clear:
+        return "ясно";
+    case WeatherKind::Cloudy:
+        return "переменная облачность";
+    case WeatherKind::Overcast:
+        return "пасмурно";
+    case WeatherKind::Fog:
+        return "туман";
+    case WeatherKind::Rain:
+        return snow ? "снегопад" : "дождь";
+    case WeatherKind::Storm:
+        return snow ? "метель" : "гроза";
+    case WeatherKind::Count:
+        break;
+    }
+    return "—";
+}
+
+// Откуда дует ветер — по восьми румбам.
+const char* windName(float fromDegrees) {
+    constexpr const char* kNames[] = {"северный", "северо-восточный", "восточный", "юго-восточный",
+                                      "южный", "юго-западный", "западный", "северо-западный"};
+    const int index = static_cast<int>(fromDegrees / 45.0f + 0.5f) % 8;
+    return kNames[index];
+}
+
+const char* dayPhaseName(const SunState& sun) {
+    if (sun.elevation > 6.0f) {
+        return "день";
+    }
+    if (sun.elevation > -6.0f) {
+        return "сумерки";
+    }
+    return "ночь";
+}
+
+// Полоска-индикатор 0..1 с подписью.
+void meter(const char* label, float value) {
+    char overlay[64];
+    std::snprintf(overlay, sizeof(overlay), "%s %.0f%%", label, value * 100.0f);
+    ImGui::ProgressBar(std::clamp(value, 0.0f, 1.0f), {-FLT_MIN, 0.0f}, overlay);
 }
 
 // Что находится в клетке: местность, вода, дорога, здание.
@@ -128,10 +179,11 @@ void handleHotkeys(SimDriver& driver) {
     }
 }
 
-void drawTimePanel(const World& world, SimDriver& driver) {
+void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver) {
     ImGui::SetNextWindowPos({12.0f, 12.0f}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({300.0f, 0.0f}, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Время")) {
+    // Высота по содержимому: панель растёт вместе с индикаторами.
+    ImGui::SetNextWindowSizeConstraints({320.0f, 0.0f}, {FLT_MAX, FLT_MAX});
+    if (ImGui::Begin("Время###time", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
         if (ImGui::Button(driver.paused() ? "Продолжить###pause" : "Пауза###pause",
                           {110.0f, 0.0f})) {
             driver.togglePause();
@@ -163,11 +215,35 @@ void drawTimePanel(const World& world, SimDriver& driver) {
         }
         ImGui::EndDisabled();
 
+        const CalendarTime& time = environment.time;
+        const SunState& sun = environment.sun;
+        const Weather& weather = world.weather();
+        const bool snow = isSnowing(environment.temperature);
+
+        ImGui::Separator();
+        ImGui::Text("%02d:%02d — %s", time.hour, time.minute, dayPhaseName(sun));
+        ImGui::Text("День %d: %s, %d-й день из %d, год %d", time.day, seasonName(time.season),
+                    time.dayOfSeason + 1, kGameDaysPerSeason, time.year);
+        ImGui::Text("Рассвет %02d:%02d, закат %02d:%02d", sun.sunriseMinute / 60,
+                    sun.sunriseMinute % 60, sun.sunsetMinute / 60, sun.sunsetMinute % 60);
+        meter("Свет", environment.light);
+        meter("Луна", sun.moonFullness);
+
+        ImGui::Separator();
+        ImGui::Text("Погода: %s", weatherName(weather, snow));
+        ImGui::Text("Температура: %+.1f °C (у моря)", environment.temperature);
+        ImGui::Text("Ветер: %s, %.0f м/с", windName(weather.windFrom), weather.windSpeed);
+        meter("Облачность", weather.cloudCover);
+        meter(snow ? "Снегопад" : "Осадки", weather.precipitation);
+        meter("Туман", weather.fog);
+        meter("Снег на земле", weather.snowCover);
+
         const auto totalSeconds = static_cast<unsigned long long>(world.seconds());
         ImGui::Separator();
         ImGui::Text("Тик: %llu", static_cast<unsigned long long>(world.tick()));
-        ImGui::Text("Время мира: %llu ч %02llu мин %02llu с", totalSeconds / 3600,
+        ImGui::Text("Время симуляции: %llu ч %02llu мин %02llu с", totalSeconds / 3600,
                     totalSeconds / 60 % 60, totalSeconds % 60);
+        ImGui::TextDisabled("Игровой час — 5 мин симуляции");
         ImGui::TextDisabled("Space — пауза, 1 / 2 / 3 — скорость");
     }
     ImGui::End();
@@ -204,11 +280,13 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
     }
 }
 
-void drawStatsPanel(const World& world, const SimDriver& driver, const CameraController& camera,
-                    const WorldRenderer& renderer) {
-    ImGui::SetNextWindowPos({12.0f, 210.0f}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({300.0f, 0.0f}, ImGuiCond_FirstUseEver);
-    if (ImGui::Begin("Статистика")) {
+void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
+                    const CameraController& camera, const WorldRenderer& renderer) {
+    // Справа: слева под временем места нет.
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos({display.x - 12.0f, 12.0f}, ImGuiCond_FirstUseEver, {1.0f, 0.0f});
+    ImGui::SetNextWindowSize({320.0f, 0.0f}, ImGuiCond_FirstUseEver);
+    if (ImGui::Begin("Статистика###stats")) {
         const int targetTicks = driver.paused() ? 0 : driver.speed() * World::kTicksPerSecond;
         ImGui::Text("FPS: %d", GetFPS());
         ImGui::Text("Тиков в секунду: %.0f из %d", driver.measuredTicksPerSecond(), targetTicks);
@@ -233,8 +311,9 @@ void drawStatsPanel(const World& world, const SimDriver& driver, const CameraCon
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {
-            ImGui::Text("Клетка: %d, %d, высота %.1f м", cell.x, cell.y,
-                        map.elevationMeters(cell));
+            ImGui::Text("Клетка: %d, %d, высота %.1f м, %+.1f °C", cell.x, cell.y,
+                        map.elevationMeters(cell),
+                        temperatureAtElevation(environment.temperature, map.elevationMeters(cell)));
             drawCellInfo(world, cell);
         } else {
             ImGui::TextDisabled("Клетка: вне карты");
