@@ -1,5 +1,6 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
-// драйвер времени, календарь, климат и погода, пространственный индекс, навигация.
+// драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
+// люди и движение.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -13,6 +14,7 @@
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
+#include "sim/systems/MovementSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -37,11 +39,11 @@ int failures = 0;
     } while (false)
 
 // Маленькая карта: тестам не нужен мир размером по умолчанию.
-lw::WorldConfig smallConfig(int wanderers) {
+lw::WorldConfig smallConfig(int people) {
     lw::WorldConfig config;
     config.mapWidth = 64;
     config.mapHeight = 64;
-    config.wanderers = wanderers;
+    config.people = people;
     return config;
 }
 
@@ -152,7 +154,7 @@ lw::WorldConfig regionConfig() {
     lw::WorldConfig config;
     config.mapWidth = 1024;
     config.mapHeight = 1024;
-    config.wanderers = 0;
+    config.people = 0;
     return config;
 }
 
@@ -295,7 +297,7 @@ void testEntitiesStayInWorld() {
     lw::WorldConfig config;
     config.mapWidth = 12;
     config.mapHeight = 8;
-    config.wanderers = 100;
+    config.people = 100;
     lw::World world(5, config);
     for (int i = 0; i < 5000; ++i) {
         world.step();
@@ -1231,6 +1233,118 @@ void testWorldNavigation() {
     CHECK(a.cells == b.cells && a.cost == b.cost);
 }
 
+
+// --- Люди --------------------------------------------------------------------
+
+void testWalkSpeed() {
+    CHECK(lw::walkSpeedFactor(lw::NavGrid::kBlocked) == 0.0f);
+    CHECK(lw::walkSpeedFactor(lw::NavGrid::kRoadCost) == 1.0f);
+    CHECK(lw::walkSpeedFactor(11) < 1.0f && lw::walkSpeedFactor(15) < lw::walkSpeedFactor(11));
+    const float ford = lw::walkSpeedFactor(lw::NavGrid::kWaterCost);
+    const float swim = lw::walkSpeedFactor(250);
+    CHECK(ford < lw::walkSpeedFactor(15) && swim < ford && swim > 0.0f);
+}
+
+void testPeople() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 150;
+    lw::World world(7, config);
+    const entt::registry& registry = world.registry();
+    const lw::NavGrid& nav = world.nav();
+
+    // Все живут в жилых домах и начинают у своей двери.
+    bool housed = true;
+    for (const auto [entity, person, position] :
+         registry.view<const lw::Person, const lw::Position>().each()) {
+        const entt::entity home = world.find(person.home);
+        housed = housed && home != entt::null;
+        if (home == entt::null) {
+            continue;
+        }
+        const lw::Building& building = registry.get<lw::Building>(home);
+        housed = housed &&
+                 (building.kind == lw::BuildingKind::House ||
+                  building.kind == lw::BuildingKind::Apartment) &&
+                 lw::Map::cellAt(position.x, position.y) == building.door;
+    }
+    CHECK(registry.view<const lw::Person>().size() == 150);
+    CHECK(housed);
+
+    const auto atHome = [&]() {
+        std::size_t count = 0;
+        for (const auto [entity, person, position] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            const lw::Building& building = registry.get<lw::Building>(world.find(person.home));
+            count += lw::Map::cellAt(position.x, position.y) == building.door ? 1 : 0;
+        }
+        return count;
+    };
+
+    // Тот же seed — те же маршруты.
+    lw::World twin(7, config);
+    for (int i = 0; i < 3000; ++i) {
+        world.step();
+        twin.step();
+    }
+    CHECK(world.stateHash() == twin.stateHash());
+
+    // Днём (до 12:00) люди расходятся и ходят только по проходимым клеткам.
+    bool onLand = true;
+    std::size_t walked = 0;
+    while (lw::calendarAt(world.tick()).hour < 12) {
+        world.step();
+        if (world.tick() % 100 == 0) {
+            for (const auto [entity, position, walker] :
+                 registry.view<const lw::Position, const lw::Walker>().each()) {
+                onLand = onLand && nav.passable(lw::Map::cellAt(position.x, position.y));
+                walked += walker.moving() ? 1 : 0;
+            }
+        }
+    }
+    CHECK(onLand);
+    CHECK(walked > 0);
+    CHECK(atHome() < 120);
+
+    // К трём часам ночи почти все дома.
+    const std::uint64_t night = lw::nextTimeOfDay(world.tick(), 3, 0);
+    while (world.tick() < night) {
+        world.step();
+    }
+    CHECK(atHome() >= 140);
+}
+
+// Шаг движения может быть длиннее тика: за один шаг человек проходит весь путь.
+void testLongMovementStep() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 1;
+    lw::World world(7, config);
+    entt::registry& registry = world.registry();
+    const entt::entity person = *registry.view<lw::Person>().begin();
+
+    lw::Cell goal{};
+    float farthest = 0.0f;
+    const lw::Position start = registry.get<lw::Position>(person);
+    for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+        const float dx = lw::Map::cellCenter(building.door.x) - start.x;
+        const float dy = lw::Map::cellCenter(building.door.y) - start.y;
+        if (dx * dx + dy * dy > farthest && world.nav().connected(building.door,
+                                                                  lw::Map::cellAt(start.x, start.y))) {
+            farthest = dx * dx + dy * dy;
+            goal = building.door;
+        }
+    }
+    CHECK(farthest > 0.0f);
+    CHECK(lw::startWalk(world, person, goal));
+    CHECK(registry.get<lw::Walker>(person).moving());
+    lw::updateMovement(world, 1.0e6f);
+    const lw::Position& end = registry.get<lw::Position>(person);
+    CHECK(lw::Map::cellAt(end.x, end.y) == goal);
+    CHECK(!registry.get<lw::Walker>(person).moving());
+    lw::updateMovement(world, lw::kTickDt);
+    const lw::Velocity& velocity = registry.get<lw::Velocity>(person);
+    CHECK(velocity.x == 0.0f && velocity.y == 0.0f);
+}
+
 } // namespace
 
 int main() {
@@ -1252,6 +1366,9 @@ int main() {
     testPathfinderOnRandomMaps();
     testPathfinderDeterminism();
     testWorldNavigation();
+    testWalkSpeed();
+    testPeople();
+    testLongMovementStep();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

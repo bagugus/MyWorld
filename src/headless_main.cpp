@@ -3,6 +3,7 @@
 //   lw_headless --seed 42 --climate   сводка погоды и температуры за игровой год по сезонам
 //   lw_headless --seed 42 --paths 500 замер поиска пути: пары дверей и пары случайных клеток суши
 //                                     (--optimal — сравнить каждый путь с оптимальным)
+//   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -52,8 +53,12 @@ void printMapSummary(const lw::World& world, double seconds) {
 
     std::size_t towns = 0;
     std::size_t villages = 0;
+    const lw::Settlement* largest = nullptr;
     for (const auto [entity, settlement] : world.registry().view<const lw::Settlement>().each()) {
         (settlement.kind == lw::SettlementKind::Town ? towns : villages) += 1;
+        if (largest == nullptr || settlement.radius > largest->radius) {
+            largest = &settlement;
+        }
     }
 
     std::printf("map generated in %.2f s\n", seconds);
@@ -66,6 +71,30 @@ void printMapSummary(const lw::World& world, double seconds) {
                 static_cast<double>(road) * cellKm);
     std::printf("  towns %zu, villages %zu, buildings %zu\n", towns, villages,
                 world.registry().view<const lw::Building>().size());
+    if (largest != nullptr) {
+        std::printf("  largest: %s at %.0f, %.0f m\n", largest->name.c_str(),
+                    lw::Map::cellCenter(largest->center.x), lw::Map::cellCenter(largest->center.y));
+    }
+}
+
+// Люди: сколько в пути, сколько у своего дома.
+void printPeople(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t people = 0;
+    std::size_t walking = 0;
+    std::size_t atHome = 0;
+    for (const auto [entity, person, walker, position] :
+         registry.view<const lw::Person, const lw::Walker, const lw::Position>().each()) {
+        ++people;
+        walking += walker.moving() ? 1 : 0;
+        if (const entt::entity home = world.find(person.home); home != entt::null) {
+            atHome += lw::Map::cellAt(position.x, position.y) ==
+                              registry.get<lw::Building>(home).door
+                          ? 1
+                          : 0;
+        }
+    }
+    std::printf("people %zu: walking %zu, at home %zu\n", people, walking, atHome);
 }
 
 void printWeather(const lw::World& world) {
@@ -86,7 +115,7 @@ void printClimate(std::uint64_t seed) {
     lw::WorldConfig config;
     config.mapWidth = 64;
     config.mapHeight = 64;
-    config.wanderers = 0;
+    config.people = 0;
     lw::World world(seed, config);
 
     constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
@@ -294,6 +323,7 @@ int main(int argc, char** argv) {
     bool climate = false;
     int paths = 0;
     bool compare = false;
+    lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
         const bool hasValue = i + 1 < argc;
@@ -307,8 +337,10 @@ int main(int argc, char** argv) {
             paths = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--optimal") == 0) {
             compare = true;
+        } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
+            config.people = std::atoi(argv[++i]);
         } else {
-            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--paths N [--optimal]]\n");
+            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] [--paths N [--optimal]]\n");
             return 2;
         }
     }
@@ -319,7 +351,7 @@ int main(int argc, char** argv) {
     }
 
     const auto genStart = std::chrono::steady_clock::now();
-    lw::World world(seed);
+    lw::World world(seed, config);
     const std::chrono::duration<double> genElapsed = std::chrono::steady_clock::now() - genStart;
     printMapSummary(world, genElapsed.count());
     if (paths > 0) {
@@ -340,6 +372,7 @@ int main(int argc, char** argv) {
                 world.entityCount(),
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
+    printPeople(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());

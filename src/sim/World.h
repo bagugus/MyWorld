@@ -23,7 +23,7 @@ namespace lw {
 // порядок определяет последовательности уже существующих потоков.
 enum class RngStream : std::uint8_t {
     Spawn,
-    Wander,
+    Behavior, // распорядок людей (до этапа 4.3 — блуждание тестовых существ)
     MapGen,
     Weather,
     Count
@@ -32,7 +32,7 @@ enum class RngStream : std::uint8_t {
 struct WorldConfig {
     int mapWidth = 2048;  // клетки (по Map::kCellSize метров)
     int mapHeight = 2048; // клетки
-    int wanderers = 300;  // тестовые существа этапа 1
+    int people = 300;     // люди; живут в жилых домах
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.

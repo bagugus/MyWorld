@@ -11,6 +11,7 @@ namespace {
 
 constexpr Color kBorderColor = {190, 190, 190, 255};
 constexpr Color kEntityColor = {236, 200, 92, 255};
+constexpr Color kRestingColor = {150, 205, 225, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
@@ -73,7 +74,10 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera) {
             position.y < topLeft.y - radius || position.y > bottomRight.y + radius) {
             continue;
         }
-        DrawCircleV({position.x, position.y}, radius, kEntityColor);
+        // Люди в пути — ярче стоящих.
+        const auto* walker = world.registry().try_get<Walker>(entity);
+        DrawCircleV({position.x, position.y}, radius,
+                    walker && !walker->moving() ? kRestingColor : kEntityColor);
     }
 }
 

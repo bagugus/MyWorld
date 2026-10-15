@@ -3,7 +3,8 @@
 #include "sim/Components.h"
 #include "sim/Hash.h"
 #include "sim/gen/MapGenerator.h"
-#include "sim/systems/WanderSystem.h"
+#include "sim/systems/MovementSystem.h"
+#include "sim/systems/RoutineSystem.h"
 #include "sim/systems/WeatherSystem.h"
 
 #include <algorithm>
@@ -27,7 +28,7 @@ World::World(std::uint64_t seed, const WorldConfig& config)
 
     generate();
     initWeather(*this);
-    spawnWanderers(*this, config_.wanderers);
+    spawnPeople(*this, config_.people);
     spatial_.sync(registry_);
 }
 
@@ -56,7 +57,8 @@ void World::generate() {
 
 void World::step() {
     updateWeather(*this);
-    updateWander(*this);
+    updateRoutine(*this);
+    updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
     spatial_.sync(registry_);
     ++tick_;
@@ -127,11 +129,6 @@ std::uint64_t World::stateHash() const {
             hasher.add(velocity->x);
             hasher.add(velocity->y);
         }
-        if (const auto* wander = registry_.try_get<Wander>(entity)) {
-            hasher.add(std::uint64_t{3});
-            hasher.add(static_cast<std::uint64_t>(wander->ticksUntilTurn));
-            hasher.add(wander->speed);
-        }
         if (const auto* settlement = registry_.try_get<Settlement>(entity)) {
             hasher.add(std::uint64_t{4});
             hasher.add(static_cast<std::uint8_t>(settlement->kind));
@@ -153,6 +150,27 @@ std::uint64_t World::stateHash() const {
             hasher.add(building->door.x);
             hasher.add(building->door.y);
             hasher.add(building->settlement);
+        }
+        if (const auto* person = registry_.try_get<Person>(entity)) {
+            hasher.add(std::uint64_t{6});
+            hasher.add(person->home);
+        }
+        if (const auto* walker = registry_.try_get<Walker>(entity)) {
+            hasher.add(std::uint64_t{7});
+            hasher.add(walker->speed);
+            hasher.add(static_cast<std::uint64_t>(walker->waypoints.size()));
+            for (const Cell cell : walker->waypoints) {
+                hasher.add(cell.x);
+                hasher.add(cell.y);
+            }
+            hasher.add(walker->next);
+        }
+        if (const auto* routine = registry_.try_get<Routine>(entity)) {
+            hasher.add(std::uint64_t{8});
+            hasher.add(static_cast<std::uint8_t>(routine->activity));
+            hasher.add(routine->restUntil);
+            hasher.add(routine->bedtime);
+            hasher.add(routine->wakeTime);
         }
     }
     return hasher.value();

@@ -303,6 +303,12 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         ImGui::Text("Поселений: %zu, зданий: %zu",
                     world.registry().view<const Settlement>().size(),
                     world.registry().view<const Building>().size());
+        std::size_t walking = 0;
+        for (const auto [entity, walker] : world.registry().view<const Walker>().each()) {
+            walking += walker.moving() ? 1 : 0;
+        }
+        ImGui::Text("Людей: %zu, в пути: %zu", world.registry().view<const Person>().size(),
+                    walking);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
