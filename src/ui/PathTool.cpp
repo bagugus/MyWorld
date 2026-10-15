@@ -63,7 +63,9 @@ void PathTool::setEndpoints(float startX, float startY, float goalX, float goalY
 }
 
 void PathTool::handleInput(const CameraController& camera, bool mouseFree) {
-    if (!enabled_ || !mouseFree || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
+    // Без Ctrl левая кнопка — выбор объекта для инспектора.
+    const bool ctrl = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    if (!enabled_ || !mouseFree || !ctrl || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         return;
     }
     const Vector2 point = GetScreenToWorld2D(GetMousePosition(), camera.camera());
@@ -154,7 +156,7 @@ void PathTool::drawPanel() {
     ImGui::SetNextWindowPos({display.x - 12.0f, 420.0f}, ImGuiCond_FirstUseEver, {1.0f, 0.0f});
     ImGui::SetNextWindowSizeConstraints({320.0f, 0.0f}, {FLT_MAX, FLT_MAX});
     if (ImGui::Begin("Поиск пути###path", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
-        ImGui::Checkbox("ЛКМ — начало, Shift+ЛКМ — цель", &enabled_);
+        ImGui::Checkbox("Ctrl+ЛКМ — начало, Ctrl+Shift+ЛКМ — цель", &enabled_);
         const NavGraph& graph = world_.navGraph();
         ImGui::Checkbox("Граф навигации", &showGraph_);
         ImGui::SameLine();

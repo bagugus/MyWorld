@@ -6,7 +6,7 @@
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
-#include "sim/systems/UtilityAiSystem.h"
+#include "ui/Format.h"
 
 #include <imgui.h>
 #include <raylib.h>
@@ -16,8 +16,6 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
-#include <iterator>
-#include <utility>
 
 namespace lw::ui {
 
@@ -29,20 +27,6 @@ constexpr const char* kFontPath = "C:/Windows/Fonts/segoeui.ttf";
 constexpr float kFontSize = 18.0f;
 
 constexpr int kSpeeds[] = {1, 10, 100};
-
-const char* buildingName(BuildingKind kind) {
-    switch (kind) {
-    case BuildingKind::House:
-        return "дом";
-    case BuildingKind::Barn:
-        return "сарай";
-    case BuildingKind::Apartment:
-        return "многоэтажка";
-    case BuildingKind::Shop:
-        return "магазин";
-    }
-    return "здание";
-}
 
 const char* seasonName(Season season) {
     constexpr const char* kNames[] = {"весна", "лето", "осень", "зима"};
@@ -87,13 +71,6 @@ const char* dayPhaseName(const SunState& sun) {
     return "ночь";
 }
 
-// Полоска-индикатор 0..1 с подписью.
-void meter(const char* label, float value) {
-    char overlay[64];
-    std::snprintf(overlay, sizeof(overlay), "%s %.0f%%", label, value * 100.0f);
-    ImGui::ProgressBar(std::clamp(value, 0.0f, 1.0f), {-FLT_MIN, 0.0f}, overlay);
-}
-
 // Что находится в клетке: местность, вода, дорога, здание.
 void drawCellInfo(const World& world, Cell cell) {
     const Map& map = world.map();
@@ -131,71 +108,6 @@ void drawCellInfo(const World& world, Cell cell) {
             ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
         }
         break;
-    }
-}
-
-const char* actionName(Action action) {
-    constexpr const char* kNames[] = {"отдыхает", "спит",      "ест",    "пьёт",
-                                      "ищет припасы", "собирает в лесу", "общается",
-                                      "гуляет",   "уходит домой"};
-    static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
-    return kNames[static_cast<std::size_t>(action)];
-}
-
-// Человек под курсором: занятие, дом, нужды, черты, оценки действий.
-void drawPersonInfo(const World& world, entt::entity entity, EntityId id) {
-    const entt::registry& registry = world.registry();
-    const Person& person = registry.get<Person>(entity);
-    ImGui::Text("Человек #%llu", static_cast<unsigned long long>(id));
-    if (const auto* mind = registry.try_get<Mind>(entity)) {
-        ImGui::Text("Сейчас: %s%s", actionName(mind->action),
-                    mind->phase == ActionPhase::Travel ? " (в пути)" : "");
-    }
-    if (const entt::entity home = world.find(person.home); home != entt::null) {
-        const auto* supplies = registry.try_get<Supplies>(home);
-        ImGui::Text("Дом: здание #%llu, еды %d, воды %d",
-                    static_cast<unsigned long long>(person.home),
-                    supplies != nullptr ? supplies->food : 0,
-                    supplies != nullptr ? supplies->water : 0);
-    } else {
-        ImGui::TextUnformatted("Дом: нет");
-    }
-    if (const auto* carry = registry.try_get<Carry>(entity);
-        carry != nullptr && (carry->food > 0 || carry->water > 0)) {
-        ImGui::Text("Несёт: еды %d, воды %d", carry->food, carry->water);
-    }
-    if (const auto* needs = registry.try_get<Needs>(entity)) {
-        meter("Голод", needs->hunger);
-        meter("Жажда", needs->thirst);
-        meter("Усталость", needs->fatigue);
-        meter("Страх", needs->fear);
-        meter("Одиночество", needs->loneliness);
-        meter("Здоровье", needs->health);
-    }
-    if (const auto* traits = registry.try_get<Traits>(entity)) {
-        const std::pair<const char*, float> rows[] = {
-            {"Смелость", traits->bravery},       {"Жадность", traits->greed},
-            {"Альтруизм", traits->altruism},     {"Агрессия", traits->aggression},
-            {"Лидерство", traits->leadership},   {"Общительность", traits->sociability},
-            {"Любопытство", traits->curiosity},  {"Запасливость", traits->prudence},
-            {"Сова", traits->chronotype},
-        };
-        if (ImGui::BeginTable("traits", 4, ImGuiTableFlags_SizingStretchProp)) {
-            for (const auto& [name, value] : rows) {
-                ImGui::TableNextColumn();
-                ImGui::TextUnformatted(name);
-                ImGui::TableNextColumn();
-                ImGui::Text("%.0f", value * 100.0f);
-            }
-            ImGui::EndTable();
-        }
-    }
-    if (registry.all_of<Mind, Needs>(entity) && ImGui::TreeNode("Оценки действий")) {
-        const ActionScores scores = evaluateActions(world, entity);
-        for (std::size_t i = 0; i < scores.size(); ++i) {
-            ImGui::Text("%s: %.2f", actionName(static_cast<Action>(i)), scores[i]);
-        }
-        ImGui::TreePop();
     }
 }
 
@@ -410,9 +322,9 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                 mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
                     return world.registry().all_of<Person>(hit.entity);
                 })) {
-            ImGui::Separator();
-            drawPersonInfo(world, picked->entity, picked->id);
-            ImGui::Separator();
+            const auto* mind = world.registry().try_get<Mind>(picked->entity);
+            ImGui::Text("Человек #%llu: %s", static_cast<unsigned long long>(picked->id),
+                        mind != nullptr ? actionName(mind->action) : "—");
         }
         const Cell cell = Map::cellAt(mouse.x, mouse.y);
         if (map.contains(cell)) {
@@ -423,7 +335,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         } else {
             ImGui::TextDisabled("Клетка: вне карты");
         }
-        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\nHome — весь мир");
+        ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\nHome — весь мир,\n"
+                            "ЛКМ — выбрать для инспектора");
     }
     ImGui::End();
 }

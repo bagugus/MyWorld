@@ -98,6 +98,10 @@ if(LW_BUILD_APP)
         src/render/WeatherRenderer.h
         src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
+        src/ui/Format.cpp
+        src/ui/Format.h
+        src/ui/Inspector.cpp
+        src/ui/Inspector.h
         src/ui/PathTool.cpp
         src/ui/PathTool.h
         src/ui/Ui.cpp
