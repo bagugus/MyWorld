@@ -1,9 +1,12 @@
 // Прогон симуляции без окна: проверка детерминизма и замер скорости.
 //   lw_headless --seed 42 --ticks 10000
+//   lw_headless --seed 42 --climate   сводка погоды и температуры за игровой год по сезонам
 
+#include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/World.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -55,11 +58,78 @@ void printMapSummary(const lw::World& world, double seconds) {
                 world.registry().view<const lw::Building>().size());
 }
 
+void printWeather(const lw::World& world) {
+    const lw::Environment environment = lw::environmentAt(world);
+    const lw::CalendarTime& time = environment.time;
+    const lw::Weather& weather = world.weather();
+    std::printf("year %d, season %d, day %d of season, %02d:%02d; light %.2f, %.1f C, "
+                "weather %d (clouds %.2f, precipitation %.2f, fog %.2f, wind %.1f m/s), snow %.2f\n",
+                time.year, static_cast<int>(time.season), time.dayOfSeason + 1, time.hour,
+                time.minute, environment.light, environment.temperature,
+                static_cast<int>(weather.kind), weather.cloudCover, weather.precipitation,
+                weather.fog, weather.windSpeed, weather.snowCover);
+}
+
+// Год погоды на маленькой карте: доли типов погоды, температура, снег — по сезонам.
+// По сводке подбираются константы климата.
+void printClimate(std::uint64_t seed) {
+    lw::WorldConfig config;
+    config.mapWidth = 64;
+    config.mapHeight = 64;
+    config.wanderers = 0;
+    lw::World world(seed, config);
+
+    constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
+    struct SeasonStats {
+        int hours = 0;
+        int kinds[kKinds] = {};
+        int snowfallHours = 0;
+        int snowCoveredHours = 0;
+        double temperatureSum = 0.0;
+        float minTemperature = 1e9f;
+        float maxTemperature = -1e9f;
+    };
+    SeasonStats seasons[4];
+
+    for (int hour = 0; hour < lw::kGameDaysPerYear * 24; ++hour) {
+        for (std::uint64_t i = 0; i < lw::kTicksPerGameHour; ++i) {
+            world.step();
+        }
+        const lw::Environment environment = lw::environmentAt(world);
+        const lw::Weather& weather = world.weather();
+        SeasonStats& stats = seasons[static_cast<int>(environment.time.season)];
+        ++stats.hours;
+        ++stats.kinds[static_cast<int>(weather.kind)];
+        stats.snowfallHours += weather.precipitation > 0.05f && lw::isSnowing(environment.temperature) ? 1 : 0;
+        stats.snowCoveredHours += weather.snowCover > 0.2f ? 1 : 0;
+        stats.temperatureSum += environment.temperature;
+        stats.minTemperature = std::min(stats.minTemperature, environment.temperature);
+        stats.maxTemperature = std::max(stats.maxTemperature, environment.temperature);
+    }
+
+    constexpr const char* kSeasonNames[] = {"spring", "summer", "autumn", "winter"};
+    std::printf("climate, seed %llu: %% of hours by weather "
+                "(clear cloudy overcast fog rain storm), temperature at sea level\n",
+                static_cast<unsigned long long>(seed));
+    for (int s = 0; s < 4; ++s) {
+        const SeasonStats& stats = seasons[s];
+        const double hours = stats.hours > 0 ? stats.hours : 1;
+        std::printf("  %-6s", kSeasonNames[s]);
+        for (const int count : stats.kinds) {
+            std::printf(" %3.0f", 100.0 * count / hours);
+        }
+        std::printf(" | %+5.1f .. %+5.1f C, mean %+5.1f | snowfall %3d h, snow on ground %3d h\n",
+                    stats.minTemperature, stats.maxTemperature, stats.temperatureSum / hours,
+                    stats.snowfallHours, stats.snowCoveredHours);
+    }
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
     std::uint64_t ticks = 1000;
+    bool climate = false;
 
     for (int i = 1; i < argc; ++i) {
         const bool hasValue = i + 1 < argc;
@@ -67,10 +137,17 @@ int main(int argc, char** argv) {
             seed = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(argv[i], "--ticks") == 0 && hasValue) {
             ticks = std::strtoull(argv[++i], nullptr, 10);
+        } else if (std::strcmp(argv[i], "--climate") == 0) {
+            climate = true;
         } else {
-            std::printf("usage: lw_headless [--seed N] [--ticks N]\n");
+            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate]\n");
             return 2;
         }
+    }
+
+    if (climate) {
+        printClimate(seed);
+        return 0;
     }
 
     const auto genStart = std::chrono::steady_clock::now();
@@ -91,6 +168,7 @@ int main(int argc, char** argv) {
                 world.map().height(),
                 world.entityCount(),
                 static_cast<unsigned long long>(world.stateHash()));
+    printWeather(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());

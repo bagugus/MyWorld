@@ -47,6 +47,8 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera) {
                                bottomRight.y - topLeft.y};
 
     map_.draw(visible, zoom);
+    // Даже полный покров оставляет карту читаемой.
+    map_.drawSnow(visible, world.weather().snowCover * 0.85f);
     DrawRectangleLinesEx(bounds, 2.0f / zoom, kBorderColor);
 
     for (const auto [entity, building] : world.registry().view<const Building>().each()) {

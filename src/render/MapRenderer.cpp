@@ -106,29 +106,57 @@ Color cellColor(const Map& map, int x, int y) {
     return scale(color, hillshade(map, x, y));
 }
 
+// Насколько клетку видно белой под снегом: вода не заносится, лес и дороги — меньше.
+unsigned char snowAlpha(const Map& map, int x, int y) {
+    if (map.road.at(x, y) != Road::None) {
+        return 150;
+    }
+    if (map.water.at(x, y) != Water::None) {
+        return 0;
+    }
+    if (map.cover.at(x, y) == Cover::Forest) {
+        return 120;
+    }
+    return 255;
+}
+
+Texture2D makeTexture(const std::vector<Color>& pixels, int width, int height) {
+    // Image не владеет пикселями, поэтому const_cast безопасен: LoadTextureFromImage только читает.
+    const Image image = {const_cast<Color*>(pixels.data()), width, height, 1,
+                         PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
+    Texture2D texture = LoadTextureFromImage(image);
+    // Мип-уровни нужны на общем плане, когда на пиксель экрана
+    // приходится много клеток: без них карта рябит.
+    GenTextureMipmaps(&texture);
+    SetTextureWrap(texture, TEXTURE_WRAP_CLAMP);
+    return texture;
+}
+
 } // namespace
 
 MapRenderer::MapRenderer(const Map& map) {
     std::vector<Color> pixels;
+    std::vector<Color> snow;
     for (int top = 0; top < map.height(); top += kChunkCells) {
         for (int left = 0; left < map.width(); left += kChunkCells) {
             const int width = std::min(kChunkCells, map.width() - left);
             const int height = std::min(kChunkCells, map.height() - top);
             pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+            snow.resize(pixels.size());
             for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
-                    pixels[static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
-                           static_cast<std::size_t>(x)] = cellColor(map, left + x, top + y);
+                    const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
+                                              static_cast<std::size_t>(x);
+                    pixels[index] = cellColor(map, left + x, top + y);
+                    // Снег тоже с отмывкой: склоны остаются читаемыми.
+                    snow[index] = scale({236, 240, 246, snowAlpha(map, left + x, top + y)},
+                                        std::min(1.0f, hillshade(map, left + x, top + y) * 1.05f));
                 }
             }
 
-            const Image image = {pixels.data(), width, height, 1, PIXELFORMAT_UNCOMPRESSED_R8G8B8A8};
             Chunk chunk;
-            chunk.texture = LoadTextureFromImage(image);
-            // Мип-уровни нужны на общем плане, когда на пиксель экрана
-            // приходится много клеток: без них карта рябит.
-            GenTextureMipmaps(&chunk.texture);
-            SetTextureWrap(chunk.texture, TEXTURE_WRAP_CLAMP);
+            chunk.texture = makeTexture(pixels, width, height);
+            chunk.snow = makeTexture(snow, width, height);
             chunk.bounds = {static_cast<float>(left) * Map::kCellSize,
                             static_cast<float>(top) * Map::kCellSize,
                             static_cast<float>(width) * Map::kCellSize,
@@ -141,6 +169,7 @@ MapRenderer::MapRenderer(const Map& map) {
 MapRenderer::~MapRenderer() {
     for (const Chunk& chunk : chunks_) {
         UnloadTexture(chunk.texture);
+        UnloadTexture(chunk.snow);
     }
 }
 
@@ -150,6 +179,7 @@ void MapRenderer::draw(const Rectangle& visible, float zoom) {
     if (filter != filter_) {
         for (const Chunk& chunk : chunks_) {
             SetTextureFilter(chunk.texture, filter);
+            SetTextureFilter(chunk.snow, filter);
         }
         filter_ = filter;
     }
@@ -163,6 +193,21 @@ void MapRenderer::draw(const Rectangle& visible, float zoom) {
                                   static_cast<float>(chunk.texture.height)};
         DrawTexturePro(chunk.texture, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, WHITE);
         ++chunksDrawn_;
+    }
+}
+
+void MapRenderer::drawSnow(const Rectangle& visible, float amount) {
+    if (amount <= 0.0f) {
+        return;
+    }
+    const Color tint = {255, 255, 255, static_cast<unsigned char>(std::clamp(amount, 0.0f, 1.0f) * 255.0f)};
+    for (const Chunk& chunk : chunks_) {
+        if (!CheckCollisionRecs(chunk.bounds, visible)) {
+            continue;
+        }
+        const Rectangle source = {0.0f, 0.0f, static_cast<float>(chunk.snow.width),
+                                  static_cast<float>(chunk.snow.height)};
+        DrawTexturePro(chunk.snow, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, tint);
     }
 }
 

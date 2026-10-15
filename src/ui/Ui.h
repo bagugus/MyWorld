@@ -3,6 +3,7 @@
 namespace lw {
 
 class CameraController;
+struct Environment;
 class SimDriver;
 class World;
 class WorldRenderer;
@@ -27,9 +28,10 @@ void handleHotkeys(SimDriver& driver);
 // Названия поселений поверх карты, под панелями.
 void drawSettlementLabels(const World& world, const CameraController& camera);
 
-void drawTimePanel(const World& world, SimDriver& driver);
-void drawStatsPanel(const World& world, const SimDriver& driver, const CameraController& camera,
-                    const WorldRenderer& renderer);
+// Время, дата, солнце, погода.
+void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver);
+void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
+                    const CameraController& camera, const WorldRenderer& renderer);
 
 } // namespace ui
 } // namespace lw
