@@ -6,6 +6,7 @@
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
+#include "sim/systems/UtilityAiSystem.h"
 
 #include <imgui.h>
 #include <raylib.h>
@@ -15,6 +16,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <iterator>
 #include <utility>
 
 namespace lw::ui {
@@ -125,20 +127,42 @@ void drawCellInfo(const World& world, Cell cell) {
                     static_cast<unsigned long long>(world.registry().get<Id>(entity).value),
                     buildingName(building.kind),
                     owner != entt::null ? world.registry().get<Settlement>(owner).name.c_str() : "—");
+        if (const auto* supplies = world.registry().try_get<Supplies>(entity)) {
+            ImGui::Text("Припасы: еды %d, воды %d", supplies->food, supplies->water);
+        }
         break;
     }
 }
 
-// Человек под курсором: дом, нужды.
+const char* actionName(Action action) {
+    constexpr const char* kNames[] = {"отдыхает", "спит",      "ест",    "пьёт",
+                                      "ищет припасы", "собирает в лесу", "общается",
+                                      "гуляет",   "уходит домой"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
+    return kNames[static_cast<std::size_t>(action)];
+}
+
+// Человек под курсором: занятие, дом, нужды, черты, оценки действий.
 void drawPersonInfo(const World& world, entt::entity entity, EntityId id) {
     const entt::registry& registry = world.registry();
     const Person& person = registry.get<Person>(entity);
-    ImGui::Text("Человек #%llu%s", static_cast<unsigned long long>(id),
-                person.asleep ? " (спит)" : "");
-    if (person.home != kInvalidId) {
-        ImGui::Text("Дом: здание #%llu", static_cast<unsigned long long>(person.home));
+    ImGui::Text("Человек #%llu", static_cast<unsigned long long>(id));
+    if (const auto* mind = registry.try_get<Mind>(entity)) {
+        ImGui::Text("Сейчас: %s%s", actionName(mind->action),
+                    mind->phase == ActionPhase::Travel ? " (в пути)" : "");
+    }
+    if (const entt::entity home = world.find(person.home); home != entt::null) {
+        const auto* supplies = registry.try_get<Supplies>(home);
+        ImGui::Text("Дом: здание #%llu, еды %d, воды %d",
+                    static_cast<unsigned long long>(person.home),
+                    supplies != nullptr ? supplies->food : 0,
+                    supplies != nullptr ? supplies->water : 0);
     } else {
         ImGui::TextUnformatted("Дом: нет");
+    }
+    if (const auto* carry = registry.try_get<Carry>(entity);
+        carry != nullptr && (carry->food > 0 || carry->water > 0)) {
+        ImGui::Text("Несёт: еды %d, воды %d", carry->food, carry->water);
     }
     if (const auto* needs = registry.try_get<Needs>(entity)) {
         meter("Голод", needs->hunger);
@@ -165,6 +189,13 @@ void drawPersonInfo(const World& world, entt::entity entity, EntityId id) {
             }
             ImGui::EndTable();
         }
+    }
+    if (registry.all_of<Mind, Needs>(entity) && ImGui::TreeNode("Оценки действий")) {
+        const ActionScores scores = evaluateActions(world, entity);
+        for (std::size_t i = 0; i < scores.size(); ++i) {
+            ImGui::Text("%s: %.2f", actionName(static_cast<Action>(i)), scores[i]);
+        }
+        ImGui::TreePop();
     }
 }
 
@@ -347,8 +378,12 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         for (const auto [entity, walker] : world.registry().view<const Walker>().each()) {
             walking += walker.moving() ? 1 : 0;
         }
-        ImGui::Text("Людей: %zu, в пути: %zu", world.registry().view<const Person>().size(),
-                    walking);
+        std::size_t asleep = 0;
+        for (const auto [entity, person] : world.registry().view<const Person>().each()) {
+            asleep += person.asleep ? 1 : 0;
+        }
+        ImGui::Text("Людей: %zu, в пути: %zu, спят: %zu",
+                    world.registry().view<const Person>().size(), walking, asleep);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 

@@ -10,8 +10,12 @@ namespace lw {
 namespace {
 
 constexpr Color kBorderColor = {190, 190, 190, 255};
-constexpr Color kEntityColor = {236, 200, 92, 255};
-constexpr Color kRestingColor = {150, 205, 225, 255};
+constexpr Color kEntityColor = {236, 200, 92, 255};   // в пути
+constexpr Color kRestingColor = {150, 205, 225, 255};  // на месте
+constexpr Color kSleepingColor = {70, 84, 140, 255};
+constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
+constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
+constexpr Color kSocialColor = {226, 128, 196, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
@@ -30,6 +34,32 @@ Color buildingColor(BuildingKind kind) {
         return {204, 132, 92, 255};
     }
     return {198, 164, 124, 255};
+}
+
+// Люди в пути — жёлтые, на месте — по занятию.
+Color entityColor(const entt::registry& registry, entt::entity entity) {
+    const auto* walker = registry.try_get<Walker>(entity);
+    if (walker == nullptr || walker->moving()) {
+        return kEntityColor;
+    }
+    const auto* mind = registry.try_get<Mind>(entity);
+    if (mind == nullptr || mind->phase == ActionPhase::Travel) {
+        return kRestingColor;
+    }
+    switch (mind->action) {
+    case Action::Sleep:
+        return kSleepingColor;
+    case Action::Eat:
+    case Action::Drink:
+        return kEatingColor;
+    case Action::Scavenge:
+    case Action::Forage:
+        return kSearchingColor;
+    case Action::Socialize:
+        return kSocialColor;
+    default:
+        return kRestingColor;
+    }
 }
 
 } // namespace
@@ -74,10 +104,7 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera) {
             position.y < topLeft.y - radius || position.y > bottomRight.y + radius) {
             continue;
         }
-        // Люди в пути — ярче стоящих.
-        const auto* walker = world.registry().try_get<Walker>(entity);
-        DrawCircleV({position.x, position.y}, radius,
-                    walker && !walker->moving() ? kRestingColor : kEntityColor);
+        DrawCircleV({position.x, position.y}, radius, entityColor(world.registry(), entity));
     }
 }
 

@@ -2,6 +2,7 @@
 
 #include "sim/Id.h"
 #include "sim/Map.h"
+#include "sim/Places.h"
 #include "sim/Rng.h"
 #include "sim/SpatialIndex.h"
 #include "sim/TimeScale.h"
@@ -23,10 +24,11 @@ namespace lw {
 // порядок определяет последовательности уже существующих потоков.
 enum class RngStream : std::uint8_t {
     Spawn,
-    Behavior, // распорядок людей (до этапа 4.3 — блуждание тестовых существ)
+    Behavior, // решения людей (Utility AI); до этапа 4.3 — блуждание тестовых существ
     MapGen,
     Weather,
-    Traits, // черты характера при рождении
+    Traits,   // черты характера при рождении
+    Supplies, // припасы в зданиях
     Count
 };
 
@@ -86,6 +88,8 @@ public:
     // Поиск пути для систем симуляции. Ответ зависит только от карты, зданий и
     // запроса, поэтому состояние мира он не меняет и в хеш не входит.
     Pathfinder& pathfinder() { return pathfinder_; }
+    // Поселения, здания, места для питья и сбора — справочник для решений людей.
+    const Places& places() const { return places_; }
 
     // Хеш всего состояния, не зависящий от порядка хранения сущностей.
     // Основа проверок детерминизма (и, позже, сохранения/загрузки).
@@ -109,6 +113,7 @@ private:
     NavGrid nav_;
     NavGraph graph_;
     Pathfinder pathfinder_{nav_, graph_};
+    Places places_;
 
     // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
     SpatialIndex spatial_;

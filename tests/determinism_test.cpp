@@ -1,12 +1,13 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение.
+// люди и движение, нужды, черты, Utility AI.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Map.h"
+#include "sim/Places.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
@@ -17,6 +18,7 @@
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
+#include "sim/systems/UtilityAiSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1461,6 +1463,220 @@ void testTraits() {
     CHECK(braveryA == braveryB);
 }
 
+// --- Utility AI --------------------------------------------------------------
+
+// Справочник мест: поселения с зданиями, места для питья и сбора достижимы и
+// лежат там, где обещано.
+void testPlaces() {
+    const lw::World world(7, regionConfig());
+    const lw::Places& places = world.places();
+    const lw::Map& map = world.map();
+    const lw::NavGrid& nav = world.nav();
+    CHECK(!places.settlements().empty());
+    CHECK(places.waterSpotCount() > 0 && places.forageSpotCount() > 0);
+    std::size_t buildings = 0;
+    bool sorted = true;
+    for (const auto& settlement : places.settlements()) {
+        buildings += settlement.buildings.size();
+        sorted = sorted && std::is_sorted(settlement.buildings.begin(), settlement.buildings.end(),
+                                          [](const auto& a, const auto& b) { return a.id < b.id; });
+        CHECK(places.settlement(settlement.id) == &settlement);
+    }
+    CHECK(buildings == world.registry().view<const lw::Building>().size());
+    CHECK(sorted);
+
+    const auto fresh = [&](lw::Cell c) {
+        const lw::Water w = map.water.at(c.x, c.y);
+        return w == lw::Water::Lake || w == lw::Water::River;
+    };
+    lw::Rng rng(3);
+    int found = 0;
+    bool valid = true;
+    for (int i = 0; i < 200; ++i) {
+        const lw::Cell from{static_cast<int>(rng.below(1024)), static_cast<int>(rng.below(1024))};
+        if (!nav.passable(from)) {
+            continue;
+        }
+        if (const auto water = places.nearestWater(nav, from, 1500.0f)) {
+            ++found;
+            bool shore = fresh(*water);
+            for (int d = 0; d < 4; ++d) {
+                const lw::Cell next{water->x + lw::kNavDx[d], water->y + lw::kNavDy[d]};
+                shore = shore || (map.contains(next) && fresh(next));
+            }
+            const float dx = lw::Map::cellCenter(water->x) - lw::Map::cellCenter(from.x);
+            const float dy = lw::Map::cellCenter(water->y) - lw::Map::cellCenter(from.y);
+            valid = valid && shore && nav.connected(from, *water) &&
+                    dx * dx + dy * dy <= 1500.0f * 1500.0f;
+        }
+        if (const auto forest = places.nearestForage(nav, from, 1500.0f)) {
+            valid = valid && map.cover.at(forest->x, forest->y) == lw::Cover::Forest &&
+                    nav.connected(from, *forest);
+        }
+    }
+    CHECK(found > 0);
+    CHECK(valid);
+}
+
+void testPersonalNight() {
+    // Жаворонок: 21:00–5:30, сова: 23:30–8:00.
+    CHECK(lw::isPersonalNight(0.0f, 21 * 60) && lw::isPersonalNight(0.0f, 3 * 60));
+    CHECK(!lw::isPersonalNight(0.0f, 6 * 60) && !lw::isPersonalNight(0.0f, 20 * 60));
+    CHECK(!lw::isPersonalNight(1.0f, 22 * 60) && lw::isPersonalNight(1.0f, 7 * 60));
+    CHECK(lw::isPersonalNight(1.0f, 23 * 60 + 45) && !lw::isPersonalNight(1.0f, 8 * 60 + 5));
+}
+
+// Мир из одного человека: его сущность и дом.
+struct Lone {
+    lw::World world;
+    entt::entity person = entt::null;
+    entt::entity home = entt::null;
+
+    Lone() : world(7, [] {
+                 lw::WorldConfig config = regionConfig();
+                 config.people = 1;
+                 return config;
+             }()) {
+        entt::registry& registry = world.registry();
+        person = *registry.view<lw::Person>().begin();
+        home = world.find(registry.get<lw::Person>(person).home);
+        registry.get<lw::Traits>(person) = {};
+        registry.get<lw::Needs>(person) = {};
+    }
+
+    void run(int gameMinutes) {
+        const std::uint64_t end =
+            world.tick() + static_cast<std::uint64_t>(gameMinutes) * lw::kTicksPerGameMinute;
+        while (world.tick() < end) {
+            world.step();
+        }
+    }
+};
+
+// Голодный дома ест из своих запасов.
+void testAiEatsAtHome() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    CHECK(lone.home != entt::null);
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home).food = 5;
+    registry.get<lw::Needs>(lone.person).hunger = 0.9f;
+    const lw::ActionScores scores = lw::evaluateActions(lone.world, lone.person);
+    CHECK(scores[static_cast<std::size_t>(lw::Action::Eat)] >
+          scores[static_cast<std::size_t>(lw::Action::Wander)]);
+    lone.run(90);
+    CHECK(registry.get<lw::Needs>(lone.person).hunger < 0.6f);
+    CHECK(registry.get<lw::Supplies>(lone.home).food < 5);
+}
+
+// Дома нет воды — жажду утоляют у реки или в чужих домах.
+void testAiFindsWater() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home).water = 0;
+    registry.get<lw::Needs>(lone.person).thirst = 0.95f;
+    lone.run(8 * 60);
+    CHECK(registry.get<lw::Needs>(lone.person).thirst < 0.6f);
+    CHECK(registry.get<lw::Needs>(lone.person).health > 0.9f);
+}
+
+// В домах нет еды — человек идёт искать её в чужих зданиях или в лес и
+// помнит, где уже искал.
+void testAiScavengesWhenHungry() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    for (const auto [entity, supplies] : registry.view<lw::Supplies>().each()) {
+        supplies.food = 0;
+    }
+    registry.get<lw::Needs>(lone.person).hunger = 0.8f;
+    bool searched = false;
+    for (int minute = 0; minute < 8 * 60; minute += 10) {
+        lone.run(10);
+        const lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+        searched = searched || mind.action == lw::Action::Scavenge ||
+                   mind.action == lw::Action::Forage;
+    }
+    CHECK(searched);
+    const lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    const bool remembers = std::any_of(std::begin(mind.searched), std::end(mind.searched),
+                                       [](lw::EntityId id) { return id != lw::kInvalidId; });
+    CHECK(remembers || mind.action == lw::Action::Forage);
+}
+
+// Найденное в чужом доме несут домой и выкладывают в запасы.
+void testAiCarriesHome() {
+    Lone lone;
+    entt::registry& registry = lone.world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Supplies>(lone.home) = {};
+    registry.get<lw::Carry>(lone.person) = {3, 2};
+    // Уйти от дома и вернуться: на пороге запасы перекладываются.
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const auto away = lone.world.nav().nearestPassable({door.x + 12, door.y + 12}, 8);
+    CHECK(away.has_value());
+    if (!away) {
+        return;
+    }
+    registry.get<lw::Position>(lone.person) = {lw::Map::cellCenter(away->x),
+                                               lw::Map::cellCenter(away->y)};
+    registry.get<lw::Needs>(lone.person).fear = 1.0f; // страшно — домой
+    lw::Mind& mind = registry.get<lw::Mind>(lone.person);
+    mind.phase = lw::ActionPhase::Perform;
+    mind.action = lw::Action::Idle;
+    mind.until = lone.world.tick();
+    lone.world.syncSpatial();
+    lone.run(60);
+    const lw::Supplies& supplies = registry.get<lw::Supplies>(lone.home);
+    const lw::Carry& carry = registry.get<lw::Carry>(lone.person);
+    // Что-то могли уже съесть и выпить, но остальное — дома, а не в руках.
+    CHECK(carry.food == 0 && carry.water == 0);
+    CHECK(supplies.food + supplies.water > 0);
+}
+
+// Двое суток мира: люди едят, пьют и спят, здоровье не падает; ночью спят.
+void testAiSurvives() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 120;
+    lw::World world(7, config);
+    const entt::registry& registry = world.registry();
+    std::size_t asleepAtNight = 0;
+    const std::uint64_t night = lw::nextTimeOfDay(world.tick(), 2, 0);
+    const std::uint64_t end = world.tick() + 2 * lw::kTicksPerGameDay;
+    while (world.tick() < end) {
+        world.step();
+        if (world.tick() == night) {
+            for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+                asleepAtNight += person.asleep ? 1 : 0;
+            }
+        }
+    }
+    float worst = 1.0f;
+    float hunger = 0.0f;
+    float thirst = 0.0f;
+    std::size_t actions = 0;
+    bool kinds[static_cast<std::size_t>(lw::Action::Count)] = {};
+    for (const auto [entity, needs, mind] : registry.view<const lw::Needs, const lw::Mind>().each()) {
+        worst = std::min(worst, needs.health);
+        hunger = std::max(hunger, needs.hunger);
+        thirst = std::max(thirst, needs.thirst);
+        kinds[static_cast<std::size_t>(mind.action)] = true;
+    }
+    for (const bool kind : kinds) {
+        actions += kind ? 1 : 0;
+    }
+    CHECK(asleepAtNight >= 110);
+    CHECK(worst > 0.95f);
+    CHECK(hunger < 0.9f && thirst < 0.9f);
+    CHECK(actions >= 3); // люди заняты разным
+}
+
 } // namespace
 
 int main() {
@@ -1487,6 +1703,13 @@ int main() {
     testLongMovementStep();
     testNeeds();
     testTraits();
+    testPlaces();
+    testPersonalNight();
+    testAiEatsAtHome();
+    testAiFindsWater();
+    testAiScavengesWhenHungry();
+    testAiCarriesHome();
+    testAiSurvives();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

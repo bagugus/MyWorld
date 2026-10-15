@@ -3,6 +3,7 @@
 #include "sim/Id.h"
 #include "sim/Map.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 #include <vector>
@@ -78,6 +79,56 @@ struct Traits {
     float curiosity = 0.5f;   // любопытство: прогулки, дальние места
     float prudence = 0.5f;    // запасливость: ест и пьёт заранее, носит еду домой
     float chronotype = 0.5f;  // 0 — жаворонок, 1 — сова: время сна сдвигается на ±1,5 ч
+};
+
+// Припасы здания, порции: одна порция еды — один приём пищи, воды — несколько
+// глотков. Их съедают жильцы и уносят те, кто ищет еду.
+struct Supplies {
+    std::uint16_t food = 0;
+    std::uint16_t water = 0;
+};
+
+// Что человек несёт с собой: найденное в чужих домах и в лесу. Дома
+// выкладывается в его запасы. Временно, до инвентаря (этап 5).
+struct Carry {
+    std::uint8_t food = 0;
+    std::uint8_t water = 0;
+};
+
+// Действия Utility AI (UtilityAiSystem). Значения попадают в хеш и сохранения:
+// новые добавлять только в конец (перед Count).
+enum class Action : std::uint8_t {
+    Idle,      // отдых на месте
+    Sleep,     // сон дома, а вдали от дома — где застала ночь
+    Eat,       // поесть: из своего запаса, дома или с собой
+    Drink,     // попить: с собой, дома или у реки и озера
+    Scavenge,  // обыскать чужое здание: еда и вода
+    Forage,    // собирать ягоды и грибы в лесу
+    Socialize, // к людям: побыть в компании
+    Wander,    // прогулка к зданию своего или соседнего поселения
+    GoHome,    // домой, переждать страх
+    Count
+};
+
+// Сначала идти к месту действия, потом выполнять.
+enum class ActionPhase : std::uint8_t { Travel, Perform };
+
+// Решения человека: текущее действие и короткая память.
+struct Mind {
+    // Сколько зданий помнится обысканными: туда за едой не идут.
+    static constexpr std::size_t kSearchedMemory = 16;
+
+    Action action = Action::Idle;
+    ActionPhase phase = ActionPhase::Perform;
+    float score = 0.0f;               // оценка действия, когда его выбрали
+    EntityId target = kInvalidId;     // здание действия (Eat, Drink, Scavenge), если есть
+    Cell spot;                        // клетка, где выполняется действие
+    std::uint64_t until = 0;          // тик конца выполнения
+    std::uint64_t nextThink = 0;      // тик следующего пересмотра решения
+    std::uint32_t failures = 0;       // подряд не нашлось пути — для отладки
+    // Обысканные здания, кольцевой буфер.
+    EntityId searched[kSearchedMemory] = {};
+    std::uint8_t searchedNext = 0;
 };
 
 // Движение пешком по пути (MovementSystem).

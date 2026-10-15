@@ -2,10 +2,11 @@
 
 #include "sim/Components.h"
 #include "sim/Hash.h"
+#include "sim/Population.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
-#include "sim/systems/RoutineSystem.h"
+#include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
 
 #include <algorithm>
@@ -29,6 +30,7 @@ World::World(std::uint64_t seed, const WorldConfig& config)
 
     generate();
     initWeather(*this);
+    spawnSupplies(*this);
     spawnPeople(*this, config_.people);
     spatial_.sync(registry_);
 }
@@ -54,12 +56,13 @@ void World::generate() {
 
     nav_.build(map_, registry_);
     graph_.build(nav_);
+    places_.build(map_, nav_, registry_);
 }
 
 void World::step() {
     updateWeather(*this);
     tickNeeds(*this);
-    updateRoutine(*this);
+    updateUtilityAi(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
     spatial_.sync(registry_);
@@ -189,12 +192,31 @@ std::uint64_t World::stateHash() const {
             }
             hasher.add(walker->next);
         }
-        if (const auto* routine = registry_.try_get<Routine>(entity)) {
-            hasher.add(std::uint64_t{8});
-            hasher.add(static_cast<std::uint8_t>(routine->activity));
-            hasher.add(routine->restUntil);
-            hasher.add(routine->bedtime);
-            hasher.add(routine->wakeTime);
+        if (const auto* supplies = registry_.try_get<Supplies>(entity)) {
+            hasher.add(std::uint64_t{11});
+            hasher.add(supplies->food);
+            hasher.add(supplies->water);
+        }
+        if (const auto* carry = registry_.try_get<Carry>(entity)) {
+            hasher.add(std::uint64_t{12});
+            hasher.add(carry->food);
+            hasher.add(carry->water);
+        }
+        if (const auto* mind = registry_.try_get<Mind>(entity)) {
+            hasher.add(std::uint64_t{13});
+            hasher.add(static_cast<std::uint8_t>(mind->action));
+            hasher.add(static_cast<std::uint8_t>(mind->phase));
+            hasher.add(mind->score);
+            hasher.add(mind->target);
+            hasher.add(mind->spot.x);
+            hasher.add(mind->spot.y);
+            hasher.add(mind->until);
+            hasher.add(mind->nextThink);
+            hasher.add(mind->failures);
+            for (const EntityId building : mind->searched) {
+                hasher.add(building);
+            }
+            hasher.add(mind->searchedNext);
         }
     }
     return hasher.value();

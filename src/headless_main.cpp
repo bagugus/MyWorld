@@ -20,6 +20,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <iterator>
 #include <utility>
 #include <vector>
 
@@ -109,6 +110,29 @@ void printPeople(const lw::World& world) {
     }
     std::printf("people %zu: walking %zu, at home %zu, asleep %zu\n", people, walking, atHome,
                 asleep);
+    constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",  "scavenge",
+                                        "forage", "socialize", "wander", "go home"};
+    static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
+    std::size_t actions[std::size(kActions)] = {};
+    for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
+        ++actions[static_cast<std::size_t>(mind.action)];
+    }
+    std::printf("  doing:");
+    for (std::size_t i = 0; i < std::size(kActions); ++i) {
+        std::printf(" %s %zu%s", kActions[i], actions[i], i + 1 < std::size(kActions) ? "," : "\n");
+    }
+    long long food = 0;
+    long long water = 0;
+    for (const auto [entity, supplies] : registry.view<const lw::Supplies>().each()) {
+        food += supplies.food;
+        water += supplies.water;
+    }
+    long long carried = 0;
+    for (const auto [entity, carry] : registry.view<const lw::Carry>().each()) {
+        carried += carry.food;
+    }
+    std::printf("  supplies in buildings: food %lld, water %lld; carried food %lld\n", food,
+                water, carried);
     if (people > 0) {
         const float n = static_cast<float>(people);
         std::printf("  mean needs: hunger %.2f, thirst %.2f, fatigue %.2f, fear %.2f, "
