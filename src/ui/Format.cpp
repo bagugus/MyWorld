@@ -39,7 +39,7 @@ const char* actionName(Action action) {
 }
 
 const char* soundName(SoundKind kind) {
-    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон"};
+    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(SoundKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -49,6 +49,20 @@ const char* zombieStateName(ZombieState state) {
     constexpr const char* kNames[] = {"стоит", "бредёт", "идёт на шум", "преследует",
                                       "идёт с ордой"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(ZombieState::Count));
+    const auto index = static_cast<std::size_t>(state);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* animalKindName(AnimalKind kind) {
+    constexpr const char* kNames[] = {"олень", "кабан", "заяц"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(AnimalKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* animalStateName(AnimalState state) {
+    constexpr const char* kNames[] = {"пасётся", "переходит", "убегает"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(AnimalState::Count));
     const auto index = static_cast<std::size_t>(state);
     return index < std::size(kNames) ? kNames[index] : "—";
 }

@@ -251,4 +251,42 @@ struct Horde {
     EntityId settlement = kInvalidId; // поселение, где орда сейчас
 };
 
+// Животные (AnimalSystem, этап 5.3). Значения попадают в хеш и сохранения:
+// новые добавлять только в конец (перед Count).
+enum class AnimalKind : std::uint8_t {
+    Deer, // олень: стадами, в лесу, пуглив, бегает быстрее всех
+    Boar, // кабан: по одному-трое, в лесу, подпускает ближе
+    Hare, // заяц: в полях и на лугах, мелкий и незаметный
+    Count
+};
+
+enum class AnimalState : std::uint8_t {
+    Graze, // пасётся на месте
+    Roam,  // переходит к другому месту у своих мест
+    Flee,  // убегает от человека или зомби
+    Count
+};
+
+// Животное. Нужд нет: пасётся у родных мест и убегает от тех, кого боится
+// (людей и зомби), по Awareness.
+struct Animal {
+    AnimalKind kind = AnimalKind::Deer;
+    AnimalState state = AnimalState::Graze;
+    Cell anchor;                  // родные места: пасётся вокруг них
+    Cell goal;                    // куда идёт или бежит
+    std::uint64_t until = 0;      // до какого тика пастись на месте
+    EntityId threat = kInvalidId; // от кого бежит (Flee)
+};
+
+// Стая птиц (вороны). Не существо: восприятия у неё нет и глазами её не
+// замечают, но вспугнутая она взлетает с криком, который слышно далеко.
+// Летит по прямой над чем угодно, без Walker: двигает её AnimalSystem.
+struct Flock {
+    std::uint8_t birds = 0;
+    bool flying = false;
+    float toX = 0.0f;        // куда летит, метры
+    float toY = 0.0f;
+    std::uint64_t until = 0; // сидит до этого тика, потом перелетает сама
+};
+
 } // namespace lw

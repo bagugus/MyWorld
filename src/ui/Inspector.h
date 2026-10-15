@@ -13,7 +13,7 @@ class World;
 
 namespace ui {
 
-// Инспектор: ЛКМ по человеку, зомби или зданию выбирает его, в окне — его
+// Инспектор: ЛКМ по существу, стае птиц или зданию выбирает его, в окне — его
 // компоненты, текущее действие, связанные объекты (ссылки «#id» переключают
 // выбор) и биография из летописи.
 // Выбор хранится по EntityId: исчезнет объект — выбор просто станет пустым.
@@ -37,12 +37,14 @@ public:
     void drawPanel();
 
 private:
-    // Человек или зомби под точкой (с запасом в несколько пикселей), иначе
+    // Существо или стая под точкой (с запасом в несколько пикселей), иначе
     // здание; kInvalidId — ничего.
     EntityId pick(float x, float y, float zoom) const;
     void drawPerson(entt::entity entity);
     void drawZombie(entt::entity entity);
     void drawHorde(entt::entity entity);
+    void drawAnimal(entt::entity entity);
+    void drawFlock(entt::entity entity);
     // Позиция, скорость, оставшийся путь.
     void drawMovement(entt::entity entity);
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по

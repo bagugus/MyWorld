@@ -6,6 +6,7 @@
 #include "sim/Perception.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
+#include "sim/systems/AnimalSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/ZombieSystem.h"
@@ -103,7 +104,7 @@ EntityId Inspector::pick(float x, float y, float zoom) const {
     const entt::registry& registry = world_.registry();
     const float radius = std::max(1.0f, kPickPixels / zoom);
     if (const auto person = world_.spatial().nearest(x, y, radius, [&registry](const SpatialHit& hit) {
-            return registry.any_of<Person, Zombie>(hit.entity);
+            return registry.any_of<Person, Zombie, Animal, Flock>(hit.entity);
         })) {
         return person->id;
     }
@@ -197,6 +198,14 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
     }
 
     const Vector2 at = drawnPosition(registry, entity, alpha);
+    if (const auto* flock = registry.try_get<Flock>(entity)) {
+        if (flock->flying) {
+            DrawLineEx(at, {flock->toX, flock->toY}, line, kTargetColor);
+        }
+        const float radius = std::max(8.0f, 8.0f * px);
+        DrawRing(at, radius, radius + line, 0.0f, 360.0f, 32, kSelectionColor);
+        return;
+    }
     // Восприятие: круги — дальность зрения (идущего по открытому месту) и
     // слышимость шагов, линии — к замеченным: зелёные — видит, жёлтые —
     // слышит, серые — помнит, где видел в последний раз.
@@ -250,6 +259,14 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             from = to;
         }
     }
+    if (const auto* animal = registry.try_get<Animal>(entity)) {
+        // Куда идёт — крестиком, родные места — кольцом.
+        const Vector2 spot = cellCenter(animal->goal);
+        const float arm = std::max(Map::kCellSize * 0.5f, 5.0f * px);
+        DrawLineEx({spot.x - arm, spot.y - arm}, {spot.x + arm, spot.y + arm}, line, kTargetColor);
+        DrawLineEx({spot.x - arm, spot.y + arm}, {spot.x + arm, spot.y - arm}, line, kTargetColor);
+        DrawRing(cellCenter(animal->anchor), arm, arm + line, 0.0f, 360.0f, 24, kHomeColor);
+    }
     if (const auto* zombie = registry.try_get<Zombie>(entity)) {
         // Куда идёт — крестиком, родные места — кольцом, вожак орды — линией.
         const Vector2 spot = cellCenter(zombie->goal);
@@ -301,7 +318,7 @@ void Inspector::drawPanel() {
         const entt::registry& registry = world_.registry();
         const entt::entity entity = world_.find(selected_);
         if (selected_ == kInvalidId) {
-            ImGui::TextDisabled("ЛКМ по человеку, зомби или зданию — выбрать");
+            ImGui::TextDisabled("ЛКМ по существу, стае птиц или зданию — выбрать");
         } else if (entity == entt::null) {
             ImGui::Text("Объекта #%llu нет", static_cast<unsigned long long>(selected_));
         } else {
@@ -312,6 +329,10 @@ void Inspector::drawPanel() {
                 drawPerson(entity);
             } else if (registry.all_of<Zombie>(entity)) {
                 drawZombie(entity);
+            } else if (registry.all_of<Animal>(entity)) {
+                drawAnimal(entity);
+            } else if (registry.all_of<Flock>(entity)) {
+                drawFlock(entity);
             } else if (registry.all_of<Horde>(entity)) {
                 drawHorde(entity);
             } else if (registry.all_of<Building>(entity)) {
@@ -699,6 +720,60 @@ void Inspector::drawHorde(entt::entity entity) {
     if (clicked != kInvalidId) {
         select(clicked);
     }
+}
+
+void Inspector::drawAnimal(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const std::uint64_t tick = world_.tick();
+    const Animal& animal = registry.get<Animal>(entity);
+    const AnimalSpec& spec = animalSpec(animal.kind);
+    char duration[32];
+
+    ImGui::Text("Животное #%llu: %s", static_cast<unsigned long long>(selected_),
+                animalKindName(animal.kind));
+    ImGui::Text("Сейчас: %s", animalStateName(animal.state));
+    if (animal.state == AnimalState::Flee && animal.threat != kInvalidId) {
+        ImGui::SameLine();
+        ImGui::TextUnformatted("от");
+        ImGui::SameLine();
+        if (idLink(animal.threat)) {
+            select(animal.threat);
+            return;
+        }
+    }
+    if (animal.state == AnimalState::Graze && animal.until > tick) {
+        formatGameDuration(duration, sizeof(duration), animal.until - tick);
+        ImGui::Text("Пасётся ещё %s", duration);
+    }
+    const Position& position = registry.get<Position>(entity);
+    ImGui::Text("Родные места в %.0f м", std::hypot(Map::cellCenter(animal.anchor.x) - position.x,
+                                                    Map::cellCenter(animal.anchor.y) - position.y));
+    ImGui::Text("Убегает от увиденного ближе %.0f м, от услышанного — ближе %.0f м",
+                spec.fleeSeen, spec.fleeHeard);
+    ImGui::Text("Бегом %.1f м/с, шагом %.1f м/с", spec.runSpeed, spec.walkSpeed);
+    if (!drawPerception(entity)) {
+        return;
+    }
+    drawMovement(entity);
+}
+
+void Inspector::drawFlock(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const std::uint64_t tick = world_.tick();
+    const Flock& flock = registry.get<Flock>(entity);
+    char duration[32];
+    ImGui::Text("Стая птиц #%llu: %d ворон", static_cast<unsigned long long>(selected_),
+                flock.birds);
+    const Position& position = registry.get<Position>(entity);
+    if (flock.flying) {
+        ImGui::Text("Летит: ещё %.0f м", std::hypot(flock.toX - position.x, flock.toY - position.y));
+    } else if (flock.until > tick) {
+        formatGameDuration(duration, sizeof(duration), flock.until - tick);
+        ImGui::Text("Сидит, сама перелетит через %s", duration);
+    } else {
+        ImGui::TextUnformatted("Сейчас взлетит");
+    }
+    ImGui::TextDisabled("Вспугнутая взлетает с криком: его слышат зомби");
 }
 
 void Inspector::drawBuilding(entt::entity entity) {

@@ -313,6 +313,18 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         ImGui::Text("Зомби: %zu, в ордах: %zu, орд: %zu, преследуют: %zu",
                     world.registry().view<const Zombie>().size(), inHordes,
                     world.registry().view<const Horde>().size(), chasing);
+        std::size_t animals = 0;
+        std::size_t animalsFleeing = 0;
+        for (const auto [entity, animal] : world.registry().view<const Animal>().each()) {
+            ++animals;
+            animalsFleeing += animal.state == AnimalState::Flee ? 1 : 0;
+        }
+        std::size_t flying = 0;
+        for (const auto [entity, flock] : world.registry().view<const Flock>().each()) {
+            flying += flock.flying ? 1 : 0;
+        }
+        ImGui::Text("Животных: %zu, убегают: %zu; стай птиц: %zu, в воздухе: %zu", animals,
+                    animalsFleeing, world.registry().view<const Flock>().size(), flying);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
@@ -337,9 +349,15 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
         if (const auto picked = world.spatial().nearest(
                 mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
-                    return world.registry().any_of<Person, Zombie>(hit.entity);
+                    return world.registry().any_of<Person, Zombie, Animal, Flock>(hit.entity);
                 })) {
-            if (const auto* zombie = world.registry().try_get<Zombie>(picked->entity)) {
+            if (const auto* animal = world.registry().try_get<Animal>(picked->entity)) {
+                ImGui::Text("Животное #%llu: %s, %s", static_cast<unsigned long long>(picked->id),
+                            animalKindName(animal->kind), animalStateName(animal->state));
+            } else if (const auto* flock = world.registry().try_get<Flock>(picked->entity)) {
+                ImGui::Text("Стая #%llu: %d ворон%s", static_cast<unsigned long long>(picked->id),
+                            flock->birds, flock->flying ? ", в воздухе" : "");
+            } else if (const auto* zombie = world.registry().try_get<Zombie>(picked->entity)) {
                 ImGui::Text("Зомби #%llu: %s", static_cast<unsigned long long>(picked->id),
                             zombieStateName(zombie->state));
             } else {

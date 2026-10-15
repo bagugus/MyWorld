@@ -21,4 +21,10 @@ void spawnPeople(World& world, int count);
 // у зданий, где никто не живёт рядом, меньше на природе. Поток — RngStream::Zombies.
 void spawnZombies(World& world, int count);
 
+// Расселить count животных и flocks стай птиц (индекс должен уже знать людей):
+// половина — олени стадами по 2–5, четверть — кабаны по 1–3, остальные —
+// зайцы; олени и кабаны — в лесу, зайцы — в полях; все вдали от поселений и
+// людей. Стаи — на любой суше не ближе 150 м к людям. Поток — RngStream::Animals.
+void spawnAnimals(World& world, int count, int flocks);
+
 } // namespace lw

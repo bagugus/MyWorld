@@ -78,6 +78,8 @@ add_library(lw_sim STATIC
     src/sim/nav/Pathfinder.cpp
     src/sim/nav/Pathfinder.h
     src/sim/nav/SearchSpace.h
+    src/sim/systems/AnimalSystem.cpp
+    src/sim/systems/AnimalSystem.h
     src/sim/systems/MovementSystem.cpp
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp

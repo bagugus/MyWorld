@@ -33,6 +33,7 @@ enum class RngStream : std::uint8_t {
     Traits,   // черты характера при рождении
     Supplies, // припасы в зданиях
     Zombies,  // зомби: расселение, решения, орды
+    Animals,  // животные и птицы: расселение, решения
     Count
 };
 
@@ -41,6 +42,8 @@ struct WorldConfig {
     int mapHeight = 2048; // клетки
     int people = 300;     // люди; живут в жилых домах
     int zombies = 400;    // зомби: одиночки в поселениях и на природе, орды
+    int animals = 160;    // олени, кабаны, зайцы — вдали от поселений
+    int flocks = 24;      // стаи ворон
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
@@ -70,6 +73,7 @@ public:
     Rng& rng(RngStream stream) { return streams_[static_cast<std::size_t>(stream)]; }
 
     std::uint64_t seed() const { return seed_; }
+    const WorldConfig& config() const { return config_; }
     std::uint64_t tick() const { return tick_; }
     // Время симуляции в секундах (не игровое: см. sim/TimeScale.h).
     double seconds() const { return static_cast<double>(tick_) / kTicksPerSecond; }

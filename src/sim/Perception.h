@@ -43,6 +43,8 @@ inline constexpr std::uint64_t kContactMemoryTicks = 30 * kTicksPerSecond;
 inline constexpr float kStillVisibility = 0.75f; // стоит на месте
 inline constexpr float kLyingVisibility = 0.5f;  // лежит (спит)
 inline constexpr float kForestVisibility = 0.6f; // в лесу — ещё раз на столько
+// Заметность животного по сравнению с человеком: кабан ниже, заяц мелкий.
+float animalVisibility(AnimalKind kind);
 
 // Контакт подтверждён последним обновлением восприятия (иначе только помнится).
 // Обновление было не раньше чем kPerceptionIntervalTicks тиков назад: в тик
@@ -89,7 +91,8 @@ public:
           people_(registry.storage<Person>()),
           velocities_(registry.storage<Velocity>()),
           minds_(registry.storage<Mind>()),
-          zombies_(registry.storage<Zombie>()) {}
+          zombies_(registry.storage<Zombie>()),
+          animals_(registry.storage<Animal>()) {}
 
     // Есть органы чувств — существо, его можно заметить.
     bool perceivable(entt::entity entity) const { return get(senses_, entity) != nullptr; }
@@ -103,9 +106,11 @@ public:
         const Person* person = get(people_, entity);
         return person != nullptr && person->indoors;
     }
+    bool person(entt::entity entity) const { return get(people_, entity) != nullptr; }
     const Velocity* velocity(entt::entity entity) const { return get(velocities_, entity); }
     const Mind* mind(entt::entity entity) const { return get(minds_, entity); }
     const Zombie* zombie(entt::entity entity) const { return get(zombies_, entity); }
+    const Animal* animal(entt::entity entity) const { return get(animals_, entity); }
 
 private:
     template <typename Storage>
@@ -119,11 +124,13 @@ private:
     const entt::storage_for_t<Velocity>* velocities_;
     const entt::storage_for_t<Mind>* minds_;
     const entt::storage_for_t<Zombie>* zombies_;
+    const entt::storage_for_t<Animal>* animals_;
 };
 
-// Кого наблюдатель замечает и кто для него важнее. Зомби других зомби не
-// замечают — им нужна добыча (созывающий стон слышат, он в World::sounds()).
+// Кого наблюдатель замечает и кто для него важнее. Зомби замечают только
+// людей — им нужна добыча (созывающий стон слышат, он в World::sounds()).
 // Человек ставит зомби вперёд: угрозу он заметит, даже если вокруг толпа.
+// Животное замечает только тех, кого боится, — людей и зомби (этап 5.3).
 enum class Interest : std::uint8_t { Threat, Ordinary, Ignored };
 Interest interestOf(const SenseLookup& lookup, entt::entity observer, entt::entity target);
 
@@ -144,6 +151,7 @@ float sightCost(const Map& map, const NavGrid& nav, float ax, float ay, float bx
 
 // Насколько заметна цель в точке (x, y): 1 — идёт по открытому месту; стоит
 // или лежит (спит) — меньше, в лесу — ещё меньше, дома — не видна (0).
+// Мелкое животное заметно хуже (animalVisibility).
 // Произведение двух частей: позы (bodyVisibility) и укрытия в клетке
 // (coverVisibility).
 float visibilityOf(const World& world, entt::entity target, float x, float y);

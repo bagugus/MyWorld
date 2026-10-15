@@ -5,6 +5,7 @@
 //                                     (--optimal — сравнить каждый путь с оптимальным)
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
 //   lw_headless --seed 42 --zombies 0                    мир без зомби
+//   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -218,6 +219,42 @@ void printZombies(const lw::World& world) {
     std::printf("\n");
 }
 
+// Животные и птицы: сколько каких, чем заняты.
+void printAnimals(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr const char* kKinds[] = {"deer", "boar", "hare"};
+    constexpr const char* kStates[] = {"graze", "roam", "flee"};
+    static_assert(std::size(kKinds) == static_cast<std::size_t>(lw::AnimalKind::Count));
+    static_assert(std::size(kStates) == static_cast<std::size_t>(lw::AnimalState::Count));
+    std::size_t kinds[std::size(kKinds)] = {};
+    std::size_t states[std::size(kStates)] = {};
+    std::size_t animals = 0;
+    for (const auto [entity, animal] : registry.view<const lw::Animal>().each()) {
+        ++animals;
+        ++kinds[static_cast<std::size_t>(animal.kind)];
+        ++states[static_cast<std::size_t>(animal.state)];
+    }
+    std::size_t flocks = 0;
+    std::size_t flying = 0;
+    std::size_t birds = 0;
+    for (const auto [entity, flock] : registry.view<const lw::Flock>().each()) {
+        ++flocks;
+        flying += flock.flying ? 1 : 0;
+        birds += flock.birds;
+    }
+    if (animals == 0 && flocks == 0) {
+        return;
+    }
+    std::printf("animals %zu:", animals);
+    for (std::size_t i = 0; i < std::size(kKinds); ++i) {
+        std::printf(" %s %zu,", kKinds[i], kinds[i]);
+    }
+    for (std::size_t i = 0; i < std::size(kStates); ++i) {
+        std::printf(" %s %zu%s", kStates[i], states[i], i + 1 < std::size(kStates) ? "," : "");
+    }
+    std::printf("; flocks %zu (%zu birds, flying %zu)\n", flocks, birds, flying);
+}
+
 // Летопись: сколько событий каждого вида.
 void printChronicle(const lw::World& world) {
     const lw::Chronicle& chronicle = world.chronicle();
@@ -251,6 +288,8 @@ void printClimate(std::uint64_t seed) {
     config.mapHeight = 64;
     config.people = 0;
     config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
     lw::World world(seed, config);
 
     constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
@@ -476,9 +515,13 @@ int main(int argc, char** argv) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
             config.zombies = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--animals") == 0 && hasValue) {
+            config.animals = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--flocks") == 0 && hasValue) {
+            config.flocks = std::atoi(argv[++i]);
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
-                        "[--zombies N] [--paths N [--optimal]]\n");
+                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]]\n");
             return 2;
         }
     }
@@ -513,6 +556,7 @@ int main(int argc, char** argv) {
     printPeople(world);
     printPerception(world);
     printZombies(world);
+    printAnimals(world);
     printChronicle(world);
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

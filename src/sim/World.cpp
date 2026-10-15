@@ -4,6 +4,7 @@
 #include "sim/Hash.h"
 #include "sim/Population.h"
 #include "sim/gen/MapGenerator.h"
+#include "sim/systems/AnimalSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
@@ -38,6 +39,9 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     // Зомби селятся подальше от людей: индекс должен их уже видеть.
     spatial_.sync(registry_);
     spawnZombies(*this, config_.zombies);
+    spatial_.sync(registry_);
+    // Животные и птицы — вдали от людей.
+    spawnAnimals(*this, config_.animals, config_.flocks);
     spatial_.sync(registry_);
 }
 
@@ -74,6 +78,7 @@ void World::step() {
     updatePerception(*this);
     // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
     updateZombies(*this);
+    updateAnimals(*this);
     updateUtilityAi(*this);
     updateMovement(*this, kTickDt);
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
@@ -303,6 +308,25 @@ std::uint64_t World::stateHash() const {
             hasher.add(horde->x);
             hasher.add(horde->y);
             hasher.add(horde->settlement);
+        }
+        if (const auto* animal = registry_.try_get<Animal>(entity)) {
+            hasher.add(std::uint64_t{18});
+            hasher.add(static_cast<std::uint8_t>(animal->kind));
+            hasher.add(static_cast<std::uint8_t>(animal->state));
+            hasher.add(animal->anchor.x);
+            hasher.add(animal->anchor.y);
+            hasher.add(animal->goal.x);
+            hasher.add(animal->goal.y);
+            hasher.add(animal->until);
+            hasher.add(animal->threat);
+        }
+        if (const auto* flock = registry_.try_get<Flock>(entity)) {
+            hasher.add(std::uint64_t{19});
+            hasher.add(flock->birds);
+            hasher.add(static_cast<std::uint8_t>(flock->flying));
+            hasher.add(flock->toX);
+            hasher.add(flock->toY);
+            hasher.add(flock->until);
         }
     }
     return hasher.value();

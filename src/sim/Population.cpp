@@ -3,9 +3,11 @@
 #include "sim/Components.h"
 #include "sim/Traits.h"
 #include "sim/World.h"
+#include "sim/systems/AnimalSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
+#include <iterator>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -36,6 +38,20 @@ constexpr float kHordePeopleDistance = 250.0f;
 constexpr float kHordeSettlementDistance = 300.0f;
 constexpr float kHordeSpawnRadius = 8.0f; // зомби орды — вокруг её центра
 constexpr int kZombieSpawnAttempts = 200;
+
+// Животные: доли оленей и кабанов (остальные — зайцы), проценты; размеры групп.
+constexpr int kDeerSharePercent = 50;
+constexpr int kBoarSharePercent = 25;
+constexpr int kDeerHerdMin = 2;
+constexpr int kDeerHerdMax = 5;
+constexpr int kBoarGroupMax = 3;
+// Вдали от поселений (от центра) и от людей, метры.
+constexpr float kAnimalSettlementDistance = 400.0f;
+constexpr float kAnimalPeopleDistance = 300.0f;
+constexpr float kFlockPeopleDistance = 150.0f;
+constexpr int kAnimalSpawnAttempts = 400;
+constexpr int kFlockMinBirds = 6;
+constexpr int kFlockMaxBirds = 30;
 
 struct SupplyRange {
     int foodMin, foodMax, waterMin, waterMax;
@@ -75,6 +91,20 @@ bool nearSettlement(const World& world, Cell cell, float radius) {
         }
     }
     return false;
+}
+
+// Главная суша — область, где первое здание; без зданий — kNoRegion (любая).
+NavGrid::Region mainlandOf(const World& world) {
+    const entt::registry& registry = world.registry();
+    EntityId first = kInvalidId;
+    Cell door;
+    for (const auto [entity, id, building] : registry.view<const Id, const Building>().each()) {
+        if (first == kInvalidId || id.value < first) {
+            first = id.value;
+            door = building.door;
+        }
+    }
+    return first == kInvalidId ? NavGrid::kNoRegion : world.nav().region(door);
 }
 
 } // namespace
@@ -260,6 +290,76 @@ void spawnZombies(World& world, int count) {
         if (cell && !nearPeople(world, *cell, kWildPeopleDistance)) {
             createZombie(world, *cell, rng);
             ++spawned;
+        }
+    }
+}
+
+void spawnAnimals(World& world, int count, int flocks) {
+    Rng& rng = world.rng(RngStream::Animals);
+    const NavGrid& nav = world.nav();
+    const Map& map = world.map();
+    const NavGrid::Region mainland = mainlandOf(world);
+    const auto randomLand = [&]() -> std::optional<Cell> {
+        const Cell cell{static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.width()))),
+                        static_cast<int>(rng.below(static_cast<std::uint32_t>(nav.height())))};
+        if (!nav.passable(cell) || map.water.at(cell.x, cell.y) != Water::None ||
+            (mainland != NavGrid::kNoRegion && nav.region(cell) != mainland)) {
+            return std::nullopt;
+        }
+        return cell;
+    };
+
+    const int shares[] = {count * kDeerSharePercent / 100, count * kBoarSharePercent / 100,
+                          count - count * kDeerSharePercent / 100 - count * kBoarSharePercent / 100};
+    for (std::size_t k = 0; k < std::size(shares); ++k) {
+        const auto kind = static_cast<AnimalKind>(k);
+        const AnimalSpec& spec = animalSpec(kind);
+        int left = shares[k];
+        while (left > 0) {
+            int size = 1;
+            if (kind == AnimalKind::Deer) {
+                size = rng.rangeInt(kDeerHerdMin, kDeerHerdMax);
+            } else if (kind == AnimalKind::Boar) {
+                size = rng.rangeInt(1, kBoarGroupMax);
+            }
+            size = std::min(size, left);
+            left -= size;
+            std::optional<Cell> anchor;
+            for (int attempt = 0; attempt < kAnimalSpawnAttempts && !anchor; ++attempt) {
+                const auto cell = randomLand();
+                if (cell && (map.cover.at(cell->x, cell->y) == Cover::Forest) == spec.forest &&
+                    !nearSettlement(world, *cell, kAnimalSettlementDistance) &&
+                    !nearPeople(world, *cell, kAnimalPeopleDistance)) {
+                    anchor = cell;
+                }
+            }
+            if (!anchor) {
+                continue;
+            }
+            for (int i = 0; i < size; ++i) {
+                Cell cell = *anchor;
+                for (int attempt = 0; attempt < 8; ++attempt) {
+                    const Cell candidate{anchor->x + rng.rangeInt(-3, 3),
+                                         anchor->y + rng.rangeInt(-3, 3)};
+                    if (nav.passable(candidate) &&
+                        map.water.at(candidate.x, candidate.y) == Water::None &&
+                        nav.connected(*anchor, candidate)) {
+                        cell = candidate;
+                        break;
+                    }
+                }
+                createAnimal(world, kind, cell, rng);
+            }
+        }
+    }
+
+    for (int i = 0; i < flocks; ++i) {
+        for (int attempt = 0; attempt < kAnimalSpawnAttempts; ++attempt) {
+            const auto cell = randomLand();
+            if (cell && !nearPeople(world, *cell, kFlockPeopleDistance)) {
+                createFlock(world, *cell, rng.rangeInt(kFlockMinBirds, kFlockMaxBirds), rng);
+                break;
+            }
         }
     }
 }

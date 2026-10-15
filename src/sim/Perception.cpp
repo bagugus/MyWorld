@@ -89,6 +89,20 @@ float sightCost(const Map& map, const NavGrid& nav, float ax, float ay, float bx
     return open ? cost : kNoSight;
 }
 
+float animalVisibility(AnimalKind kind) {
+    switch (kind) {
+    case AnimalKind::Deer:
+        return 1.0f;
+    case AnimalKind::Boar:
+        return 0.8f;
+    case AnimalKind::Hare:
+        return 0.4f;
+    case AnimalKind::Count:
+        break;
+    }
+    return 1.0f;
+}
+
 float bodyVisibility(const SenseLookup& lookup, entt::entity target) {
     if (lookup.indoors(target)) {
         return 0.0f;
@@ -99,7 +113,9 @@ float bodyVisibility(const SenseLookup& lookup, entt::entity target) {
     const Velocity* velocity = lookup.velocity(target);
     const bool moving = velocity != nullptr && velocity->x * velocity->x + velocity->y * velocity->y >=
                                                    kMovingSpeed * kMovingSpeed;
-    return moving ? 1.0f : kStillVisibility;
+    const Animal* animal = lookup.animal(target);
+    return (moving ? 1.0f : kStillVisibility) *
+           (animal != nullptr ? animalVisibility(animal->kind) : 1.0f);
 }
 
 float coverVisibility(const Map& map, float x, float y) {
@@ -148,7 +164,10 @@ Noise noiseOf(const SenseLookup& lookup, entt::entity entity) {
 Interest interestOf(const SenseLookup& lookup, entt::entity observer, entt::entity target) {
     const bool targetZombie = lookup.zombie(target) != nullptr;
     if (lookup.zombie(observer) != nullptr) {
-        return targetZombie ? Interest::Ignored : Interest::Ordinary;
+        return lookup.person(target) ? Interest::Ordinary : Interest::Ignored;
+    }
+    if (lookup.animal(observer) != nullptr) {
+        return targetZombie || lookup.person(target) ? Interest::Threat : Interest::Ignored;
     }
     return targetZombie ? Interest::Threat : Interest::Ordinary;
 }

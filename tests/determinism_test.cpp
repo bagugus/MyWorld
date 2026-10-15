@@ -1,6 +1,7 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
-// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби.
+// люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
+// животные и птицы.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -19,6 +20,7 @@
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
+#include "sim/systems/AnimalSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
@@ -54,7 +56,9 @@ lw::WorldConfig smallConfig(int people) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = people;
-    config.zombies = 0; // зомби — в своих тестах
+    config.zombies = 0; // зомби, животные и птицы — в своих тестах
+    config.animals = 0;
+    config.flocks = 0;
     return config;
 }
 
@@ -167,6 +171,8 @@ lw::WorldConfig regionConfig() {
     config.mapHeight = 1024;
     config.people = 0;
     config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
     return config;
 }
 
@@ -311,6 +317,8 @@ void testEntitiesStayInWorld() {
     config.mapHeight = 8;
     config.people = 100;
     config.zombies = 0;
+    config.animals = 0;
+    config.flocks = 0;
     // Люди и, отдельно, зомби: рядом с людьми зомби не селятся.
     lw::WorldConfig undead = config;
     undead.people = 0;
@@ -2822,6 +2830,119 @@ void testShelter() {
     CHECK(field.count(lw::ChronicleKind::Fled) == 0);
 }
 
+
+// --- Животные и птицы (этап 5.3) ---------------------------------------------
+
+// Расселение: сколько просили, по видам, вдали от людей; один seed — один мир.
+void testAnimalSpawn() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 40;
+    config.animals = 40;
+    config.flocks = 6;
+    lw::World a(11, config);
+    lw::World b(11, config);
+    const entt::registry& registry = a.registry();
+    CHECK(registry.view<const lw::Animal>().size() == 40);
+    CHECK(registry.view<const lw::Flock>().size() == 6);
+    std::size_t kinds[3] = {};
+    float closest = 1e9f;
+    for (const auto [entity, animal, position] :
+         registry.view<const lw::Animal, const lw::Position>().each()) {
+        CHECK((registry.all_of<lw::Senses, lw::Awareness, lw::Walker, lw::Velocity>(entity)));
+        ++kinds[static_cast<std::size_t>(animal.kind)];
+        for (const auto [other, person, at] :
+             registry.view<const lw::Person, const lw::Position>().each()) {
+            closest = std::min(closest, std::hypot(at.x - position.x, at.y - position.y));
+        }
+    }
+    CHECK(kinds[0] == 20 && kinds[1] == 10 && kinds[2] == 10);
+    CHECK(closest >= 300.0f - 4.0f * lw::Map::kCellSize);
+
+    CHECK(a.stateHash() == b.stateHash());
+    for (int i = 0; i < 3000; ++i) {
+        a.step();
+        b.step();
+    }
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Олень видит человека — убегает бегом и отрывается.
+void testAnimalFlees() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    const entt::entity deer = lw::createAnimal(field.world, lw::AnimalKind::Deer, field.at(12), field.rng);
+    field.world.syncSpatial();
+    const entt::registry& registry = field.world.registry();
+    field.steps(2 * lw::kAnimalThinkTicks);
+    const lw::Animal& animal = registry.get<lw::Animal>(deer);
+    CHECK(animal.state == lw::AnimalState::Flee);
+    CHECK(animal.threat == field.id(person));
+    const lw::Walker& walker = registry.get<lw::Walker>(deer);
+    CHECK(walker.moving());
+    CHECK(std::abs(walker.speed * walker.pace - lw::animalSpec(lw::AnimalKind::Deer).runSpeed) < 1e-3f);
+    field.steps(5 * lw::kTicksPerSecond);
+    CHECK(field.distance(deer, person) > 70.0f);
+}
+
+// Зомби животных не замечают, а животные от зомби убегают.
+void testZombieIgnoresAnimals() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    field.dismiss(field.people[0]);
+    const entt::entity boar = lw::createAnimal(field.world, lw::AnimalKind::Boar, field.at(0), field.rng);
+    const entt::entity zombie = field.zombie(5);
+    const entt::registry& registry = field.world.registry();
+    field.steps(2 * lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(boar)) == nullptr);
+    CHECK(registry.get<lw::Zombie>(zombie).state != lw::ZombieState::Chase);
+    CHECK(registry.get<lw::Awareness>(boar).find(field.id(zombie)) != nullptr);
+    CHECK(registry.get<lw::Animal>(boar).state == lw::AnimalState::Flee);
+}
+
+// Человек рядом — стая взлетает с криком; зомби, который человека не видит,
+// идёт на крик. Стая улетает на сотни метров и садится.
+void testBirdsScatter() {
+    Field field(1);
+    CHECK(field.open && !field.people.empty());
+    if (!field.open || field.people.empty()) {
+        return;
+    }
+    const entt::entity person = field.people[0];
+    field.freeze(person, 1);
+    const entt::entity flock = lw::createFlock(field.world, field.at(0), 12, field.rng);
+    const entt::entity zombie = field.zombie(22); // 88 м: человека не видит, крик слышит
+    const entt::registry& registry = field.world.registry();
+    const lw::Position start = registry.get<lw::Position>(flock);
+    for (std::uint64_t i = 0; i < lw::kAnimalThinkTicks && !registry.get<lw::Flock>(flock).flying; ++i) {
+        field.steps(1);
+    }
+    CHECK(registry.get<lw::Flock>(flock).flying);
+    const bool cried = std::any_of(
+        field.world.sounds().begin(), field.world.sounds().end(), [&](const lw::Sound& sound) {
+            return sound.kind == lw::SoundKind::Birds && sound.source == field.id(flock);
+        });
+    CHECK(cried);
+    field.steps(lw::kZombieThinkTicks);
+    CHECK(registry.get<lw::Awareness>(zombie).find(field.id(person)) == nullptr ||
+          !registry.get<lw::Awareness>(zombie).find(field.id(person))->seen);
+    CHECK(registry.get<lw::Zombie>(zombie).state == lw::ZombieState::Investigate);
+
+    for (int second = 0; second < 90 && registry.get<lw::Flock>(flock).flying; ++second) {
+        field.steps(lw::kTicksPerSecond);
+    }
+    CHECK(!registry.get<lw::Flock>(flock).flying);
+    const lw::Position& end = registry.get<lw::Position>(flock);
+    CHECK(std::hypot(end.x - start.x, end.y - start.y) >= 290.0f);
+}
+
 } // namespace
 
 int main() {
@@ -2876,6 +2997,10 @@ int main() {
     testPersonFlees();
     testHordes();
     testShelter();
+    testAnimalSpawn();
+    testAnimalFlees();
+    testZombieIgnoresAnimals();
+    testBirdsScatter();
 
     if (failures == 0) {
         std::printf("all tests passed\n");
