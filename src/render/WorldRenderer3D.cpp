@@ -5,6 +5,7 @@
 #include "render/Models3D.h"
 #include "render/Palette.h"
 #include "render/Terrain3D.h"
+#include "render/TreeLayout.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/TimeScale.h"
@@ -36,8 +37,8 @@ constexpr float kBeaconMinSize = 0.35f;
 constexpr Color kBeaconColor = {255, 236, 120, 255};
 // Окна, двери и крыльцо — когда метр на экране не меньше этого, пикселей.
 constexpr float kDetailPixels = 1.0f;
-// Стая в полёте — над деревьями.
-constexpr float kFlightHeight = 14.0f;
+// Стая в полёте — над деревьями (самые высокие — около 30 м).
+constexpr float kFlightHeight = 32.0f;
 // Настил моста — толщиной в полметра, клетка дороги над водой.
 constexpr float kBridgeThickness = 0.5f;
 constexpr Color kBridgeAsphalt = {84, 84, 90, 255};
@@ -137,7 +138,8 @@ void drawSmoke(const World& world, const WorldEvent& event, const Terrain3D& ter
 
 } // namespace
 
-WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map) : terrain_(map, textures) {
+WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
+    : terrain_(map, textures), trees_(map, terrain_) {
     // Перила — по краям настила над открытой водой, опоры — через клетку до дна.
     const auto key = [&map](Cell cell) {
         return static_cast<std::int64_t>(cell.y) * map.width() + cell.x;
@@ -203,6 +205,15 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map) : terrai
     }
 }
 
+float WorldRenderer3D::snowCover(const World& world) const {
+    if (!foliageYear_) {
+        return world.weather().snowCover;
+    }
+    // Сезон вручную: зимой — снег, как обычно бывает к середине зимы.
+    const float year = *foliageYear_;
+    return 0.85f * std::clamp((year - 0.76f) / 0.04f, 0.0f, 1.0f) * std::clamp((1.0f - year) / 0.04f, 0.0f, 1.0f);
+}
+
 void WorldRenderer3D::setDrawDistance(float meters) {
     drawDistance_ = std::clamp(meters, kMinDrawDistance, kMaxDrawDistance);
 }
@@ -235,10 +246,11 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     const Vector3 eye = view.position;
     ++frame_;
     dt_ = std::min(GetFrameTime(), 0.1f);
-    const float snow = world.weather().snowCover;
+    const float snow = snowCover(world);
+    const Environment environment = environmentAt(world);
 
     // Свет кадра: солнце или луна, небо, дымка (сверху её видно меньше).
-    const SceneLight light = sceneLightAt(environmentAt(world), world.weather());
+    const SceneLight light = sceneLightAt(environment, world.weather());
     const float height = std::max(0.0f, eye.y - terrain_.surfaceAt(eye.x, eye.z));
     shading_.setLight(light, eye, 1.0f / (1.0f + height / kHazeHeight));
 
@@ -259,6 +271,16 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         }
     }
 
+    // Деревья: какие сетки нужны с этой точки (и для теней тоже).
+    Trees3D::Look trees;
+    trees.year = foliageYear_.value_or(static_cast<float>(environment.time.yearFraction));
+    trees.snow = snow;
+    trees.wind = {light.windX, light.windZ};
+    trees.time = static_cast<float>(GetTime());
+    if (treesEnabled_) {
+        trees_.update(view, kNearTreeRange, std::min(drawDistance_, kMaxTreeRange));
+    }
+
     // Тени: квадрат вокруг точки взгляда, чуть вперёд по взгляду.
     const float distance = Vector3Distance(eye, view.target);
     if (shadowsEnabled_ && distance < kShadowsOff) {
@@ -270,6 +292,9 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         const Vector3 center = Vector3Add(view.target, Vector3Scale(ahead, 0.35f * radius));
         if (shading_.beginShadowPass(center, radius)) {
             terrain_.drawShadowCasters(view, shading_.shadowCenter(), shading_.shadowRadius());
+            if (treesEnabled_) {
+                trees_.drawShadows(shading_, trees);
+            }
             rlSetTexture(rlGetTextureIdDefault());
             rlBegin(RL_QUADS);
             emitScene(world, camera, alpha, true);
@@ -285,7 +310,11 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
 
     BeginMode3D(view);
     // Даже полный покров оставляет карту читаемой.
-    terrain_.drawGround(view, snow * 0.85f, shading_);
+    const Foliage foliage = averageFoliageAt(trees.year);
+    terrain_.drawGround(view, snow * 0.85f, {foliage.leaves, foliage.turn, foliage.fresh}, shading_);
+    if (treesEnabled_) {
+        trees_.draw(shading_, trees);
+    }
 
     // Всё непрозрачное — одним набором четырёхугольников без текстуры.
     shading_.beginModels();
@@ -326,7 +355,7 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         return Vector3DotProduct(Vector3Subtract(point, eye), forward) < -size;
     };
     const float dt = dt_;
-    const float snow = world.weather().snowCover;
+    const float snow = snowCover(world);
 
     const entt::registry& registry = world.registry();
     if (!shadowPass) {

@@ -148,6 +148,10 @@ if(LW_BUILD_APP)
         src/render/Palette.h
         src/render/Terrain3D.cpp
         src/render/Terrain3D.h
+        src/render/TreeLayout.cpp
+        src/render/TreeLayout.h
+        src/render/Trees3D.cpp
+        src/render/Trees3D.h
         src/render/WeatherRenderer.cpp
         src/render/WeatherRenderer.h
         src/render/WorldRenderer.cpp

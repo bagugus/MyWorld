@@ -462,6 +462,30 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
             ImGui::Text("Плиток рельефа: %d, треугольников: %d тыс.", terrain.tilesDrawn(),
                         terrain.trianglesDrawn() / 1000);
             ImGui::Text("Сеток в памяти: %d", terrain.meshesLoaded());
+            bool trees = renderer3d.treesEnabled();
+            if (ImGui::Checkbox("Деревья", &trees)) {
+                renderer3d.setTreesEnabled(trees);
+            }
+            if (trees) {
+                const Trees3D& forest = renderer3d.trees();
+                ImGui::SameLine();
+                ImGui::Text("в кадре %d, сеток %d (в памяти %d)", forest.treesDrawn(), forest.meshesDrawn(),
+                            forest.meshesLoaded());
+                // Облик листвы и снега на любой сезон — без промотки времени.
+                bool preview = renderer3d.foliageYear().has_value();
+                if (ImGui::Checkbox("Сезон вручную", &preview)) {
+                    renderer3d.setFoliageYear(preview ? std::optional<float>(static_cast<float>(
+                                                            environment.time.yearFraction))
+                                                      : std::nullopt);
+                }
+                if (preview) {
+                    float year = *renderer3d.foliageYear();
+                    ImGui::SameLine();
+                    if (ImGui::SliderFloat("##foliage", &year, 0.0f, 0.999f, "доля года %.2f")) {
+                        renderer3d.setFoliageYear(year);
+                    }
+                }
+            }
             const SceneShading& shading = renderer3d.shading();
             const SceneLight& light = shading.light();
             ImGui::Text("Свет: %s %.2f, рассеянный %.2f", light.moonlit ? "луна" : "солнце",

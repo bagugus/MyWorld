@@ -1,6 +1,7 @@
 // Living World — приложение с окном.
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
-//                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--screenshot FILE.png]
+//                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
+//                [--screenshot FILE.png]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -13,7 +14,10 @@
 // --3d          начать с 3D-вида (V переключает вид); --view задаёт точку и зум и в 3D
 // --orbit       3D-вид под углом: YAW — с какой стороны (0 — с юга, 90 — с востока),
 //               PITCH — наклон над горизонтом, градусы
-// --screenshot  нарисовать несколько кадров, сохранить снимок окна и выйти
+// --foliage     облик сезона в 3D (листва и снег) — как на долю года F (0 — 1 марта,
+//               0,3 — лето, 0,6 — осень, 0,9 — зима), а не по календарю; только облик
+// --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
+//               сохранить снимок окна и выйти
 
 #include "render/CameraController.h"
 #include "render/Palette.h"
@@ -54,6 +58,7 @@ int main(int argc, char** argv) {
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
+    std::optional<float> foliage;
     std::optional<lw::EventKind> event;
     lw::WorldConfig config;
     for (int i = 1; i < argc; ++i) {
@@ -83,6 +88,8 @@ int main(int argc, char** argv) {
             const float yaw = std::strtof(argv[++i], nullptr);
             orbit = {{yaw, std::strtof(argv[++i], nullptr)}};
             view3d = true;
+        } else if (std::strcmp(argv[i], "--foliage") == 0 && i + 1 < argc) {
+            foliage = std::strtof(argv[++i], nullptr);
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
             navGraph = true;
         } else if (std::strcmp(argv[i], "--zombies") == 0 && i + 1 < argc) {
@@ -118,6 +125,7 @@ int main(int argc, char** argv) {
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
         camera.setTerrain(&renderer3d.terrain());
+        renderer3d.setFoliageYear(foliage);
         if (orbit) {
             camera.setOrbitAngles(orbit->first, orbit->second);
         }
@@ -140,6 +148,7 @@ int main(int argc, char** argv) {
         }
 
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
+        constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
         for (int frame = 0; !WindowShouldClose(); ++frame) {
             const float dt = GetFrameTime();
 
@@ -184,7 +193,8 @@ int main(int argc, char** argv) {
 
             EndDrawing();
 
-            if (screenshot != nullptr && frame == kScreenshotFrame) {
+            const bool settled = !camera.orbit() || renderer3d.trees().pending() == 0;
+            if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait)) {
                 const Image image = LoadImageFromScreen();
                 ExportImage(image, screenshot);
                 UnloadImage(image);

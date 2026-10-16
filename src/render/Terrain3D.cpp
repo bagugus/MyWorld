@@ -78,7 +78,10 @@ in vec2 fragTexCoord;
 in vec3 fragNormal;
 uniform sampler2D texture0; // карта
 uniform sampler2D texture1; // снег: альфа — сколько клетки заносит
+uniform sampler2D texture2; // лиственный лес: красный — доля лиственных
 uniform float snowAmount;
+uniform vec3 foliage;       // листва, пожелтение, молодая листва — в среднем
+
 out vec4 finalColor;
 void main() {
     vec2 size = vec2(textureSize(texture0, 0));
@@ -90,6 +93,13 @@ void main() {
     vec2 jitter = (texture(detailMap, p / 12.0).ba - 0.5) * 0.5 * near;
     vec2 uv = fragTexCoord + jitter / size;
     vec3 base = texture(texture0, uv).rgb;
+    // Лиственный лес под кронами и вдали, где деревьев уже нет, — по сезону.
+    float deciduous = texture(texture2, uv).r;
+    if (deciduous > 0.0) {
+        vec3 green = base * mix(vec3(1.08, 1.06, 0.92), vec3(1.35, 1.32, 0.8), foliage.z);
+        vec3 leafy = mix(green, vec3(0.44, 0.33, 0.12), foliage.y);
+        base = mix(base, mix(vec3(0.27, 0.24, 0.2), leafy, foliage.x), deciduous);
+    }
     float fine = texture(detailMap, p / 21.0).r;
     float broad = texture(detailMap, p / 230.0).g;
     base *= 0.78 + 0.26 * fine + 0.18 * broad;
@@ -199,7 +209,8 @@ void main() {
 }
 )";
 
-// Коробка целиком вне пирамиды видимости: все углы за одной из её плоскостей.
+} // namespace
+
 bool outsideFrustum(const Matrix& m, Vector3 min, Vector3 max) {
     float clip[8][4];
     for (int i = 0; i < 8; ++i) {
@@ -225,6 +236,8 @@ bool outsideFrustum(const Matrix& m, Vector3 min, Vector3 max) {
     }
     return false;
 }
+
+namespace {
 
 Mesh allocateMesh(int vertexCount, int triangleCount, bool normals = false) {
     Mesh mesh{};
@@ -344,6 +357,7 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
 
     groundShader_ = SceneShading::loadShader(kGroundVs, kGroundFs);
     snowLoc_ = GetShaderLocation(groundShader_, "snowAmount");
+    foliageLoc_ = GetShaderLocation(groundShader_, "foliage");
     groundMaterial_ = LoadMaterialDefault();
     groundMaterial_.shader = groundShader_;
     casterMaterial_ = LoadMaterialDefault();
@@ -747,7 +761,7 @@ void Terrain3D::drawShadowCasters(const Camera3D& camera, Vector2 center, float 
     rlEnableBackfaceCulling();
 }
 
-void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, const SceneShading& shading) {
+void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, const SceneShading& shading) {
     ++frame_;
     textures_.useGroundFilter();
     // Внутри BeginMode3D модельно-видовая матрица — это вид камеры.
@@ -779,6 +793,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, const Scene
     shading.apply(groundShader_);
     const float snow = std::clamp(snowAmount, 0.0f, 1.0f);
     SetShaderValue(groundShader_, snowLoc_, &snow, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(groundShader_, foliageLoc_, &foliage, SHADER_UNIFORM_VEC3);
     // Юбки видны с обеих сторон; снизу на землю не смотрят, так что отсечение не нужно.
     rlDisableBackfaceCulling();
     for (const Visible& visible : visible_) {
@@ -786,6 +801,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, const Scene
         const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
         groundMaterial_.maps[MATERIAL_MAP_DIFFUSE].texture = chunk.texture;
         groundMaterial_.maps[MATERIAL_MAP_SPECULAR].texture = chunk.snow;
+        groundMaterial_.maps[MATERIAL_MAP_NORMAL].texture = chunk.forest;
         const Mesh& mesh = tile.ground[static_cast<std::size_t>(visible.level)];
         DrawMesh(mesh, groundMaterial_, MatrixIdentity());
         trianglesDrawn_ += mesh.triangleCount;

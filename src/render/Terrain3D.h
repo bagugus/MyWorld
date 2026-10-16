@@ -14,6 +14,9 @@ namespace lw {
 class MapRenderer;
 class SceneShading;
 
+// Коробка целиком вне пирамиды видимости viewProjection: все углы за одной из её плоскостей.
+bool outsideFrustum(const Matrix& viewProjection, Vector3 min, Vector3 max);
+
 // Рельеф и вода в 3D (этап 11.2). Высоты берутся из слоёв карты: сетка высот —
 // по углам клеток (среднее соседних клеток; у воды — дно), поверх неё — вода на
 // своём уровне (море — 0 м, озёра и реки — дно + глубина). Берег — там, где
@@ -56,8 +59,9 @@ public:
     const std::vector<Bridge>& bridges() const { return bridges_; }
 
     // Земля со снегом (amount 0..1), светом, тенью и дымкой. Между BeginMode3D
-    // и EndMode3D, первым.
-    void drawGround(const Camera3D& camera, float snowAmount, const SceneShading& shading);
+    // и EndMode3D, первым. Лиственный лес на земле — по средней листве
+    // (TreeLayout: averageFoliageAt): весной светлеет, осенью желтеет, зимой сереет.
+    void drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, const SceneShading& shading);
     // Вода — после всего непрозрачного: она полупрозрачна. time — секунды для ряби.
     void drawWater(float time, const SceneShading& shading);
     // Рельеф в карту теней: плитки квадрата center ± radius тех же уровней, что в кадре.
@@ -126,6 +130,7 @@ private:
 
     Shader groundShader_{};
     int snowLoc_ = -1;
+    int foliageLoc_ = -1;
     Material groundMaterial_{};
     Material casterMaterial_{}; // рельеф в карте теней: шейдер по умолчанию
     Material waterMaterial_{};

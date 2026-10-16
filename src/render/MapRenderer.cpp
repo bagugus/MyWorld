@@ -1,5 +1,6 @@
 #include "render/MapRenderer.h"
 
+#include "render/TreeLayout.h"
 #include "sim/Map.h"
 
 #include <rlgl.h>
@@ -146,6 +147,7 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
     std::vector<Color> pixels;
     std::vector<Color> plain;
     std::vector<Color> snow;
+    std::vector<Color> forest;
     for (int top = 0; top < map.height(); top += kChunkCells) {
         for (int left = 0; left < map.width(); left += kChunkCells) {
             const int width = std::min(kChunkCells, map.width() - left);
@@ -153,6 +155,7 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
             pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
             plain.resize(pixels.size());
             snow.resize(pixels.size());
+            forest.resize(pixels.size());
             for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
                     const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
@@ -162,6 +165,8 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
                     // Снег тоже с отмывкой: склоны остаются читаемыми.
                     snow[index] = scale({236, 240, 246, snowAlpha(map, left + x, top + y)},
                                         std::min(1.0f, hillshade(map, left + x, top + y) * 1.05f));
+                    const float deciduous = deciduousShareOf(map, {left + x, top + y});
+                    forest[index] = {static_cast<unsigned char>(std::lround(deciduous * 255.0f)), 0, 0, 255};
                 }
             }
 
@@ -169,6 +174,9 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
             chunk.texture = makeTexture(pixels, width, height);
             chunk.plain = makeTexture(plain, width, height);
             chunk.snow = makeTexture(snow, width, height);
+            // Маска — плавная: на земле не видно квадратов клеток.
+            chunk.forest = makeTexture(forest, width, height);
+            SetTextureFilter(chunk.forest, TEXTURE_FILTER_TRILINEAR);
             chunk.bounds = {static_cast<float>(left) * Map::kCellSize,
                             static_cast<float>(top) * Map::kCellSize,
                             static_cast<float>(width) * Map::kCellSize,
@@ -183,6 +191,7 @@ MapRenderer::~MapRenderer() {
         UnloadTexture(chunk.texture);
         UnloadTexture(chunk.plain);
         UnloadTexture(chunk.snow);
+        UnloadTexture(chunk.forest);
     }
 }
 
@@ -240,6 +249,7 @@ MapRenderer::GroundChunk MapRenderer::groundChunk(int x, int y) const {
     GroundChunk result;
     result.texture = chunk.plain;
     result.snow = chunk.snow;
+    result.forest = chunk.forest;
     result.left = x / kChunkCells * kChunkCells;
     result.top = y / kChunkCells * kChunkCells;
     result.width = chunk.texture.width;

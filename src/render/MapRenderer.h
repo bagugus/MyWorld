@@ -29,6 +29,7 @@ public:
     struct GroundChunk {
         Texture2D texture{}; // без отмывки: в 3D склоны лепит свет
         Texture2D snow{};    // в 3D нужна только альфа: сколько клетки заносит
+        Texture2D forest{};  // красный — доля лиственных в клетке леса (render/TreeLayout)
         int left = 0;
         int top = 0;
         int width = 0;
@@ -47,6 +48,7 @@ private:
         Texture2D texture{};
         Texture2D plain{}; // без отмывки рельефа — для 3D
         Texture2D snow{}; // белая маска: прозрачна на воде, полупрозрачна на лесе и дорогах
+        Texture2D forest{}; // лиственный лес — для 3D: осенью желтеет, зимой сереет
         Rectangle bounds{}; // метры
     };
 
