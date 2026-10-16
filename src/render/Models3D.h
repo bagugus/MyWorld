@@ -45,6 +45,7 @@ struct HumanLook {
     bool running = false; // наклон вперёд
     bool aiming = false;  // держит оружие перед собой
     WeaponKind weapon = WeaponKind::Fists;
+    bool simple = false;  // издали: ноги одним блоком, без рук и оружия
 };
 void emitHuman(const ModelFrame& frame, const HumanLook& look, Gait gait);
 
@@ -81,5 +82,12 @@ void emitBuilding(const BuildingModel& model);
 
 // Коробка по осям мира от min до max (с дном, если bottom).
 void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom = false);
+
+// Метка выбранного: светящаяся перевёрнутая пирамидка высотой size, острием в tip.
+void emitBeacon(Vector3 tip, float size, Color color);
+
+// Насколько видны следующие модели: 1 — целиком, меньше — растворяются точками
+// (у края дальности прорисовки). Пишется во вторую текстурную координату грани.
+void setModelFade(float visible);
 
 } // namespace lw

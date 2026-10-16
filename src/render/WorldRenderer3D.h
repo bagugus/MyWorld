@@ -37,6 +37,14 @@ public:
     const SceneShading& shading() const { return shading_; }
     bool shadowsEnabled() const { return shadowsEnabled_; }
     void setShadowsEnabled(bool enabled) { shadowsEnabled_ = enabled; }
+    // Дальность прорисовки существ, тел, грузов и мелочи на зданиях, метры:
+    // в последней четверти они растворяются, дальше не рисуются. Мосты — втрое дальше.
+    float drawDistance() const { return drawDistance_; }
+    void setDrawDistance(float meters);
+    static constexpr float kMinDrawDistance = 200.0f;
+    static constexpr float kMaxDrawDistance = 8000.0f;
+    // Выбранный в инспекторе: виден на любой дальности, над ним — метка.
+    void setHighlight(EntityId id) { highlight_ = id; }
 
 private:
     // Как движется существо на экране: куда смотрит и фаза шага. Только для
@@ -67,6 +75,8 @@ private:
     std::unordered_set<EntityId> litBuildings_; // где ночью горит свет
     float lights_ = 0.0f;                      // доля светящихся окон в них
     bool shadowsEnabled_ = true;
+    float drawDistance_ = 1500.0f;
+    EntityId highlight_ = kInvalidId;
     int buildingsDrawn_ = 0;
     int creaturesDrawn_ = 0;
 };

@@ -156,6 +156,7 @@ int main(int argc, char** argv) {
             BeginDrawing();
             if (camera.orbit()) {
                 ClearBackground(lw::kSkyColor);
+                renderer3d.setHighlight(inspector.selected());
                 renderer3d.draw(world, camera, alpha);
             } else {
                 ClearBackground({16, 18, 22, 255});

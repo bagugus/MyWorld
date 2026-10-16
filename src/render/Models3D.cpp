@@ -62,6 +62,9 @@ Vector3 applyJoint(const Joint* joint, Vector3 p) {
     return p;
 }
 
+// Доля растворения граней (1 − видимость): texcoord.y для шейдера моделей.
+float gDissolve = 0.0f;
+
 // Грани коробки.
 enum Faces : unsigned { kTop = 1u, kBottom = 2u, kSides = 4u, kAll = 7u };
 
@@ -98,7 +101,7 @@ public:
             Vector3Normalize(Vector3CrossProduct(Vector3Subtract(wb, wa), Vector3Subtract(wc, wa)));
         // Освещает шейдер (render/Lighting3D) по нормали грани.
         rlNormal3f(normal.x, normal.y, normal.z);
-        rlTexCoord2f(glow ? 1.0f : 0.0f, 0.0f);
+        rlTexCoord2f(glow ? 1.0f : 0.0f, gDissolve);
         rlColor4ub(color.r, color.g, color.b, color.a);
         rlVertex3f(wa.x, wa.y, wa.z);
         rlVertex3f(wb.x, wb.y, wb.z);
@@ -156,6 +159,13 @@ void emitHuman(const ModelFrame& frame, const HumanLook& look, Gait gait) {
     const float lean = look.zombie ? -0.32f : (look.running ? -0.25f : 0.0f);
     const Joint hips{{0.0f, 0.9f, 0.0f}, lean};
     // Левая сторона — +X (модель смотрит вдоль +Z).
+    if (look.simple) {
+        // Издали в несколько пикселей: силуэт и цвет одежды, без суставов.
+        e.box({-0.17f, 0.0f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &hips);
+        e.box({-0.2f, 0.88f, -0.11f}, {0.2f, 1.48f, 0.11f}, look.shirt, &hips);
+        e.box({-0.11f, 1.5f, -0.11f}, {0.11f, 1.74f, 0.12f}, look.skin, &hips);
+        return;
+    }
     const Joint leftLeg{{0.0f, 0.9f, 0.0f}, step};
     const Joint rightLeg{{0.0f, 0.9f, 0.0f}, -step};
     e.pair({0.02f, 0.0f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &leftLeg, &rightLeg);
@@ -603,6 +613,30 @@ void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom) {
     const ModelFrame frame;
     const Emitter e(frame);
     e.box(min, max, color, nullptr, bottom ? kAll : (kTop | kSides));
+}
+
+void emitBeacon(Vector3 tip, float size, Color color) {
+    ModelFrame frame;
+    frame.origin = tip;
+    frame.scale = size;
+    const Emitter e(frame);
+    constexpr float h = 0.4f;
+    const Vector3 t = {0.0f, 0.0f, 0.0f};
+    const Vector3 p0 = {-h, 1.0f, -h};
+    const Vector3 p1 = {h, 1.0f, -h};
+    const Vector3 p2 = {h, 1.0f, h};
+    const Vector3 p3 = {-h, 1.0f, h};
+    // Грани светятся сами: метку видно и ночью; боковые чуть темнее верха.
+    const Color side = shaded(color, 0.8f);
+    e.quad(t, p2, p3, p3, side, nullptr, true);
+    e.quad(t, p1, p2, p2, color, nullptr, true);
+    e.quad(t, p0, p1, p1, side, nullptr, true);
+    e.quad(t, p3, p0, p0, color, nullptr, true);
+    e.quad(p0, p3, p2, p1, color, nullptr, true);
+}
+
+void setModelFade(float visible) {
+    gDissolve = 1.0f - std::clamp(visible, 0.0f, 1.0f);
 }
 
 } // namespace lw

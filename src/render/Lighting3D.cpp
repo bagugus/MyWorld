@@ -74,7 +74,9 @@ vec3 withFog(vec3 color, vec3 p) {
 }
 )";
 
-// Модели: цвет вершины, нормаль грани; texcoord.x = 1 — светится сам (окна ночью).
+// Модели: цвет вершины, нормаль грани; texcoord.x = 1 — светится сам (окна ночью),
+// texcoord.y — доля растворения у края дальности прорисовки (пиксели выпадают
+// по матрице Байера 4×4: модель тает, а не исчезает разом).
 constexpr const char* kModelVs = R"(#version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
@@ -85,11 +87,13 @@ out vec3 fragPosition;
 out vec3 fragNormal;
 out vec4 fragColor;
 out float fragGlow;
+out float fragDissolve;
 void main() {
     fragPosition = vertexPosition;
     fragNormal = vertexNormal;
     fragColor = vertexColor;
     fragGlow = vertexTexCoord.x;
+    fragDissolve = vertexTexCoord.y;
     gl_Position = mvp * vec4(vertexPosition, 1.0);
 }
 )";
@@ -99,8 +103,19 @@ in vec3 fragPosition;
 in vec3 fragNormal;
 in vec4 fragColor;
 in float fragGlow;
+in float fragDissolve;
 out vec4 finalColor;
+
+const float kBayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
+                                   3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
+
 void main() {
+    if (fragDissolve > 0.0) {
+        ivec2 cell = ivec2(mod(gl_FragCoord.xy, 4.0));
+        if ((kBayer[cell.y * 4 + cell.x] + 0.5) / 16.0 < fragDissolve) {
+            discard;
+        }
+    }
     vec3 color;
     if (fragGlow > 0.5) {
         color = fragColor.rgb;

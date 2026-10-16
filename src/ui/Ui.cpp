@@ -477,6 +477,11 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
             } else {
                 ImGui::TextDisabled("в этом кадре нет");
             }
+            float range = renderer3d.drawDistance();
+            if (ImGui::SliderFloat("Дальность, м", &range, WorldRenderer3D::kMinDrawDistance,
+                                   WorldRenderer3D::kMaxDrawDistance, "%.0f", ImGuiSliderFlags_Logarithmic)) {
+                renderer3d.setDrawDistance(range);
+            }
             ImGui::TextDisabled("ПКМ — вращение, СКМ — панорама, Q/E, R/F");
         } else {
             ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),

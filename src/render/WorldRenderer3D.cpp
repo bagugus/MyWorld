@@ -16,14 +16,24 @@
 
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <unordered_set>
 
 namespace lw {
 
 namespace {
 
-// Существо мельче этого на экране растёт, чтобы его было видно на общем плане.
-constexpr float kMinCreaturePixels = 4.0f;
+// Всё — в настоящую величину. Человек ниже этого на экране, пикселей, рисуется
+// упрощённым силуэтом.
+constexpr float kSimplePixels = 12.0f;
+// Доля дальности прорисовки, в которой модели растворяются.
+constexpr float kFadeShare = 0.25f;
+// Мосты видны дальше существ во столько раз.
+constexpr float kBridgeRange = 3.0f;
+// Метка выбранного: высота на экране, пикселей, и не меньше, метров.
+constexpr float kBeaconPixels = 16.0f;
+constexpr float kBeaconMinSize = 0.35f;
+constexpr Color kBeaconColor = {255, 236, 120, 255};
 // Окна, двери и крыльцо — когда метр на экране не меньше этого, пикселей.
 constexpr float kDetailPixels = 1.0f;
 // Стая в полёте — над деревьями.
@@ -67,23 +77,12 @@ float angleOf(std::uint64_t bits) {
     return static_cast<float>(bits % 6283u) / 1000.0f;
 }
 
-// Множитель размера: мелкое вдали — не меньше kMinCreaturePixels на экране.
-float visibleScale(const CameraController& camera, Vector2 at, float size) {
-    return std::max(1.0f, kMinCreaturePixels / (camera.zoomAt(at) * size));
+// Видимость на расстоянии distance при дальности range: 1 — целиком, 0 — нет.
+float fadeAt(float distance, float range) {
+    return std::clamp((range - distance) / (range * kFadeShare), 0.0f, 1.0f);
 }
 
-// Размер на экране, по которому зверь растёт вдали, и длина его шага, метры.
-float animalSize(AnimalKind kind) {
-    switch (kind) {
-    case AnimalKind::Deer:
-        return 0.9f;
-    case AnimalKind::Boar:
-        return 0.8f;
-    default:
-        return 0.36f;
-    }
-}
-
+// Длина шага зверя, метры.
 float animalStride(AnimalKind kind) {
     switch (kind) {
     case AnimalKind::Deer:
@@ -109,8 +108,7 @@ float carcassLift(AnimalKind kind) {
 
 // Столб дыма над местом ивента: клубы поднимаются, их сносит по ветру, они
 // растут и тают. Рисуется после непрозрачного.
-void drawSmoke(const World& world, const WorldEvent& event, const CameraController& camera,
-               const Terrain3D& terrain, const SceneLight& light) {
+void drawSmoke(const World& world, const WorldEvent& event, const Terrain3D& terrain, const SceneLight& light) {
     const Vector2 site = {Map::cellCenter(event.site.x), Map::cellCenter(event.site.y)};
     const float ground = terrain.surfaceAt(site.x, site.y);
     const Weather& weather = world.weather();
@@ -120,7 +118,7 @@ void drawSmoke(const World& world, const WorldEvent& event, const CameraControll
     const float toZ = std::cos(radians);
     const float drift = 2.0f + 1.5f * weather.windSpeed;
     const float rise = static_cast<float>(std::fmod(GetTime() * 0.4, 1.0));
-    const float scale = visibleScale(camera, site, 6.0f);
+    constexpr float scale = 1.0f;
     constexpr int kPuffs = 9;
     for (int i = kPuffs - 1; i >= 0; --i) {
         const float t = (static_cast<float>(i) + rise) / static_cast<float>(kPuffs);
@@ -203,6 +201,10 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map) : terrai
             }
         }
     }
+}
+
+void WorldRenderer3D::setDrawDistance(float meters) {
+    drawDistance_ = std::clamp(meters, kMinDrawDistance, kMaxDrawDistance);
 }
 
 WorldRenderer3D::Motion& WorldRenderer3D::motionOf(EntityId id, float dx, float dy, float stride, float dt) {
@@ -304,7 +306,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
 
     for (const auto [entity, event] : registry.view<const WorldEvent>().each()) {
         if (world.tick() < event.signalUntil) {
-            drawSmoke(world, event, camera, terrain_, light);
+            drawSmoke(world, event, terrain_, light);
         }
     }
     EndMode3D();
@@ -361,32 +363,43 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         model.seed = mixBits(id);
         model.snow = snow;
         // Мелочь на стенах тени не отбрасывает.
-        model.detailed = !shadowPass && camera.zoomAt(center) >= kDetailPixels;
+        model.detailed = !shadowPass && camera.zoomAt(center) >= kDetailPixels &&
+                         Vector3Distance(eye, {center.x, model.low, center.y}) < drawDistance_;
         model.lights = !shadowPass && litBuildings_.contains(id) ? lights_ : 0.0f;
         emitBuilding(model);
         buildingsDrawn_ += shadowPass ? 0 : 1;
     }
 
-    // Мосты: настил над водой по клеткам дороги, перила и опоры.
+    // Мосты: настил над водой по клеткам дороги, перила и опоры; вдали тают.
+    const float bridgeRange = kBridgeRange * drawDistance_;
+    const auto bridgeFade = [&](Vector3 point) {
+        return fadeAt(Vector3Distance(eye, point), bridgeRange);
+    };
     for (const Terrain3D::Bridge& bridge : terrain_.bridges()) {
         const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
         const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
-        if (skip({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
+        const float fade = bridgeFade({x0, bridge.deck, z0});
+        if (fade <= 0.0f || skip({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
             continue;
         }
+        setModelFade(fade);
         emitWorldBox({x0, bridge.deck - kBridgeThickness, z0},
                      {x0 + Map::kCellSize, bridge.deck, z0 + Map::kCellSize},
                      bridge.road == Road::Asphalt ? kBridgeAsphalt : kBridgeWood, true);
     }
     for (const Part& part : bridgeParts_) {
-        if (!skip(part.min, 2.0f * Map::kCellSize)) {
+        const float fade = bridgeFade(part.min);
+        if (fade > 0.0f && !skip(part.min, 2.0f * Map::kCellSize)) {
+            setModelFade(fade);
             emitWorldBox(part.min, part.max, part.color);
         }
     }
+    setModelFade(1.0f);
 
     // Позиция на начало тика — текущая минус смещение за тик (Velocity · kTickDt).
     const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
     const float wingTime = static_cast<float>(GetTime()) * 9.0f;
+    std::optional<Vector4> beacon; // метка выбранного: x, y, z острия и высота
     for (const auto [entity, position] : registry.view<const Position>().each()) {
         Vector2 at = {position.x, position.y};
         Vector2 velocity = {0.0f, 0.0f};
@@ -400,12 +413,24 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             continue;
         }
         const EntityId id = registry.get<Id>(entity).value;
+        // Дальше дальности прорисовки — не рисуется (кроме выбранного), у края тает.
+        const bool highlighted = id == highlight_;
+        const float distance = Vector3Distance(eye, {at.x, stand, at.y});
+        const float fade = highlighted ? 1.0f : fadeAt(distance, drawDistance_);
+        if (fade <= 0.0f) {
+            continue;
+        }
+        setModelFade(fade);
+        if (highlighted && !shadowPass) {
+            const float size = std::max(kBeaconPixels / camera.zoomAt(at), kBeaconMinSize);
+            const float bob = 0.15f * size * std::sin(static_cast<float>(GetTime()) * 3.0f);
+            beacon = Vector4{at.x, stand + 2.2f + 0.4f * size + bob, at.y, size};
+        }
         const std::uint64_t bits = mixBits(id);
         if (const auto* flock = registry.try_get<Flock>(entity)) {
             // Сидящие — на земле, летящие — над деревьями, машут крыльями.
             const int shown = std::min<int>(flock->birds, 16);
-            const float scale = visibleScale(camera, at, 0.3f);
-            const float spread = (flock->flying ? 7.0f : 3.0f) * std::sqrt(scale);
+            const float spread = flock->flying ? 7.0f : 3.0f;
             const float course = headingOf(flock->toX - at.x, flock->toY - at.y);
             for (int i = 0; i < shown; ++i) {
                 const Vector2 offset = birdOffset(id, i);
@@ -416,7 +441,6 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
                 ModelFrame frame;
                 frame.origin = {at.x + offset.x * spread, height, at.y + offset.y * spread};
                 frame.yaw = flock->flying ? course : angleOf(mixBits(bits + static_cast<std::uint64_t>(i)));
-                frame.scale = scale;
                 emitBird(frame, flock->flying, flap);
             }
             continue;
@@ -427,7 +451,6 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             ModelFrame frame;
             frame.origin = {at.x, stand, at.y};
             frame.yaw = angleOf(bits);
-            frame.scale = visibleScale(camera, at, 1.2f);
             emitCrate(frame, empty ? kEmptyCacheColor : kCacheColor);
             continue;
         }
@@ -435,7 +458,6 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             ModelFrame frame;
             frame.origin = {at.x, stand, at.y};
             frame.yaw = angleOf(bits);
-            frame.scale = visibleScale(camera, at, 0.9f);
             if (corpse->kind == CorpseKind::Animal) {
                 frame.roll = PI * 0.5f; // на боку
                 frame.origin.y += carcassLift(corpse->animal) * frame.scale;
@@ -477,13 +499,12 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         creaturesDrawn_ += shadowPass ? 0 : 1;
 
         if (animal != nullptr) {
-            frame.scale = visibleScale(camera, at, animalSize(animal->kind));
             const bool grazing = animal->state == AnimalState::Graze && speed < 0.05f;
             emitAnimal(frame, animal->kind, creatureColor(registry, entity), gait, grazing, (bits & 1u) != 0u);
             continue;
         }
-        frame.scale = visibleScale(camera, at, 0.56f);
         HumanLook look;
+        look.simple = 1.75f * camera.zoomAt(at) < kSimplePixels;
         look.shirt = creatureColor(registry, entity);
         if (registry.all_of<Zombie>(entity)) {
             look.zombie = true;
@@ -506,6 +527,10 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             }
         }
         emitHuman(frame, look, gait);
+    }
+    setModelFade(1.0f);
+    if (beacon) {
+        emitBeacon({beacon->x, beacon->y, beacon->z}, beacon->w, kBeaconColor);
     }
 }
 
