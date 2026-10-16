@@ -138,6 +138,8 @@ if(LW_BUILD_APP)
         src/render/CameraController.h
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
+        src/render/Models3D.cpp
+        src/render/Models3D.h
         src/render/Palette.cpp
         src/render/Palette.h
         src/render/Terrain3D.cpp

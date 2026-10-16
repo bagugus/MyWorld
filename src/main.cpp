@@ -55,6 +55,7 @@ int main(int argc, char** argv) {
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
     std::optional<lw::EventKind> event;
+    lw::WorldConfig config;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = std::strtoull(argv[++i], nullptr, 10);
@@ -84,12 +85,16 @@ int main(int argc, char** argv) {
             view3d = true;
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
             navGraph = true;
+        } else if (std::strcmp(argv[i], "--zombies") == 0 && i + 1 < argc) {
+            config.zombies = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--no-peace") == 0) {
+            config.peacetime = false;
         }
     }
 
     // Мир создаётся до окна: генерация карты занимает пару секунд, и пустое
     // окно в это время выглядело бы зависшим.
-    lw::World world(seed);
+    lw::World world(seed, config);
     if (event) {
         const lw::EntityId id = lw::startEvent(world, *event);
         if (selectId == 0) {

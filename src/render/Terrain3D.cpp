@@ -26,8 +26,9 @@ constexpr float kShoreDepth = 0.1f;
 constexpr float kSwimDepth = 1.3f;
 // Настил моста над уровнем воды.
 constexpr float kBridgeDeck = 0.6f;
-// Отладочные слои — на метр над поверхностью.
-constexpr float kDrapeLift = 1.0f;
+// Отладочные слои — над поверхностью: вблизи — у самой земли (кольцо выбора —
+// у ног), вдали выше, чтобы не тонуть в грубых уровнях рельефа.
+constexpr float kDrapeLift = 0.15f;
 
 // Клетка на экране не крупнее стольких пикселей: так выбирается уровень детализации.
 constexpr float kMaxQuadPixels = 8.0f;
@@ -135,7 +136,9 @@ void main() {
                   mix(heightAt(i + ivec2(0, 1)), heightAt(i + ivec2(1, 1)), f.x), f.y);
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
-    gl_Position = mvp * vec4(vertexPosition.x, h + lift, vertexPosition.z, 1.0);
+    // w в перспективе — расстояние от камеры вдоль взгляда: на 250 м — ещё метр.
+    float distance = (mvp * vec4(vertexPosition.x, h, vertexPosition.z, 1.0)).w;
+    gl_Position = mvp * vec4(vertexPosition.x, h + lift + 0.004 * distance, vertexPosition.z, 1.0);
 }
 )";
 

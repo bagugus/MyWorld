@@ -457,7 +457,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         camera.setMode(view == 1 ? ViewMode::Orbit : ViewMode::TopDown);
         if (camera.orbit()) {
             const Terrain3D& terrain = renderer3d.terrain();
-            ImGui::Text("Зданий в кадре: %d", renderer3d.buildingsDrawn());
+            ImGui::Text("Зданий в кадре: %d, существ: %d", renderer3d.buildingsDrawn(),
+                        renderer3d.creaturesDrawn());
             ImGui::Text("Плиток рельефа: %d, треугольников: %d тыс.", terrain.tilesDrawn(),
                         terrain.trianglesDrawn() / 1000);
             ImGui::Text("Сеток в памяти: %d", terrain.meshesLoaded());
