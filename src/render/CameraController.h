@@ -6,11 +6,14 @@
 
 namespace lw {
 
+class Terrain3D;
+
 // Как смотрим на мир: сверху (2D, этапы 1–10) или в 3D (этап 11).
 enum class ViewMode { TopDown, Orbit };
 
 // Камера наблюдателя. Мир один и тот же, меняется только взгляд на него.
 // Точка мира (x, y) в метрах; в 3D x — восток (ось X), y — юг (ось Z), высота — ось Y.
+// В 3D точка мира лежит на поверхности рельефа (Terrain3D), без него — на высоте 0.
 // Зум измеряется в пикселях на метр; в 3D — у точки, на которую смотрит камера.
 //
 // Вид сверху:
@@ -28,6 +31,9 @@ enum class ViewMode { TopDown, Orbit };
 class CameraController {
 public:
     CameraController(float worldWidth, float worldHeight);
+
+    // Рельеф для 3D: камера смотрит на поверхность и не опускается под неё.
+    void setTerrain(const Terrain3D* terrain);
 
     // mouseFree / keyboardFree — false, когда ввод забрал интерфейс.
     void update(float dt, bool mouseFree, bool keyboardFree);
@@ -52,7 +58,8 @@ public:
     float zoomAt(Vector2 point) const;
     // Точка земли под пикселем экрана; в 3D — нет, если там небо.
     std::optional<Vector2> screenToWorld(Vector2 screen) const;
-    // Пиксель экрана точки мира на высоте height метров; нет, если она за камерой.
+    // Пиксель экрана точки мира на высоте height метров над поверхностью; нет,
+    // если она за камерой.
     std::optional<Vector2> worldToScreen(Vector2 point, float height = 0.0f) const;
 
     // Камера вида сверху. В 3D — равносильная ей: та же точка в центре и тот же
@@ -61,7 +68,7 @@ public:
     const Camera3D& camera3d() const { return camera3d_; }
 
     // Мировые координаты для отладочных слоёв, нарисованных 2D-функциями
-    // (линии, круги в метрах): в 3D они ложатся на землю поверх всего.
+    // (линии, круги в метрах): в 3D они ложатся на рельеф поверх всего.
     void beginOverlay() const;
     void endOverlay() const;
 
@@ -74,9 +81,12 @@ private:
     // Расстояние до точки, при котором у неё зум zoom пикселей на метр, и обратно.
     float distanceForZoom(float zoom) const;
     float zoomForDistance(float distance) const;
+    // Высота поверхности в точке мира: в 3D — рельеф, иначе 0.
+    float surfaceAt(Vector2 point) const;
 
     float worldWidth_;
     float worldHeight_;
+    const Terrain3D* terrain_ = nullptr;
     ViewMode mode_ = ViewMode::TopDown;
     Camera2D camera_{};
 

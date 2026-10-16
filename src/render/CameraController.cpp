@@ -1,5 +1,7 @@
 #include "render/CameraController.h"
 
+#include "render/Terrain3D.h"
+
 #include <raymath.h>
 #include <rlgl.h>
 
@@ -24,6 +26,7 @@ constexpr float kMouseRotate = 0.25f; // градусов на пиксель
 constexpr float kKeyRotate = 90.0f;   // градусов в секунду
 constexpr float kKeyTilt = 45.0f;
 constexpr float kKeyPanRate = 0.8f; // расстояний до точки в секунду
+constexpr float kMinEyeHeight = 1.7f; // метров над поверхностью: ниже глаз не опускается
 
 Vector2 screenCenter() {
     return {static_cast<float>(GetScreenWidth()) * 0.5f, static_cast<float>(GetScreenHeight()) * 0.5f};
@@ -35,6 +38,15 @@ CameraController::CameraController(float worldWidth, float worldHeight)
     : worldWidth_(worldWidth), worldHeight_(worldHeight) {
     reset();
     resetOrbit();
+}
+
+void CameraController::setTerrain(const Terrain3D* terrain) {
+    terrain_ = terrain;
+    refreshOrbit();
+}
+
+float CameraController::surfaceAt(Vector2 point) const {
+    return terrain_ != nullptr ? terrain_->surfaceAt(point.x, point.y) : 0.0f;
 }
 
 void CameraController::reset() {
@@ -113,15 +125,18 @@ float CameraController::zoomAt(Vector2 point) const {
     if (mode_ == ViewMode::TopDown) {
         return camera_.zoom;
     }
-    return zoomForDistance(Vector3Distance(camera3d_.position, {point.x, 0.0f, point.y}));
+    return zoomForDistance(Vector3Distance(camera3d_.position, {point.x, surfaceAt(point), point.y}));
 }
 
 std::optional<Vector2> CameraController::screenToWorld(Vector2 screen) const {
     if (mode_ == ViewMode::TopDown) {
         return GetScreenToWorld2D(screen, camera_);
     }
-    // Луч из камеры до плоскости земли.
+    // Луч из камеры до рельефа; без него — до плоскости земли.
     const Ray ray = GetScreenToWorldRay(screen, camera3d_);
+    if (terrain_ != nullptr) {
+        return terrain_->raycast(ray);
+    }
     if (ray.direction.y > -1e-4f) {
         return std::nullopt;
     }
@@ -133,7 +148,7 @@ std::optional<Vector2> CameraController::worldToScreen(Vector2 point, float heig
     if (mode_ == ViewMode::TopDown) {
         return GetWorldToScreen2D(point, camera_);
     }
-    const Vector3 at = {point.x, height, point.y};
+    const Vector3 at = {point.x, surfaceAt(point) + height, point.y};
     const Vector3 forward = Vector3Normalize(Vector3Subtract(camera3d_.target, camera3d_.position));
     if (Vector3DotProduct(Vector3Subtract(at, camera3d_.position), forward) <= rlGetCullDistanceNear()) {
         return std::nullopt;
@@ -148,12 +163,17 @@ void CameraController::beginOverlay() const {
     }
     BeginMode3D(camera3d_);
     // 2D-функции рисуют в плоскости (x, y) с z около −1: поворот вокруг оси X
-    // кладёт её на землю, (x, y, z) → (x, −z, y), то есть на метр над землёй.
+    // кладёт её на землю, (x, y, z) → (x, −z, y), то есть на метр над землёй;
+    // с рельефом высоту вершинам затем даёт его шейдер (Terrain3D::beginDrape).
     rlPushMatrix();
     rlRotatef(90.0f, 1.0f, 0.0f, 0.0f);
     // Слой — подсказка, а не часть мира: виден сквозь дома и с обеих сторон.
     rlDisableDepthTest();
     rlDisableBackfaceCulling();
+    // Высоту вершинам слоя даёт рельеф.
+    if (terrain_ != nullptr) {
+        terrain_->beginDrape();
+    }
 }
 
 void CameraController::endOverlay() const {
@@ -163,6 +183,9 @@ void CameraController::endOverlay() const {
     }
     rlPopMatrix();
     rlDrawRenderBatchActive(); // дорисовать слой, пока отсечение граней выключено
+    if (terrain_ != nullptr) {
+        terrain_->endDrape();
+    }
     rlEnableBackfaceCulling();
     EndMode3D();
 }
@@ -284,10 +307,14 @@ void CameraController::refreshOrbit() {
 
     const float yaw = yaw_ * DEG2RAD;
     const float pitch = pitch_ * DEG2RAD;
-    const Vector3 target = {orbitFocus_.x, 0.0f, orbitFocus_.y};
+    const Vector3 target = {orbitFocus_.x, surfaceAt(orbitFocus_), orbitFocus_.y};
     const Vector3 offset = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), std::cos(yaw) * std::cos(pitch)};
     camera3d_.target = target;
     camera3d_.position = Vector3Add(target, Vector3Scale(offset, distance_));
+    // Склон между камерой и точкой не пускает глаз под землю: камера поднимается
+    // над ним, взгляд по-прежнему на точку.
+    const float lowest = surfaceAt({camera3d_.position.x, camera3d_.position.z}) + kMinEyeHeight;
+    camera3d_.position.y = std::max(camera3d_.position.y, lowest);
     camera3d_.up = {0.0f, 1.0f, 0.0f};
     camera3d_.fovy = kFovY;
     camera3d_.projection = CAMERA_PERSPECTIVE;

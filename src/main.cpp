@@ -16,6 +16,7 @@
 // --screenshot  нарисовать несколько кадров, сохранить снимок окна и выйти
 
 #include "render/CameraController.h"
+#include "render/Palette.h"
 #include "render/WeatherRenderer.h"
 #include "render/WorldRenderer.h"
 #include "render/WorldRenderer3D.h"
@@ -108,9 +109,10 @@ int main(int argc, char** argv) {
     {
         // Текстуры карты должны быть освобождены до CloseWindow.
         lw::WorldRenderer renderer(world);
-        lw::WorldRenderer3D renderer3d(renderer.map());
+        lw::WorldRenderer3D renderer3d(renderer.map(), world.map());
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
+        camera.setTerrain(&renderer3d.terrain());
         if (orbit) {
             camera.setOrbitAngles(orbit->first, orbit->second);
         }
@@ -148,7 +150,7 @@ int main(int argc, char** argv) {
 
             BeginDrawing();
             if (camera.orbit()) {
-                ClearBackground({132, 166, 200, 255}); // небо; ночью его затемнит погода
+                ClearBackground(lw::kSkyColor);
                 renderer3d.draw(world, camera, alpha);
             } else {
                 ClearBackground({16, 18, 22, 255});

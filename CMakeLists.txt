@@ -140,6 +140,8 @@ if(LW_BUILD_APP)
         src/render/MapRenderer.h
         src/render/Palette.cpp
         src/render/Palette.h
+        src/render/Terrain3D.cpp
+        src/render/Terrain3D.h
         src/render/WeatherRenderer.cpp
         src/render/WeatherRenderer.h
         src/render/WorldRenderer.cpp

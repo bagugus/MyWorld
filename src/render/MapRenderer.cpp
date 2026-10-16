@@ -140,7 +140,7 @@ Texture2D makeTexture(const std::vector<Color>& pixels, int width, int height) {
 
 } // namespace
 
-MapRenderer::MapRenderer(const Map& map) {
+MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells - 1) / kChunkCells) {
     std::vector<Color> pixels;
     std::vector<Color> snow;
     for (int top = 0; top < map.height(); top += kChunkCells) {
@@ -228,34 +228,20 @@ void MapRenderer::drawSnow(const Rectangle& visible, float amount) {
     }
 }
 
-void MapRenderer::drawGround(float snowAmount) {
+MapRenderer::GroundChunk MapRenderer::groundChunk(int x, int y) const {
+    const Chunk& chunk = chunks_[static_cast<std::size_t>((y / kChunkCells) * chunksX_ + x / kChunkCells)];
+    GroundChunk result;
+    result.texture = chunk.texture;
+    result.snow = chunk.snow;
+    result.left = x / kChunkCells * kChunkCells;
+    result.top = y / kChunkCells * kChunkCells;
+    result.width = chunk.texture.width;
+    result.height = chunk.texture.height;
+    return result;
+}
+
+void MapRenderer::useGroundFilter() {
     setFilter(kGroundFilter);
-    const unsigned char snow = static_cast<unsigned char>(std::clamp(snowAmount, 0.0f, 1.0f) * 255.0f);
-    for (const Chunk& chunk : chunks_) {
-        // Чанк — квадрат на земле: x карты — ось X, y карты (на юг) — ось Z.
-        // Обход против часовой при взгляде сверху: лицевая сторона смотрит вверх.
-        const float x0 = chunk.bounds.x;
-        const float z0 = chunk.bounds.y;
-        const float x1 = x0 + chunk.bounds.width;
-        const float z1 = z0 + chunk.bounds.height;
-        // Снег — та же плоскость второй раз: глубина совпадает, и он ложится сверху.
-        for (int layer = 0; layer < (snow > 0 ? 2 : 1); ++layer) {
-            rlSetTexture(layer == 0 ? chunk.texture.id : chunk.snow.id);
-            rlBegin(RL_QUADS);
-            rlColor4ub(255, 255, 255, layer == 0 ? 255 : snow);
-            rlNormal3f(0.0f, 1.0f, 0.0f);
-            rlTexCoord2f(0.0f, 0.0f);
-            rlVertex3f(x0, 0.0f, z0);
-            rlTexCoord2f(0.0f, 1.0f);
-            rlVertex3f(x0, 0.0f, z1);
-            rlTexCoord2f(1.0f, 1.0f);
-            rlVertex3f(x1, 0.0f, z1);
-            rlTexCoord2f(1.0f, 0.0f);
-            rlVertex3f(x1, 0.0f, z0);
-            rlEnd();
-        }
-    }
-    rlSetTexture(0);
 }
 
 } // namespace lw

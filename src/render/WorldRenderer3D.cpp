@@ -1,8 +1,8 @@
 #include "render/WorldRenderer3D.h"
 
 #include "render/CameraController.h"
-#include "render/MapRenderer.h"
 #include "render/Palette.h"
+#include "render/Terrain3D.h"
 #include "sim/Components.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
@@ -32,6 +32,14 @@ constexpr int kCreatureSides = 6; // гранёный столбик: чётно
 
 // Высота этажа и этажность по виду здания.
 constexpr float kStoreyMeters = 3.0f;
+// Фундамент уходит в землю: на склоне здание не висит над ней.
+constexpr float kFoundation = 0.5f;
+// Стая в полёте — над деревьями.
+constexpr float kFlightHeight = 14.0f;
+// Настил моста — толщиной в полметра, клетка дороги над водой.
+constexpr float kBridgeThickness = 0.5f;
+constexpr Color kBridgeAsphalt = {84, 84, 90, 255};
+constexpr Color kBridgeWood = {122, 96, 66, 255};
 
 float storeys(BuildingKind kind) {
     switch (kind) {
@@ -169,8 +177,10 @@ float visibleScale(const CameraController& camera, Vector2 at, float size) {
 
 // Столб дыма над местом ивента: клубы поднимаются, их сносит по ветру, они
 // растут и тают. Рисуется после непрозрачного.
-void drawSmoke(const World& world, const WorldEvent& event, const CameraController& camera) {
+void drawSmoke(const World& world, const WorldEvent& event, const CameraController& camera,
+               const Terrain3D& terrain) {
     const Vector2 site = {Map::cellCenter(event.site.x), Map::cellCenter(event.site.y)};
+    const float ground = terrain.surfaceAt(site.x, site.y);
     const Weather& weather = world.weather();
     // Откуда дует (0 — север, 90 — восток): дым идёт в обратную сторону, ось Z — на юг.
     const float radians = weather.windFrom * DEG2RAD;
@@ -185,7 +195,7 @@ void drawSmoke(const World& world, const WorldEvent& event, const CameraControll
         const float along = t * drift * static_cast<float>(kPuffs);
         Color c = kSmokeColor;
         c.a = static_cast<unsigned char>(190.0f * (1.0f - t));
-        const Vector3 center = {site.x + toX * along * scale, (2.0f + 40.0f * t) * scale,
+        const Vector3 center = {site.x + toX * along * scale, ground + (2.0f + 40.0f * t) * scale,
                                 site.y + toZ * along * scale};
         DrawSphereEx(center, (2.0f + 7.0f * t) * scale, 6, 8, c);
     }
@@ -204,7 +214,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
 
     BeginMode3D(view);
     // Даже полный покров оставляет карту читаемой.
-    map_.drawGround(world.weather().snowCover * 0.85f);
+    terrain_.drawGround(view, world.weather().snowCover * 0.85f);
 
     // Всё непрозрачное — одним набором четырёхугольников без текстуры.
     rlSetTexture(rlGetTextureIdDefault());
@@ -218,13 +228,33 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         const float z0 = static_cast<float>(building.origin.y) * Map::kCellSize;
         const float x1 = x0 + static_cast<float>(building.width) * Map::kCellSize;
         const float z1 = z0 + static_cast<float>(building.height) * Map::kCellSize;
-        const float height = storeys(building.kind) * kStoreyMeters;
-        const Vector3 center = {(x0 + x1) * 0.5f, height * 0.5f, (z0 + z1) * 0.5f};
-        if (behind(center, std::max(x1 - x0, z1 - z0) + height)) {
+        // Стоит на нижнем углу участка, высота отсчитывается от верхнего.
+        float low = terrain_.groundAt(x0, z0);
+        float high = low;
+        for (const Vector2 corner : {Vector2{x1, z0}, Vector2{x0, z1}, Vector2{x1, z1}}) {
+            const float ground = terrain_.groundAt(corner.x, corner.y);
+            low = std::min(low, ground);
+            high = std::max(high, ground);
+        }
+        const float top = high + storeys(building.kind) * kStoreyMeters;
+        const Vector3 center = {(x0 + x1) * 0.5f, (low + top) * 0.5f, (z0 + z1) * 0.5f};
+        if (behind(center, std::max(x1 - x0, z1 - z0) + top - low)) {
             continue;
         }
-        emitBox({x0, 0.0f, z0}, {x1, height, z1}, buildingColor(building.kind));
+        emitBox({x0, low - kFoundation, z0}, {x1, top, z1}, buildingColor(building.kind));
         ++buildingsDrawn_;
+    }
+
+    // Мосты — настил над водой по клеткам дороги (модели мостов — этап 11.3).
+    for (const Terrain3D::Bridge& bridge : terrain_.bridges()) {
+        const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
+        const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
+        if (behind({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
+            continue;
+        }
+        emitBox({x0, bridge.deck - kBridgeThickness, z0},
+                {x0 + Map::kCellSize, bridge.deck, z0 + Map::kCellSize},
+                bridge.road == Road::Asphalt ? kBridgeAsphalt : kBridgeWood);
     }
 
     // Позиция на начало тика — текущая минус смещение за тик (Velocity · kTickDt).
@@ -236,7 +266,8 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
             at.x -= velocity->x * back;
             at.y -= velocity->y * back;
         }
-        if (behind({at.x, 0.0f, at.y}, 50.0f)) {
+        const float stand = terrain_.standAt(at.x, at.y);
+        if (behind({at.x, stand, at.y}, 50.0f)) {
             continue;
         }
         if (const auto* flock = registry.try_get<Flock>(entity)) {
@@ -249,7 +280,9 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
             for (int i = 0; i < shown; ++i) {
                 const Vector2 offset = birdOffset(id, i);
                 const float height =
-                    flock->flying ? 14.0f + std::sin(wingTime + static_cast<float>(i)) * 0.6f : 0.0f;
+                    flock->flying ? terrain_.surfaceAt(at.x, at.y) + kFlightHeight +
+                                        std::sin(wingTime + static_cast<float>(i)) * 0.6f
+                                  : stand;
                 const Vector3 min = {at.x + offset.x * spread - bird * 0.5f, height,
                                      at.y + offset.y * spread - bird * 0.5f};
                 emitBox(min, {min.x + bird, height + bird * 0.6f, min.z + bird}, kBirdColor);
@@ -260,28 +293,30 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
             const auto* stock = registry.try_get<Inventory>(entity);
             const bool empty = stock == nullptr || stock->empty();
             const float half = 0.6f * visibleScale(camera, at, 1.2f);
-            emitBox({at.x - half, 0.0f, at.y - half}, {at.x + half, 1.6f * half, at.y + half},
+            emitBox({at.x - half, stand, at.y - half}, {at.x + half, stand + 1.6f * half, at.y + half},
                     empty ? kEmptyCacheColor : kCacheColor);
             continue;
         }
         if (const auto* corpse = registry.try_get<Corpse>(entity)) {
             // Лежит: низкая плита.
             const float half = 0.45f * visibleScale(camera, at, 0.9f);
-            emitBox({at.x - half, 0.0f, at.y - half}, {at.x + half, 0.6f * half, at.y + half},
+            emitBox({at.x - half, stand, at.y - half}, {at.x + half, stand + 0.6f * half, at.y + half},
                     corpseColor(corpse->kind));
             continue;
         }
         const Shape shape = shapeOf(registry, entity);
         const float scale = visibleScale(camera, at, 2.0f * shape.radius);
-        emitPrism({at.x, 0.0f, at.y}, shape.radius * scale, shape.height * scale,
+        emitPrism({at.x, stand, at.y}, shape.radius * scale, shape.height * scale,
                   creatureColor(registry, entity));
     }
     rlEnd();
     rlSetTexture(0);
 
+    terrain_.drawWater(view, static_cast<float>(GetTime()), kSkyColor);
+
     for (const auto [entity, event] : registry.view<const WorldEvent>().each()) {
         if (world.tick() < event.signalUntil) {
-            drawSmoke(world, event, camera);
+            drawSmoke(world, event, camera, terrain_);
         }
     }
     EndMode3D();

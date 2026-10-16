@@ -24,9 +24,20 @@ public:
     void draw(const Rectangle& visible, float zoom);
     // Снег на суше поверх карты; amount — 0..1. Вызывать после draw.
     void drawSnow(const Rectangle& visible, float amount);
-    // Карта в 3D — плоскостью на высоте 0, со снегом поверх (этап 11.1).
-    // Вызывать между BeginMode3D и EndMode3D.
-    void drawGround(float snowAmount);
+
+    // Текстуры чанка и его место на карте в клетках — для рельефа в 3D (Terrain3D).
+    struct GroundChunk {
+        Texture2D texture{};
+        Texture2D snow{};
+        int left = 0;
+        int top = 0;
+        int width = 0;
+        int height = 0;
+    };
+    // Чанк с клеткой (x, y); клетка должна лежать на карте.
+    GroundChunk groundChunk(int x, int y) const;
+    // Фильтр текстур для 3D: вблизи клетки чёткие, вдаль — мип-уровни и анизотропия.
+    void useGroundFilter();
 
     int chunkCount() const { return static_cast<int>(chunks_.size()); }
     int chunksDrawn() const { return chunksDrawn_; }
@@ -42,6 +53,7 @@ private:
     void setFilter(int filter);
 
     std::vector<Chunk> chunks_;
+    int chunksX_ = 0; // чанков в ряду
     int filter_ = -1;
     int chunksDrawn_ = 0;
 };

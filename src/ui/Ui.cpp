@@ -456,7 +456,11 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         ImGui::RadioButton("3D", &view, 1);
         camera.setMode(view == 1 ? ViewMode::Orbit : ViewMode::TopDown);
         if (camera.orbit()) {
+            const Terrain3D& terrain = renderer3d.terrain();
             ImGui::Text("Зданий в кадре: %d", renderer3d.buildingsDrawn());
+            ImGui::Text("Плиток рельефа: %d, треугольников: %d тыс.", terrain.tilesDrawn(),
+                        terrain.trianglesDrawn() / 1000);
+            ImGui::Text("Сеток в памяти: %d", terrain.meshesLoaded());
             ImGui::TextDisabled("ПКМ — вращение, СКМ — панорама, Q/E, R/F");
         } else {
             ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
@@ -471,6 +475,16 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         const Vector2 mouse = *cursor;
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
+        if (camera.orbit()) {
+            const Terrain3D& terrain = renderer3d.terrain();
+            const float ground = terrain.groundAt(mouse.x, mouse.y);
+            const float surface = terrain.surfaceAt(mouse.x, mouse.y);
+            if (surface > ground + 0.05f) {
+                ImGui::Text("Вода: %.1f м, глубина %.1f м", surface, surface - ground);
+            } else {
+                ImGui::Text("Высота: %.1f м", ground);
+            }
+        }
         // Проверка пространственного индекса: соседи курсора.
         constexpr float kNeighbourRadius = 50.0f;
         int neighbours = 0;
