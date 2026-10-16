@@ -104,6 +104,12 @@ SupplyRange supplyRange(BuildingKind kind) {
         return {20, 80, 15, 50};
     case BuildingKind::Barn:
         return {0, 15, 0, 0};
+    case BuildingKind::Hospital:
+        return {5, 15, 10, 30};
+    case BuildingKind::PoliceStation:
+        return {3, 8, 4, 10};
+    case BuildingKind::School:
+        return {2, 8, 4, 12};
     }
     return {0, 0, 0, 0};
 }
@@ -139,6 +145,16 @@ std::vector<LootRoll> lootTable(BuildingKind kind) {
         return {{K::Axe, 0.35f, 1, 1},            {K::Knife, 0.15f, 1, 1},
                 {K::Shotgun, 0.06f, 1, 1},        {K::Rifle, 0.05f, 1, 1},
                 {K::ShotgunShells, 0.1f, 3, 10},  {K::RifleAmmo, 0.08f, 3, 10}};
+    // Этап 7.2: больница — бинты и лекарства, полиция — оружейная, школа — аптечка.
+    case BuildingKind::Hospital:
+        return {{K::Bandage, 0.95f, 10, 30}, {K::Medicine, 0.95f, 6, 20}};
+    case BuildingKind::PoliceStation:
+        return {{K::Pistol, 0.8f, 1, 3},           {K::PistolAmmo, 0.9f, 20, 60},
+                {K::Shotgun, 0.4f, 1, 2},          {K::ShotgunShells, 0.6f, 10, 30},
+                {K::Rifle, 0.15f, 1, 1},           {K::RifleAmmo, 0.2f, 5, 15},
+                {K::Bandage, 0.6f, 2, 6},          {K::Knife, 0.3f, 1, 1}};
+    case BuildingKind::School:
+        return {{K::Bandage, 0.6f, 1, 4}, {K::Medicine, 0.2f, 1, 2}, {K::Axe, 0.1f, 1, 1}};
     }
     return {};
 }

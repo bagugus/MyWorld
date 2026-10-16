@@ -7,6 +7,7 @@
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Weapons.h"
+#include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/Relations.h"
 #include "sim/systems/GroupSystem.h"
@@ -298,6 +299,65 @@ constexpr int kSalvageMinutes = 15;
 // Груз ищут вокруг места ивента в таком радиусе, метры: ящики сносит ветром.
 constexpr float kCacheSearch = 60.0f;
 
+// --- Мирная жизнь (этап 7.2) ----------------------------------------------------
+// На работу — в смену и заранее, на дорогу: оценка kWorkBase + kWorkDiligence ×
+// запасливость — выше прогулок, отдыха и утреннего сна (спящего будит), ниже
+// сильного голода, жажды и бегства. Дорога — по прямой kCommuteSpeed метров в
+// игровую минуту плюс kCommuteSlack минут; дальше kMaxCommute минут на работу
+// не ходят (переехал на базу группы — работу бросил). Меньше чем за
+// kLateMinutes до конца смены уже не выходят.
+constexpr float kWorkBase = 0.7f;
+constexpr float kWorkDiligence = 0.25f;
+constexpr float kCommuteSpeed = 6.0f;
+constexpr int kCommuteSlack = 10;
+constexpr int kMaxCommute = 180;
+constexpr int kLateMinutes = 30;
+// Обед на работе — из взятого с собой, когда голод (жажда) выше этого.
+constexpr float kLunchHunger = 0.35f;
+constexpr float kLunchThirst = 0.35f;
+// Фермер работает в поле у фермы — не дальше kFieldCells клеток от неё.
+constexpr int kFieldCells = 20;
+constexpr int kFieldAttempts = 24;
+// Обход полицейского: постоять kPatrolMin–kPatrolMax минут у двери не дальше
+// kPatrolRange от участка; с вероятностью kStationChance — вернуться в участок.
+constexpr int kPatrolMinMinutes = 10;
+constexpr int kPatrolMaxMinutes = 25;
+constexpr float kPatrolRange = 600.0f;
+constexpr float kStationChance = 0.25f;
+constexpr int kPatrolAttempts = 6;
+// Полицейский на службе ближе kPoliceWatch — лезть в чужое и красть страшно:
+// оценка × kPoliceDeterrence (отчаявшемуся всё равно).
+constexpr float kPoliceWatch = 120.0f;
+constexpr float kPoliceDeterrence = 0.2f;
+// Вечером, с kEveningMinute и до своей ночи, тянет домой (в мирное время).
+constexpr int kEveningMinute = 18 * 60;
+constexpr float kEveningHome = 0.2f;
+// За покупками: еды дома и с собой меньше запаса — kBuyStockBase +
+// kBuyStockSpread × запасливость порций. Оценка — нужда × near(d, kNearScale):
+// голодный без еды — kBuyWeight × голод (охотнее, чем лезть в чужой дом),
+// иначе нехватка запаса × kBuyStockWeight × (0,5 + запасливость). Воды берут
+// до kBuyWater, если её нет ни дома, ни с собой; бинт — если при себе нет, а
+// денег не меньше kBandageBudget.
+constexpr int kBuyStockBase = 3;
+constexpr float kBuyStockSpread = 4.0f;
+constexpr float kBuyWeight = 1.15f;
+constexpr float kBuyStockWeight = 0.45f;
+constexpr float kBuyWaterWeight = 0.7f;
+constexpr float kShopSearch = 1500.0f;
+constexpr int kBuyMinutes = 10;
+constexpr int kBuyWater = 2;
+constexpr int kBandageBudget = 30;
+// К врачу: здоровье ниже kDoctorHealth (не от голода и жажды) или течёт кровь,
+// а бинта нет. Оценка — kDoctorWeight × тяжесть × near(d, kNearScale). Врач
+// останавливает кровь и лечит: здоровья +kDoctorHeal, с лекарством больницы —
+// +kDoctorMedicineHeal.
+constexpr float kDoctorHealth = 0.7f;
+constexpr float kDoctorWeight = 1.0f;
+constexpr float kHospitalSearch = 3000.0f;
+constexpr int kDoctorMinutes = 30;
+constexpr float kDoctorHeal = 0.2f;
+constexpr float kDoctorMedicineHeal = 0.4f;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -384,6 +444,12 @@ struct Context {
     EntityId group = kInvalidId;
     // Вести об ивентах (этап 7.1); nullptr — нет.
     const Leads* leads = nullptr;
+    // Решения (текущее действие, обысканные здания); nullptr — нет.
+    const Mind* mind = nullptr;
+    Action current = Action::Idle;
+    // Работа и деньги (этап 7.2); nullptr — нет.
+    const Job* job = nullptr;
+    const Wallet* wallet = nullptr;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -420,6 +486,10 @@ Context makeContext(const World& world, entt::entity entity) {
     ctx.relations = registry.try_get<Relations>(entity);
     ctx.group = person.group;
     ctx.leads = registry.try_get<Leads>(entity);
+    ctx.mind = mind;
+    ctx.current = mind != nullptr ? mind->action : Action::Idle;
+    ctx.job = registry.try_get<Job>(entity);
+    ctx.wallet = registry.try_get<Wallet>(entity);
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -625,6 +695,10 @@ Option evalScavenge(const Context& ctx) {
     if (ctx.night) {
         need *= kNightPenalty;
     }
+    // При полицейском лезть в чужое страшно (этап 7.2).
+    if (ctx.needs.hunger < kDesperate && policeNearby(ctx.world, ctx.x, ctx.y, kPoliceWatch)) {
+        need *= kPoliceDeterrence;
+    }
     // Здание выберется при выполнении; пока — расстояние до центра поселения.
     const float d = distance(ctx.x, ctx.y, settlement->x, settlement->y);
     return {need * nearness(d, kNearScale), settlement->center, kInvalidId};
@@ -757,7 +831,11 @@ Option evalGoHome(const Context& ctx) {
     if (ctx.homeId == kInvalidId || ctx.atHome) {
         return {};
     }
-    const float score = ctx.needs.fear * (1.2f - 0.6f * ctx.traits.bravery);
+    float score = ctx.needs.fear * (1.2f - 0.6f * ctx.traits.bravery);
+    // Мирный вечер — домой (этап 7.2).
+    if (ctx.world.config().peacetime && !ctx.night && ctx.time.minuteOfDay >= kEveningMinute) {
+        score = std::max(score, kEveningHome);
+    }
     return {score, ctx.homeDoor, ctx.homeId};
 }
 
@@ -1294,6 +1372,12 @@ Option evalSteal(const Context& ctx) {
                                  ctx.homeDoor, ctx.homeId});
         }
     }
+    // Полицейский рядом с вором или с домом — страшно, если не отчаялся (этап 7.2).
+    if (best.score > 0.0f && ctx.needs.hunger < kDesperate &&
+        (policeNearby(world, ctx.x, ctx.y, kPoliceWatch) ||
+         policeNearby(world, cellX(best.spot), cellY(best.spot), kPoliceWatch))) {
+        best.score *= kPoliceDeterrence;
+    }
     return best;
 }
 
@@ -1341,6 +1425,144 @@ Option evalAvenge(const Context& ctx) {
     return best;
 }
 
+// --- Мирная жизнь (этап 7.2) ----------------------------------------------------
+
+// На работу: в смену или заранее, чтобы успеть дойти. Место — дверь работы;
+// фермеру поле и полицейскому обход выберутся при выполнении (pickWorkSpot).
+Option evalWork(const Context& ctx) {
+    if (ctx.job == nullptr || ctx.job->profession == Profession::None ||
+        !isWorkday(*ctx.job, ctx.time.dayOfWeek)) {
+        return {};
+    }
+    const entt::entity workplace = ctx.world.find(ctx.job->workplace);
+    if (workplace == entt::null) {
+        return {};
+    }
+    const Cell door = ctx.world.registry().get<Building>(workplace).door;
+    const bool working = ctx.current == Action::Work;
+    const float d = distance(ctx.x, ctx.y, cellX(door), cellY(door));
+    const int commute = working ? 0 : static_cast<int>(d / kCommuteSpeed) + kCommuteSlack;
+    const int now = ctx.time.minuteOfDay;
+    if (commute > kMaxCommute || now < ctx.job->start - commute ||
+        now >= ctx.job->end - (working ? 0 : kLateMinutes)) {
+        return {};
+    }
+    return {kWorkBase + kWorkDiligence * ctx.traits.prudence, door, ctx.job->workplace};
+}
+
+// Сколько еды держать дома (с несомым): запасливый — больше.
+int buyTarget(const Traits& traits) {
+    return kBuyStockBase + static_cast<int>(std::lround(kBuyStockSpread * traits.prudence));
+}
+
+bool rememberedBy(const Context& ctx, EntityId building) {
+    return ctx.mind != nullptr &&
+           std::find(std::begin(ctx.mind->searched), std::end(ctx.mind->searched), building) !=
+               std::end(ctx.mind->searched);
+}
+
+// Ближайшее открытое здание вида kind в своём поселении или соседних, не
+// дальше range; пустое недавно (помнится обысканным) — не в счёт.
+std::optional<Places::BuildingPlace> nearestOpen(const Context& ctx, BuildingKind kind, float range) {
+    const Places& places = ctx.world.places();
+    const Places::SettlementPlace* own = places.settlement(ctx.settlement);
+    if (own == nullptr) {
+        return std::nullopt;
+    }
+    std::vector<const Places::SettlementPlace*> order{own};
+    for (const EntityId neighbour : own->neighbours) {
+        order.push_back(places.settlement(neighbour));
+    }
+    std::optional<Places::BuildingPlace> best;
+    float bestDistance = 0.0f;
+    for (const Places::SettlementPlace* settlement : order) {
+        for (const Places::BuildingPlace& building : settlement->buildings) {
+            if (building.kind != kind) {
+                continue;
+            }
+            // При равных расстояниях остаётся первое: порядок обхода фиксирован.
+            const float d = distance(ctx.x, ctx.y, cellX(building.door), cellY(building.door));
+            if (d > range || (best && d >= bestDistance) || !isOpen(ctx.world, building.id) ||
+                rememberedBy(ctx, building.id)) {
+                continue;
+            }
+            best = building;
+            bestDistance = d;
+        }
+    }
+    return best;
+}
+
+// За покупками: дома кончается еда (или нет воды), а деньги есть. Магазин —
+// ближайший открытый; что и сколько купить — при выполнении (buy).
+Option evalBuy(const Context& ctx) {
+    if (ctx.wallet == nullptr || ctx.night || ctx.wallet->money < kFoodPrice) {
+        return {};
+    }
+    const int homeFood = ctx.homeSupplies != nullptr ? ctx.homeSupplies->food() : 0;
+    const int homeWater = ctx.homeSupplies != nullptr ? ctx.homeSupplies->count(ItemKind::Water) : 0;
+    const int have = ctx.carry.food() + homeFood;
+    const int target = buyTarget(ctx.traits);
+    const float start = needStart(ctx);
+    float need = 0.0f;
+    if (have == 0) {
+        need = kBuyWeight * urge(ctx.needs.hunger, start);
+    }
+    if (have < target) {
+        need = std::max(need, kBuyStockWeight * (1.0f - static_cast<float>(have) / target) *
+                                  (0.5f + ctx.traits.prudence));
+    }
+    if (ctx.carry.count(ItemKind::Water) + homeWater == 0) {
+        need = std::max(need, kBuyWaterWeight * urge(ctx.needs.thirst, start));
+    }
+    if (need <= 0.0f) {
+        return {};
+    }
+    const auto shop = nearestOpen(ctx, BuildingKind::Shop, kShopSearch);
+    if (!shop) {
+        return {};
+    }
+    const float d = distance(ctx.x, ctx.y, cellX(shop->door), cellY(shop->door));
+    return {need * nearness(d, kNearScale), shop->door, shop->id};
+}
+
+// К врачу: плохо (не от голода и жажды) или течёт кровь, а бинта нет. В
+// ближайшую больницу, где врач на смене.
+Option evalSeeDoctor(const Context& ctx) {
+    float severity = 0.0f;
+    if (ctx.needs.health < kDoctorHealth && ctx.needs.hunger < 0.8f && ctx.needs.thirst < 0.8f) {
+        severity = (kDoctorHealth - ctx.needs.health) / kDoctorHealth;
+    }
+    if (ctx.bleeding > kTreatBleeding && ctx.carry.count(ItemKind::Bandage) == 0) {
+        severity = std::max(severity, std::min(1.0f, 0.5f + 2.0f * ctx.bleeding));
+    }
+    if (severity <= 0.0f) {
+        return {};
+    }
+    std::optional<Places::BuildingPlace> best;
+    float bestDistance = 0.0f;
+    for (const Places::SettlementPlace& settlement : ctx.world.places().settlements()) {
+        if (distance(ctx.x, ctx.y, settlement.x, settlement.y) > kHospitalSearch + 1000.0f) {
+            continue;
+        }
+        for (const Places::BuildingPlace& building : settlement.buildings) {
+            if (building.kind != BuildingKind::Hospital) {
+                continue;
+            }
+            const float d = distance(ctx.x, ctx.y, cellX(building.door), cellY(building.door));
+            if (d > kHospitalSearch || (best && d >= bestDistance) || !isOpen(ctx.world, building.id)) {
+                continue;
+            }
+            best = building;
+            bestDistance = d;
+        }
+    }
+    if (!best) {
+        return {};
+    }
+    return {kDoctorWeight * severity * nearness(bestDistance, kNearScale), best->door, best->id};
+}
+
 // Бегом, а не шагом: угроза настоящая.
 bool mustRun(const Context& ctx) {
     return ctx.threat.level >= kFleeMinThreat;
@@ -1384,6 +1606,12 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalAvenge(ctx);
     case Action::Salvage:
         return evalSalvage(ctx);
+    case Action::Work:
+        return evalWork(ctx);
+    case Action::Buy:
+        return evalBuy(ctx);
+    case Action::SeeDoctor:
+        return evalSeeDoctor(ctx);
     case Action::Count:
         break;
     }
@@ -1470,6 +1698,10 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
         if (desperate) {
             return true;
         }
+        // Где на месте работники (магазин открыт), при них не обыскивают (этап 7.2).
+        if (isOpen(world, building)) {
+            return false;
+        }
         auto it = std::lower_bound(residents.begin(), residents.end(),
                                    std::pair<EntityId, EntityId>{building, 0});
         for (; it != residents.end() && it->first == building; ++it) {
@@ -1502,12 +1734,19 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
             const Places::BuildingPlace* pick =
                 candidates[rng.below(static_cast<std::uint32_t>(candidates.size()))];
             const float d = distance(ctx.x, ctx.y, cellX(pick->door), cellY(pick->door));
+            // У двери полицейский — не туда (этап 7.2).
+            if (!desperate &&
+                policeNearby(world, cellX(pick->door), cellY(pick->door), kPoliceWatch)) {
+                continue;
+            }
             if (best == nullptr || d < bestDistance) {
                 best = pick;
                 bestDistance = d;
             }
         }
-        return *best;
+        if (best != nullptr) {
+            return *best;
+        }
     }
     return std::nullopt;
 }
@@ -1622,6 +1861,9 @@ public:
             finish();
             think();
         } else if (tick_ >= mind_.nextThink) {
+            if (mind_.action == Action::Work) {
+                lunch();
+            }
             reconsider();
         }
     }
@@ -2059,6 +2301,9 @@ private:
                 return false;
             }
             option.spot = *door;
+        } else if (action == Action::Work) {
+            option.spot = pickWorkSpot(ctx, option.spot);
+            packLunch(ctx);
         } else if (action == Action::Fight || action == Action::Avenge) {
             if (action == Action::Fight) {
                 option.spot = ctx.cell; // подойти к зомби — по ходу боя (updateFight)
@@ -2276,6 +2521,25 @@ private:
         case Action::Salvage:
             duration = kSalvageMinutes;
             break;
+        case Action::Work: {
+            // До конца смены; полицейский — постоять и идти дальше по обходу.
+            const Job* job = registry_.try_get<Job>(entity_);
+            const std::uint64_t end = job != nullptr ? shiftEndTick(*job, tick_) : tick_;
+            mind_.until = end;
+            if (job != nullptr && job->profession == Profession::PoliceOfficer) {
+                mind_.until = std::min(
+                    end, tick_ + minutes(rng_.rangeInt(kPatrolMinMinutes, kPatrolMaxMinutes)));
+            }
+            mind_.until = std::max(mind_.until, tick_ + 1);
+            mind_.nextThink = std::min(mind_.until, tick_ + minutes(kThinkMinutes));
+            return;
+        }
+        case Action::Buy:
+            duration = kBuyMinutes;
+            break;
+        case Action::SeeDoctor:
+            duration = kDoctorMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -2359,9 +2623,191 @@ private:
         case Action::Salvage:
             salvage(carry);
             break;
+        case Action::Buy:
+            buy(carry);
+            break;
+        case Action::SeeDoctor:
+            seeDoctor();
+            break;
         default:
             break;
         }
+    }
+
+    // --- Мирная жизнь (этап 7.2) ------------------------------------------------
+
+    // Где работать: продавцу, врачу, учителю — у двери; фермеру — клетка поля у
+    // фермы; полицейскому — в начале смены участок, дальше — дверь в своём
+    // поселении недалеко от участка (иногда снова участок).
+    Cell pickWorkSpot(const Context& ctx, Cell door) {
+        const Job* job = ctx.job;
+        const entt::entity workplace = job != nullptr ? world_.find(job->workplace) : entt::null;
+        if (workplace == entt::null) {
+            return door;
+        }
+        const Map& map = world_.map();
+        const NavGrid& nav = world_.nav();
+        if (job->profession == Profession::Farmer) {
+            // Уже в поле (обед, перерыв) — там же и дальше.
+            if (ctx.current == Action::Work && map.ground.at(ctx.cell.x, ctx.cell.y) == Ground::Field) {
+                return ctx.cell;
+            }
+            for (int attempt = 0; attempt < kFieldAttempts; ++attempt) {
+                const Cell cell{door.x + rng_.rangeInt(-kFieldCells, kFieldCells),
+                                door.y + rng_.rangeInt(-kFieldCells, kFieldCells)};
+                if (map.contains(cell) && map.ground.at(cell.x, cell.y) == Ground::Field &&
+                    nav.passable(cell) && nav.connected(door, cell) && !risky(ctx, cell)) {
+                    return cell;
+                }
+            }
+            return door;
+        }
+        if (job->profession != Profession::PoliceOfficer || ctx.current != Action::Work ||
+            rng_.chance(kStationChance)) {
+            return door;
+        }
+        const Places::SettlementPlace* settlement =
+            world_.places().settlement(registry_.get<Building>(workplace).settlement);
+        if (settlement == nullptr || settlement->buildings.empty()) {
+            return door;
+        }
+        for (int attempt = 0; attempt < kPatrolAttempts; ++attempt) {
+            const Cell next = settlement->buildings[rng_.below(
+                static_cast<std::uint32_t>(settlement->buildings.size()))].door;
+            if (next != ctx.cell &&
+                distance(cellX(next), cellY(next), cellX(door), cellY(door)) <= kPatrolRange &&
+                !risky(ctx, next)) {
+                return next;
+            }
+        }
+        return door;
+    }
+
+    // Уходя из дома на работу — взять с собой поесть и попить, если дома есть.
+    void packLunch(const Context& ctx) {
+        if (!ctx.atHome || ctx.current == Action::Work) {
+            return;
+        }
+        const entt::entity home = world_.find(ctx.homeId);
+        Inventory* stock = home != entt::null ? registry_.try_get<Inventory>(home) : nullptr;
+        if (stock == nullptr) {
+            return;
+        }
+        Inventory& carry = registry_.get<Inventory>(entity_);
+        if (carry.food() == 0 && stock->food() >= 2) {
+            const ItemKind kind = stock->count(ItemKind::Meat) > 0 ? ItemKind::Meat : ItemKind::Food;
+            if (roomFor(carry, kind) > 0) {
+                carry.add(kind, stock->take(kind, 1));
+            }
+        }
+        if (carry.count(ItemKind::Water) == 0 && stock->count(ItemKind::Water) >= 2 &&
+            roomFor(carry, ItemKind::Water) > 0) {
+            carry.add(ItemKind::Water, stock->take(ItemKind::Water, 1));
+        }
+    }
+
+    // Обед на работе: поесть и попить из взятого с собой, не бросая дела.
+    void lunch() {
+        Inventory& carry = registry_.get<Inventory>(entity_);
+        if (needs_.hunger > kLunchHunger && eatFrom(carry)) {
+            needs_.hunger = clamp01(needs_.hunger - kMeal);
+        }
+        if (needs_.thirst > kLunchThirst && carry.take(ItemKind::Water, 1) == 1) {
+            needs_.thirst = clamp01(needs_.thirst - kWaterPortion);
+        }
+    }
+
+    // Работник этого здания на месте с наименьшим id, кроме себя; kInvalidId — никого.
+    EntityId staffOnDuty(EntityId building) const {
+        EntityId best = kInvalidId;
+        for (const auto [entity, id, job] : registry_.view<const Id, const Job>().each()) {
+            if (job.workplace == building && id.value != id_ &&
+                (best == kInvalidId || id.value < best) && isOnDuty(world_, entity)) {
+                best = id.value;
+            }
+        }
+        return best;
+    }
+
+    // Купить в магазине, к которому шёл, если он ещё открыт (свой — всегда):
+    // еды до запаса (голодному без еды — хотя бы порцию), воды, если её нет,
+    // бинт, если при себе нет. Сколько хватит денег и сколько есть на полках.
+    // Полки пусты — запомнить магазин и туда пока не ходить.
+    void buy(Inventory& carry) {
+        const entt::entity shop = world_.find(mind_.target);
+        Inventory* stock = shop != entt::null ? registry_.try_get<Inventory>(shop) : nullptr;
+        Wallet* wallet = registry_.try_get<Wallet>(entity_);
+        auto* workplace = shop != entt::null ? registry_.try_get<Workplace>(shop) : nullptr;
+        if (stock == nullptr || wallet == nullptr || workplace == nullptr) {
+            return;
+        }
+        const Job* job = registry_.try_get<Job>(entity_);
+        const bool staff = job != nullptr && job->workplace == mind_.target;
+        if (!staff && workplace->onDuty == 0) {
+            return; // закрыли, пока шёл
+        }
+        const Traits* traits = registry_.try_get<Traits>(entity_);
+        const entt::entity home = world_.find(person_.home);
+        const Inventory* homeStock = home != entt::null ? registry_.try_get<Inventory>(home) : nullptr;
+        const int homeFood = homeStock != nullptr ? homeStock->food() : 0;
+        const int homeWater = homeStock != nullptr ? homeStock->count(ItemKind::Water) : 0;
+        const auto purchase = [&](ItemKind kind, int want) {
+            const int price = priceOf(kind);
+            const int count = std::max(0, std::min({want, roomFor(carry, kind),
+                                                    static_cast<int>(stock->count(kind)),
+                                                    price > 0 ? wallet->money / price : 0}));
+            stock->take(kind, count);
+            carry.add(kind, count);
+            wallet->money -= count * price;
+            workplace->till += count * price;
+            return count;
+        };
+        int wantFood = (traits != nullptr ? buyTarget(*traits) : kBuyStockBase) - carry.food() - homeFood;
+        if (carry.food() + homeFood == 0 && needs_.hunger > kSnackThreshold) {
+            wantFood = std::max(wantFood, 1);
+        }
+        const bool hadFood = stock->count(ItemKind::Food) > 0;
+        const int food = purchase(ItemKind::Food, std::min(wantFood, kCarryFoodMax - carry.food()));
+        const int water = purchase(ItemKind::Water, kBuyWater - carry.count(ItemKind::Water) - homeWater);
+        if (carry.count(ItemKind::Bandage) == 0 && wallet->money >= kBandageBudget) {
+            purchase(ItemKind::Bandage, 1);
+        }
+        world_.record(ChronicleKind::Bought, id_, mind_.target, food, water,
+                      staff ? kInvalidId : staffOnDuty(mind_.target));
+        if (hadFood && stock->count(ItemKind::Food) == 0) {
+            world_.record(ChronicleKind::SoldOut, mind_.target, id_);
+        }
+        if (food == 0 && water == 0 && !hadFood) {
+            remember(mind_, mind_.target); // полки пусты — сюда пока не ходить
+        }
+    }
+
+    // В больнице: врач на смене останавливает кровь и лечит — с лекарством
+    // больницы лучше. Ушёл врач, пока шёл, — ни с чем. Вылеченный благодарен врачу.
+    void seeDoctor() {
+        const entt::entity hospital = world_.find(mind_.target);
+        const EntityId doctor = hospital != entt::null ? staffOnDuty(mind_.target) : kInvalidId;
+        if (doctor == kInvalidId) {
+            return;
+        }
+        Inventory* stock = registry_.try_get<Inventory>(hospital);
+        bool stopped = false;
+        if (auto* wounds = registry_.try_get<Wounds>(entity_); wounds != nullptr && wounds->bleeding > 0.0f) {
+            wounds->bleeding = 0.0f;
+            stopped = true;
+            if (stock != nullptr) {
+                stock->take(ItemKind::Bandage, 1);
+            }
+        }
+        const float heal = stock != nullptr && stock->take(ItemKind::Medicine, 1) == 1
+                               ? kDoctorMedicineHeal
+                               : kDoctorHeal;
+        const float before = needs_.health;
+        needs_.health = clamp01(needs_.health + heal);
+        world_.record(ChronicleKind::SawDoctor, id_, mind_.target,
+                      static_cast<std::int32_t>(std::lround(100.0f * (needs_.health - before))),
+                      stopped ? 1 : 0, doctor);
+        experience(world_, entity_, MemoryKind::Helped, doctor, mind_.target, 1);
     }
 
     // На месте ивента (этап 7.1): забрать из ближайшего непустого груза то же,

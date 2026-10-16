@@ -4,12 +4,13 @@
 //   lw_headless --seed 42 --paths 500 замер поиска пути: пары дверей и пары случайных клеток суши
 //                                     (--optimal — сравнить каждый путь с оптимальным)
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
-//   lw_headless --seed 42 --zombies 0                    мир без зомби
+//   lw_headless --seed 42 --zombies 400 --no-peace       мир сразу после катастрофы, как до этапа 7.2
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 //   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
 //   lw_headless --seed 42 --ticks 1440000 --social        и список социальных событий (этап 6)
 //   lw_headless --seed 42 --ticks 720000 --events         и журнал ивентов (этап 7)
-//   lw_headless --seed 42 --no-events --event drop 3      без расписания, один сброс груза через 3 ч
+//   lw_headless --seed 42 --event drop 3                 один сброс груза через 3 ч
+//   lw_headless --seed 42 --event-schedule               временное расписание ивентов (до рассказчика)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -18,6 +19,7 @@
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
+#include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
@@ -131,7 +133,8 @@ void printPeople(const lw::World& world) {
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
                                         "forage", "socialize", "wander", "go home", "flee",
                                         "fight",  "hunt",      "treat",  "share",   "trade",
-                                        "steal",  "avenge",    "salvage"};
+                                        "steal",  "avenge",    "salvage", "work",
+                                        "buy",    "doctor"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -183,6 +186,95 @@ void printPeople(const lw::World& world) {
 }
 
 // Отношения (этап 6.2): сколько знакомых, друзей и недругов у живых.
+// Мирная жизнь (этап 7.2): кто работает, деньги, места работы, покупки.
+void printWork(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr std::size_t kProfessions = static_cast<std::size_t>(lw::Profession::Count);
+    std::size_t byProfession[kProfessions] = {};
+    std::size_t people = 0;
+    std::size_t onDuty = 0;
+    long long money = 0;
+    int poorest = 0;
+    std::size_t broke = 0;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        ++people;
+        const auto* job = registry.try_get<lw::Job>(entity);
+        ++byProfession[static_cast<std::size_t>(job != nullptr ? job->profession : lw::Profession::None)];
+        onDuty += lw::isOnDuty(world, entity) ? 1 : 0;
+        if (const auto* wallet = registry.try_get<lw::Wallet>(entity)) {
+            money += wallet->money;
+            poorest = people == 1 ? wallet->money : std::min(poorest, wallet->money);
+            broke += wallet->money < lw::kFoodPrice ? 1 : 0;
+        }
+    }
+    std::printf("work: employed %zu of %zu (shopkeepers %zu, farmers %zu, doctors %zu, police %zu, "
+                "teachers %zu), on duty %zu; money mean %.0f (min %d, broke %zu)\n",
+                people - byProfession[0], people, byProfession[1], byProfession[2], byProfession[3],
+                byProfession[4], byProfession[5], onDuty,
+                people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0, poorest,
+                broke);
+    // Здания по видам: всего, с работниками, открыто, еды в тех, где работают.
+    constexpr lw::BuildingKind kKinds[] = {lw::BuildingKind::Shop, lw::BuildingKind::Barn,
+                                           lw::BuildingKind::Hospital,
+                                           lw::BuildingKind::PoliceStation, lw::BuildingKind::School};
+    constexpr const char* kKindNames[] = {"shops", "farms", "hospitals", "police", "schools"};
+    std::printf("  workplaces:");
+    for (std::size_t k = 0; k < std::size(kKinds); ++k) {
+        std::size_t total = 0;
+        std::size_t staffed = 0;
+        std::size_t open = 0;
+        long long food = 0;
+        for (const auto [entity, building] : registry.view<const lw::Building>().each()) {
+            if (building.kind != kKinds[k]) {
+                continue;
+            }
+            ++total;
+            if (const auto* workplace = registry.try_get<lw::Workplace>(entity)) {
+                ++staffed;
+                open += workplace->onDuty > 0 ? 1 : 0;
+                if (const auto* inventory = registry.try_get<lw::Inventory>(entity)) {
+                    food += inventory->food();
+                }
+            }
+        }
+        std::printf(" %s %zu of %zu (open %zu, food %lld)%s", kKindNames[k], staffed, total, open,
+                    food, k + 1 < std::size(kKinds) ? "," : "\n");
+    }
+    // Жители и работающие по поселениям: «Зеленогорск 80/20».
+    std::printf("  residents/employed:");
+    for (const lw::Places::SettlementPlace& place : world.places().settlements()) {
+        std::size_t residents = 0;
+        std::size_t employed = 0;
+        for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+            const entt::entity home = world.find(person.home);
+            if (home != entt::null && registry.get<lw::Building>(home).settlement == place.id) {
+                ++residents;
+                const auto* job = registry.try_get<lw::Job>(entity);
+                employed += job != nullptr && job->profession != lw::Profession::None ? 1 : 0;
+            }
+        }
+        std::printf(" %s %zu/%zu", registry.get<lw::Settlement>(world.find(place.id)).name.c_str(),
+                    residents, employed);
+    }
+    std::printf("\n");
+    long long food = 0;
+    long long water = 0;
+    std::size_t empty = 0;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Bought) {
+            food += event.a;
+            water += event.b;
+            empty += event.a == 0 && event.b == 0 ? 1 : 0;
+        }
+    }
+    const lw::Chronicle& chronicle = world.chronicle();
+    std::printf("  bought %zu times (empty shelves %zu): food %lld, water %lld; sold out %zu; "
+                "doctor visits %zu\n",
+                chronicle.countOf(lw::ChronicleKind::Bought), empty, food, water,
+                chronicle.countOf(lw::ChronicleKind::SoldOut),
+                chronicle.countOf(lw::ChronicleKind::SawDoctor));
+}
+
 void printRelations(const lw::World& world) {
     const entt::registry& registry = world.registry();
     std::size_t people = 0;
@@ -737,7 +829,7 @@ void printClimate(std::uint64_t seed) {
 void printDailyHeader() {
     std::printf("day season | people (hungry thirsty) | zombies hordes | animals | died: wounds "
                 "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
-                "forest | ammo\n");
+                "forest | ammo | bought money\n");
 }
 
 void printDaily(const lw::World& world) {
@@ -771,16 +863,21 @@ void printDaily(const lw::World& world) {
     for (const auto [entity, person, weapon] : registry.view<const lw::Person, const lw::Weapon>().each()) {
         ammo += weapon.ammo;
     }
+    long long money = 0;
+    for (const auto [entity, person, wallet] : registry.view<const lw::Person, const lw::Wallet>().each()) {
+        money += wallet.money;
+    }
     const lw::Chronicle& chronicle = world.chronicle();
     std::printf("%3d %d | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
-                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld\n",
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f\n",
                 time.day, static_cast<int>(time.season), people, hungry, thirsty,
                 registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
                 registry.view<const lw::Animal>().size(), died[0], died[1], died[2], died[3],
                 died[4], died[5], chronicle.countOf(lw::ChronicleKind::Turned),
                 chronicle.countOf(lw::ChronicleKind::KilledZombie),
                 chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
-                world.resources().forestTotal(), ammo);
+                world.resources().forestTotal(), ammo, chronicle.countOf(lw::ChronicleKind::Bought),
+                people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0);
     std::fflush(stdout);
 }
 
@@ -972,8 +1069,10 @@ int main(int argc, char** argv) {
             profile = true;
         } else if (std::strcmp(argv[i], "--events") == 0) {
             eventLog = true;
-        } else if (std::strcmp(argv[i], "--no-events") == 0) {
-            config.events = false;
+        } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
+            config.events = true;
+        } else if (std::strcmp(argv[i], "--no-peace") == 0) {
+            config.peacetime = false;
         } else if (std::strcmp(argv[i], "--event") == 0 && i + 2 < argc &&
                    lw::eventKindByName(argv[i + 1])) {
             manualEvent = lw::eventKindByName(argv[++i]);
@@ -989,7 +1088,8 @@ int main(int argc, char** argv) {
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
-                        "[--social] [--events] [--no-events] [--event drop HOURS] [--profile]\n");
+                        "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
+                        "[--profile]\n");
             return 2;
         }
     }
@@ -1036,6 +1136,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printWork(world);
     printRelations(world);
     printMemories(world);
     printGroups(world);

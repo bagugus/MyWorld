@@ -9,11 +9,13 @@
 #include "sim/TimeScale.h"
 #include "sim/Items.h"
 #include "sim/Weapons.h"
+#include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "sim/systems/WorkSystem.h"
 #include "sim/systems/ZombieSystem.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
@@ -32,6 +34,18 @@
 namespace lw::ui {
 
 namespace {
+
+// «08:00–18:00, пн вт ср чт пт сб» — смена и рабочие дни (этап 7.2).
+void formatShift(char* buffer, std::size_t size, const Job& job) {
+    constexpr const char* kDays[kDaysPerWeek] = {"пн", "вт", "ср", "чт", "пт", "сб", "вс"};
+    int used = std::snprintf(buffer, size, "%02d:%02d–%02d:%02d,", job.start / 60, job.start % 60,
+                             job.end / 60, job.end % 60);
+    for (int d = 0; d < kDaysPerWeek && used > 0 && static_cast<std::size_t>(used) < size; ++d) {
+        if (isWorkday(job, d)) {
+            used += std::snprintf(buffer + used, size - static_cast<std::size_t>(used), " %s", kDays[d]);
+        }
+    }
+}
 
 constexpr float kPickPixels = 8.0f;
 constexpr Color kSelectionColor = {255, 255, 255, 255};
@@ -582,6 +596,28 @@ void Inspector::drawPerson(entt::entity entity) {
                 return;
             }
         }
+    }
+    // Работа и деньги (этап 7.2).
+    if (const auto* job = registry.try_get<Job>(entity);
+        job != nullptr && job->profession != Profession::None) {
+        ImGui::Text("Работа: %s,", professionName(job->profession));
+        ImGui::SameLine();
+        if (idLink(job->workplace)) {
+            select(job->workplace);
+            return;
+        }
+        char shift[96];
+        formatShift(shift, sizeof(shift), *job);
+        const bool now = onShift(*job, calendarAt(tick));
+        ImGui::Text("Смена %s; %s", shift,
+                    !now ? "сейчас не его смена"
+                    : isOnDuty(world_, entity) ? "сейчас на месте"
+                                               : "сейчас смена, а его нет на месте");
+    } else if (registry.all_of<Wallet>(entity)) {
+        ImGui::TextUnformatted("Работа: нет");
+    }
+    if (const auto* wallet = registry.try_get<Wallet>(entity)) {
+        ImGui::Text("Деньги: %d", wallet->money);
     }
     if (const auto* carry = registry.try_get<Inventory>(entity)) {
         char text[256];
@@ -1378,6 +1414,50 @@ void Inspector::drawBuilding(entt::entity entity) {
                 building.door.y);
     drawSupplies(registry, entity);
 
+    // Место работы (этап 7.2): открыто ли, касса, урожай, работники.
+    std::vector<EntityId> workers;
+    for (const auto [other, id, job] : registry.view<const Id, const Job>().each()) {
+        if (job.workplace == selected_) {
+            workers.push_back(id.value);
+        }
+    }
+    std::sort(workers.begin(), workers.end());
+    EntityId clicked = kInvalidId;
+    if (const auto* workplace = registry.try_get<Workplace>(entity)) {
+        ImGui::SeparatorText("Место работы");
+        if (workplace->onDuty > 0) {
+            ImGui::Text("Открыто: работников на месте %d", workplace->onDuty);
+        } else {
+            ImGui::TextDisabled("Закрыто: никого из работников нет на месте");
+        }
+        if (building.kind == BuildingKind::Shop) {
+            ImGui::Text("Касса: %d (сдаётся при завозе в %02d:00)", workplace->till, kRestockHour);
+        }
+        if (building.kind == BuildingKind::Barn) {
+            ImGui::Text("Урожай: %.1f порции в час на фермера, набирается %.0f %% порции",
+                        harvestPerHour(calendarAt(world_.tick()).season), 100.0f * workplace->harvest);
+        }
+        ImGui::PushID("workers");
+        for (const EntityId worker : workers) {
+            if (idLink(worker)) {
+                clicked = worker;
+            }
+            const entt::entity person = world_.find(worker);
+            const auto* job = person != entt::null ? registry.try_get<Job>(person) : nullptr;
+            if (job != nullptr) {
+                char shift[96];
+                formatShift(shift, sizeof(shift), *job);
+                ImGui::SameLine();
+                ImGui::Text("%s, %s%s", professionName(job->profession), shift,
+                            registry.all_of<Person>(person) ? (isOnDuty(world_, person) ? " — на месте" : "")
+                                                            : " — погиб");
+            }
+        }
+        ImGui::PopID();
+    } else if (!workers.empty()) {
+        ImGui::TextDisabled("Место работы без работников");
+    }
+
     // Жильцы и те, кто идёт сюда или что-то здесь делает.
     std::vector<EntityId> residents;
     std::vector<std::pair<EntityId, Action>> visitors;
@@ -1393,7 +1473,6 @@ void Inspector::drawBuilding(entt::entity entity) {
     std::sort(visitors.begin(), visitors.end());
 
     // Один и тот же человек может быть в обоих списках: у ссылок разные области id.
-    EntityId clicked = kInvalidId;
     ImGui::SeparatorText("Жильцы");
     if (residents.empty()) {
         ImGui::TextDisabled("никого");
@@ -1451,10 +1530,15 @@ void Inspector::drawSettlement(entt::entity entity) {
     }
     std::sort(homes.begin(), homes.end());
     int people = 0;
+    int employed = 0;
     for (const auto [other, person] : registry.view<const Person>().each()) {
-        people += std::binary_search(homes.begin(), homes.end(), person.home) ? 1 : 0;
+        if (std::binary_search(homes.begin(), homes.end(), person.home)) {
+            ++people;
+            const auto* job = registry.try_get<Job>(other);
+            employed += job != nullptr && job->profession != Profession::None ? 1 : 0;
+        }
     }
-    ImGui::Text("Зданий: %d, жителей: %d", buildings, people);
+    ImGui::Text("Зданий: %d, жителей: %d (работают %d)", buildings, people, employed);
     ImGui::Text("Припасы во всех зданиях: еды %d, воды %d", food, water);
 }
 

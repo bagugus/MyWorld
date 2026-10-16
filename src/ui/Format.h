@@ -16,6 +16,8 @@ namespace lw::ui {
 // Подписи и мелкие виджеты, общие для панелей.
 
 const char* buildingName(BuildingKind kind);
+// Профессия: «продавец», «без работы».
+const char* professionName(Profession profession);
 const char* settlementKindName(SettlementKind kind);
 // Занятие человека: «спит», «ищет припасы».
 const char* actionName(Action action);

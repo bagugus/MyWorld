@@ -18,13 +18,27 @@ const char* buildingName(BuildingKind kind) {
     case BuildingKind::House:
         return "дом";
     case BuildingKind::Barn:
-        return "сарай";
+        return "ферма";
     case BuildingKind::Apartment:
         return "многоэтажка";
     case BuildingKind::Shop:
         return "магазин";
+    case BuildingKind::Hospital:
+        return "больница";
+    case BuildingKind::PoliceStation:
+        return "полиция";
+    case BuildingKind::School:
+        return "школа";
     }
     return "здание";
+}
+
+const char* professionName(Profession profession) {
+    constexpr const char* kNames[] = {"без работы", "продавец", "фермер", "врач", "полицейский",
+                                      "учитель"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(Profession::Count));
+    const auto index = static_cast<std::size_t>(profession);
+    return index < std::size(kNames) ? kNames[index] : "—";
 }
 
 const char* settlementKindName(SettlementKind kind) {
@@ -36,7 +50,8 @@ const char* actionName(Action action) {
                                       "ищет припасы", "собирает в лесу", "общается",
                                       "гуляет",   "уходит домой", "убегает", "дерётся",
                                       "охотится", "перевязывается", "делится", "меняется",
-                                      "крадёт",   "мстит",    "идёт к месту ивента"};
+                                      "крадёт",   "мстит",    "идёт к месту ивента",
+                                      "на работе", "за покупками", "у врача"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
     const auto index = static_cast<std::size_t>(action);
     return index < std::size(kNames) ? kNames[index] : "—";

@@ -394,6 +394,41 @@ Phrase phraseOf(const ChronicleEvent& event) {
                           event.a);
         }
         break;
+    case ChronicleKind::Employed:
+        phrase.verb = "получил работу:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      professionName(static_cast<Profession>(event.a)));
+        break;
+    case ChronicleKind::Bought:
+        phrase.verb = "купил в магазине";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "у";
+            phrase.withThird = true;
+            phrase.thirdSelf = "него";
+        }
+        if (event.a == 0 && event.b == 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— ничего: полки пусты");
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        }
+        break;
+    case ChronicleKind::SoldOut:
+        phrase.verb = "— кончилась еда, последнюю купил";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::SawDoctor:
+        phrase.verb = "лечился в больнице";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "у";
+            phrase.withThird = true;
+            phrase.thirdSelf = "него";
+        }
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— здоровья +%d %%%s", event.a,
+                      event.b == 1 ? ", остановили кровь" : "");
+        break;
     case ChronicleKind::Count:
         break;
     }

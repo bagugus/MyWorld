@@ -5,6 +5,7 @@
 #include "sim/Hash.h"
 #include "sim/Names.h"
 #include "sim/Population.h"
+#include "sim/Work.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
@@ -18,6 +19,7 @@
 #include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
+#include "sim/systems/WorkSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
@@ -44,6 +46,10 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     initWeather(*this);
     spawnLoot(*this);
     spawnPeople(*this, config_.people);
+    // Профессии и сбережения (этап 7.2) — свой поток рандома: остальное не сдвигается.
+    if (config_.peacetime) {
+        assignJobs(*this);
+    }
     // Зомби селятся подальше от людей: индекс должен их уже видеть.
     spatial_.sync(registry_);
     spawnZombies(*this, config_.zombies);
@@ -81,7 +87,7 @@ void World::generate() {
 namespace {
 
 constexpr const char* kPhaseNames[World::kStepPhases] = {
-    "weather", "resources", "events", "needs", "relations", "memories", "groups", "bodies",
+    "weather", "resources", "events", "work", "needs", "relations", "memories", "groups", "bodies",
     "perception", "zombies", "animals", "utility ai", "combat", "movement", "spatial sync"};
 
 } // namespace
@@ -110,6 +116,9 @@ void World::step() {
     lap();
     // Ивенты — до восприятия: шум начавшегося ивента слышат в этом же тике.
     updateEvents(*this);
+    lap();
+    // Работа — до решений: кто на месте (открыт ли магазин), плата, завоз.
+    updateWork(*this);
     lap();
     tickNeeds(*this);
     lap();
@@ -259,6 +268,24 @@ std::uint64_t World::stateHash() const {
             hasher.add(static_cast<std::uint8_t>(person->indoors));
             hasher.add(person->group);
             hasher.add(person->formerHome);
+        }
+        if (const auto* job = registry_.try_get<Job>(entity)) {
+            hasher.add(std::uint64_t{32});
+            hasher.add(static_cast<std::uint8_t>(job->profession));
+            hasher.add(job->workplace);
+            hasher.add(job->start);
+            hasher.add(job->end);
+            hasher.add(job->days);
+        }
+        if (const auto* wallet = registry_.try_get<Wallet>(entity)) {
+            hasher.add(std::uint64_t{33});
+            hasher.add(wallet->money);
+        }
+        if (const auto* workplace = registry_.try_get<Workplace>(entity)) {
+            hasher.add(std::uint64_t{34});
+            hasher.add(workplace->onDuty);
+            hasher.add(workplace->till);
+            hasher.add(workplace->harvest);
         }
         if (const auto* name = registry_.try_get<Name>(entity)) {
             hasher.add(std::uint64_t{31});

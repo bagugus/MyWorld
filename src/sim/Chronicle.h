@@ -68,6 +68,10 @@ enum class ChronicleKind : std::uint8_t {
     LearnedOfEvent, // узнал об ивенте object: a — как (EventClue); third — кто рассказал
     Salvaged,      // забрал из груза object (или, если груза нет, пришёл к ивенту object): еды a, воды b
     EventEnded,    // ивент (subject) закончился: a — грузов с добром осталось
+    Employed,      // получил работу в object: a — профессия (Profession) (этап 7.2)
+    Bought,        // купил в магазине object еды a, воды b (оба 0 — полки пусты); third — продавец
+    SoldOut,       // в магазине (subject) кончилась еда; object — кто купил последнюю
+    SawDoctor,     // лечился в больнице object: здоровья +a %, b = 1 — остановили кровь; third — врач
     Count
 };
 

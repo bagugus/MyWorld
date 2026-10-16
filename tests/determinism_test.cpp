@@ -3,7 +3,7 @@
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
 // память, долг и обида, чужие поступки и слухи, группы, социальные действия
-// (поделиться, обмен, предательство, месть), ивенты.
+// (поделиться, обмен, предательство, месть), ивенты, мирная жизнь.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -24,6 +24,7 @@
 #include "sim/SpatialIndex.h"
 #include "sim/Traits.h"
 #include "sim/Weapons.h"
+#include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/nav/NavGraph.h"
 #include "sim/nav/NavGrid.h"
@@ -39,6 +40,7 @@
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
+#include "sim/systems/WorkSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
@@ -73,6 +75,7 @@ lw::WorldConfig smallConfig(int people) {
     config.animals = 0;
     config.flocks = 0;
     config.events = false;
+    config.peacetime = false; // мирная жизнь (этап 7.2) — в своих тестах
     return config;
 }
 
@@ -188,6 +191,7 @@ lw::WorldConfig regionConfig() {
     config.animals = 0;
     config.flocks = 0;
     config.events = false;
+    config.peacetime = false; // мирная жизнь (этап 7.2) — в своих тестах
     return config;
 }
 
@@ -335,6 +339,7 @@ void testEntitiesStayInWorld() {
     config.animals = 0;
     config.flocks = 0;
     config.events = false;
+    config.peacetime = false; // мирная жизнь (этап 7.2) — в своих тестах
     // Люди и, отдельно, зомби: рядом с людьми зомби не селятся.
     lw::WorldConfig undead = config;
     undead.people = 0;
@@ -5149,6 +5154,507 @@ void testEventEnds() {
           ended.a == static_cast<std::int32_t>(kept.caches.size()));
 }
 
+// --- Мирная жизнь (этап 7.2) -------------------------------------------------
+
+// Мир 4 × 4 км с мирной жизнью: профессии, деньги, магазины, водопровод.
+lw::WorldConfig peaceConfig(int people) {
+    lw::WorldConfig config = regionConfig();
+    config.people = people;
+    config.peacetime = true;
+    return config;
+}
+
+// Живой работник этой профессии с наименьшим id; entt::null — нет.
+entt::entity workerOf(const lw::World& world, lw::Profession profession) {
+    entt::entity best = entt::null;
+    lw::EntityId bestId = lw::kInvalidId;
+    for (const auto [entity, id, person, job] :
+         world.registry().view<const lw::Id, const lw::Person, const lw::Job>().each()) {
+        if (job.profession == profession && (best == entt::null || id.value < bestId)) {
+            best = entity;
+            bestId = id.value;
+        }
+    }
+    return best;
+}
+
+// Прокрутить мир на столько игровых минут.
+void runMinutes(lw::World& world, int gameMinutes) {
+    const std::uint64_t end = world.tick() + static_cast<std::uint64_t>(gameMinutes) * lw::kTicksPerGameMinute;
+    while (world.tick() < end) {
+        world.step();
+    }
+}
+
+// Прокрутить мир до ближайшего времени суток hour:minute.
+void runUntil(lw::World& world, int hour, int minute) {
+    const std::uint64_t end = lw::nextTimeOfDay(world.tick(), hour, minute);
+    while (world.tick() < end) {
+        world.step();
+    }
+}
+
+// Пересмотреть решение в следующем тике (как decideNow, но без Field).
+const lw::Mind& thinkNow(lw::World& world, entt::entity person) {
+    lw::Mind& mind = world.registry().get<lw::Mind>(person);
+    mind.action = lw::Action::Idle;
+    mind.phase = lw::ActionPhase::Perform;
+    mind.until = world.tick();
+    mind.nextThink = world.tick();
+    world.step();
+    return world.registry().get<lw::Mind>(person);
+}
+
+// Безработный житель поселения с открытым зданием вида kind; entt::null — нет.
+entt::entity idlerNear(const lw::World& world, lw::BuildingKind kind) {
+    const entt::registry& registry = world.registry();
+    std::vector<std::pair<lw::EntityId, entt::entity>> idlers;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const auto* job = registry.try_get<lw::Job>(entity);
+        if ((job == nullptr || job->profession == lw::Profession::None) && person.home != lw::kInvalidId) {
+            idlers.emplace_back(id.value, entity);
+        }
+    }
+    std::sort(idlers.begin(), idlers.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [id, entity] : idlers) {
+        const lw::EntityId settlement =
+            registry.get<lw::Building>(world.find(registry.get<lw::Person>(entity).home)).settlement;
+        for (const lw::Places::BuildingPlace& building : world.places().settlement(settlement)->buildings) {
+            if (building.kind == kind && lw::isOpen(world, building.id)) {
+                return entity;
+            }
+        }
+    }
+    return entt::null;
+}
+
+// Мир начинается с мирной жизни: зомби нет, в городе больница, полиция и
+// школа, в деревне — магазин; у людей профессии в своём поселении и деньги.
+void testPeacefulStart() {
+    const lw::WorldConfig defaults;
+    CHECK(defaults.zombies == 0 && defaults.peacetime && !defaults.events);
+    const lw::World world(7, peaceConfig(150));
+    const lw::World twin(7, peaceConfig(150));
+    CHECK(world.stateHash() == twin.stateHash());
+    const entt::registry& registry = world.registry();
+    CHECK(registry.view<const lw::Zombie>().empty());
+
+    bool town = false;
+    for (const lw::Places::SettlementPlace& place : world.places().settlements()) {
+        int kinds[7] = {};
+        for (const lw::Places::BuildingPlace& building : place.buildings) {
+            ++kinds[static_cast<std::size_t>(building.kind)];
+        }
+        const int hospitals = kinds[static_cast<std::size_t>(lw::BuildingKind::Hospital)];
+        const int police = kinds[static_cast<std::size_t>(lw::BuildingKind::PoliceStation)];
+        const int schools = kinds[static_cast<std::size_t>(lw::BuildingKind::School)];
+        if (registry.get<lw::Settlement>(world.find(place.id)).kind == lw::SettlementKind::Town) {
+            town = true;
+            CHECK(hospitals == 1 && police == 1 && schools == 1);
+        } else {
+            CHECK(hospitals == 0 && police == 0 && schools == 0);
+            const int shops = kinds[static_cast<std::size_t>(lw::BuildingKind::Shop)];
+            CHECK(shops <= 1);
+            CHECK(shops == 1 || kinds[static_cast<std::size_t>(lw::BuildingKind::House)] < 4);
+        }
+    }
+    CHECK(town);
+
+    int employed = 0;
+    for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
+        ++employed;
+        const entt::entity workplace = world.find(job.workplace);
+        CHECK(workplace != entt::null);
+        if (workplace == entt::null) {
+            continue;
+        }
+        const lw::Building& building = registry.get<lw::Building>(workplace);
+        CHECK(building.kind == lw::professionSpec(job.profession).workplace);
+        CHECK(building.settlement == registry.get<lw::Building>(world.find(person.home)).settlement);
+        CHECK(job.start < job.end && job.end <= 24 * 60 && job.days != 0);
+        CHECK(registry.all_of<lw::Workplace>(workplace));
+    }
+    CHECK(employed > 20);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Employed) == static_cast<std::size_t>(employed));
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        const auto* wallet = registry.try_get<lw::Wallet>(entity);
+        CHECK(wallet != nullptr && wallet->money > 0);
+    }
+
+    // Без мирной жизни — ни профессий, ни денег.
+    lw::WorldConfig plain = peaceConfig(150);
+    plain.peacetime = false;
+    const lw::World before(7, plain);
+    CHECK(before.registry().view<const lw::Job>().empty());
+    CHECK(before.registry().view<const lw::Wallet>().empty());
+    CHECK(before.registry().view<const lw::Workplace>().empty());
+}
+
+// Неделя, смены и выходные.
+void testShifts() {
+    const std::uint64_t hour = lw::kTicksPerGameHour;
+    const std::uint64_t day = lw::kTicksPerGameDay;
+    CHECK(lw::calendarAt(0).dayOfWeek == 0); // первый день мира — понедельник
+    CHECK(lw::calendarAt(6 * day).dayOfWeek == 6);
+    CHECK(lw::calendarAt(7 * day).dayOfWeek == 0);
+    lw::Job job;
+    job.profession = lw::Profession::Shopkeeper;
+    job.start = 8 * 60;
+    job.end = 18 * 60;
+    job.days = 0b0011111; // с понедельника по пятницу
+    // Тик 0 — понедельник, 08:00: смена идёт до 18:00.
+    CHECK(lw::onShift(job, lw::calendarAt(0)));
+    CHECK(lw::shiftEndTick(job, 0) == 10 * hour);
+    CHECK(!lw::onShift(job, lw::calendarAt(10 * hour)));
+    CHECK(lw::shiftEndTick(job, 10 * hour) == 10 * hour);
+    // Вторник, 07:00: смена ещё не началась, кончится в 18:00.
+    CHECK(!lw::onShift(job, lw::calendarAt(23 * hour)));
+    CHECK(lw::shiftEndTick(job, 23 * hour) == 34 * hour);
+    // Суббота — выходной.
+    CHECK(!lw::onShift(job, lw::calendarAt(5 * day + 2 * hour)));
+    CHECK(lw::shiftEndTick(job, 5 * day + 2 * hour) == 5 * day + 2 * hour);
+    CHECK(lw::priceOf(lw::ItemKind::Food) == lw::kFoodPrice && lw::priceOf(lw::ItemKind::Rifle) == 0);
+}
+
+// Продавец идёт на работу, и магазин открывается; за час на месте — плата;
+// смена кончилась — уходит, магазин закрыт.
+void testWorkday() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    const entt::entity seller = workerOf(world, lw::Profession::Shopkeeper);
+    CHECK(seller != entt::null);
+    if (seller == entt::null) {
+        return;
+    }
+    lw::Job& job = registry.get<lw::Job>(seller);
+    job.start = 8 * 60;
+    job.end = 12 * 60; // смена до полудня
+    job.days = 0b1111111;
+    registry.get<lw::Needs>(seller) = {};
+    registry.get<lw::Traits>(seller) = {};
+    const lw::EntityId shop = job.workplace;
+    CHECK(!lw::isOpen(world, shop));
+    bool arrived = false;
+    for (int minute = 0; minute < 3 * 60 && !arrived; ++minute) {
+        runMinutes(world, 1);
+        arrived = lw::isOnDuty(world, seller);
+    }
+    CHECK(arrived);
+    CHECK(registry.get<lw::Mind>(seller).action == lw::Action::Work);
+    runMinutes(world, 1);
+    CHECK(lw::isOpen(world, shop));
+    const int money = registry.get<lw::Wallet>(seller).money;
+    runMinutes(world, 61);
+    CHECK(registry.get<lw::Wallet>(seller).money >=
+          money + lw::professionSpec(lw::Profession::Shopkeeper).wage);
+    runUntil(world, 12, 30);
+    CHECK(!lw::isOnDuty(world, seller));
+    CHECK(!lw::isOpen(world, shop));
+    CHECK(registry.get<lw::Mind>(seller).action != lw::Action::Work);
+}
+
+// Дома кончилась еда — купить в открытом магазине: деньги — в кассу, еда — с собой.
+void testBuyFood() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    runUntil(world, 10, 0); // магазины открылись
+    const entt::entity buyer = idlerNear(world, lw::BuildingKind::Shop);
+    CHECK(buyer != entt::null);
+    if (buyer == entt::null) {
+        return;
+    }
+    registry.get<lw::Needs>(buyer) = {};
+    registry.get<lw::Needs>(buyer).hunger = 0.6f;
+    registry.get<lw::Traits>(buyer) = {};
+    registry.get<lw::Inventory>(buyer) = {};
+    registry.get<lw::Wallet>(buyer).money = 100;
+    lw::Inventory& home = registry.get<lw::Inventory>(world.find(registry.get<lw::Person>(buyer).home));
+    home.set(lw::ItemKind::Food, 0);
+    home.set(lw::ItemKind::Meat, 0);
+    const lw::Mind& mind = thinkNow(world, buyer);
+    CHECK(mind.action == lw::Action::Buy);
+    if (mind.action != lw::Action::Buy) {
+        return;
+    }
+    const entt::entity shop = world.find(mind.target);
+    const int stock = registry.get<lw::Inventory>(shop).food();
+    const int till = registry.get<lw::Workplace>(shop).till;
+    const std::size_t bought = world.chronicle().countOf(lw::ChronicleKind::Bought);
+    for (int minute = 0; minute < 4 * 60 && registry.get<lw::Wallet>(buyer).money == 100; ++minute) {
+        runMinutes(world, 1);
+    }
+    const int spent = 100 - registry.get<lw::Wallet>(buyer).money;
+    CHECK(spent >= lw::kFoodPrice);
+    CHECK(registry.get<lw::Workplace>(shop).till >= till + spent);
+    CHECK(registry.get<lw::Inventory>(shop).food() < stock);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Bought) > bought);
+    const lw::ChronicleEvent* purchase = nullptr;
+    for (const std::uint32_t index : world.chronicle().eventsOf(registry.get<lw::Id>(buyer).value)) {
+        const lw::ChronicleEvent& event = world.chronicle().events()[index];
+        if (event.kind == lw::ChronicleKind::Bought) {
+            purchase = &event;
+        }
+    }
+    CHECK(purchase != nullptr && purchase->a > 0 && purchase->third != lw::kInvalidId);
+}
+
+// Магазин открыт, только пока продавец на месте: без него купить негде, а
+// при нём магазин не обыскивают.
+void testShopNeedsStaff() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    runUntil(world, 10, 0);
+    const entt::entity buyer = idlerNear(world, lw::BuildingKind::Shop);
+    CHECK(buyer != entt::null);
+    if (buyer == entt::null) {
+        return;
+    }
+    registry.get<lw::Needs>(buyer) = {};
+    registry.get<lw::Needs>(buyer).hunger = 0.6f;
+    registry.get<lw::Inventory>(buyer) = {};
+    lw::Inventory& home = registry.get<lw::Inventory>(world.find(registry.get<lw::Person>(buyer).home));
+    home.set(lw::ItemKind::Food, 0);
+    home.set(lw::ItemKind::Meat, 0);
+    CHECK(lw::evaluateActions(world, buyer)[static_cast<std::size_t>(lw::Action::Buy)] > 0.0f);
+    // Денег нет — не купить.
+    registry.get<lw::Wallet>(buyer).money = 0;
+    CHECK(lw::evaluateActions(world, buyer)[static_cast<std::size_t>(lw::Action::Buy)] == 0.0f);
+    registry.get<lw::Wallet>(buyer).money = 100;
+    // У всех продавцов выходной — магазины закрылись.
+    for (const auto [entity, job] : registry.view<lw::Job>().each()) {
+        if (job.profession == lw::Profession::Shopkeeper) {
+            job.days = 0;
+        }
+    }
+    runMinutes(world, 1);
+    for (const auto [entity, building, workplace] :
+         registry.view<const lw::Building, const lw::Workplace>().each()) {
+        CHECK(building.kind != lw::BuildingKind::Shop || workplace.onDuty == 0);
+    }
+    CHECK(lw::evaluateActions(world, buyer)[static_cast<std::size_t>(lw::Action::Buy)] == 0.0f);
+}
+
+// В 06:00 — завоз в магазины, где есть продавцы: деревенский берёт сперва урожай
+// своих ферм, касса сдаётся; без работников — не завозят. Безработным — пособие.
+void testRestock() {
+    lw::World world(7, peaceConfig(150));
+    entt::registry& registry = world.registry();
+    // Без решений: ночью никто ничего не возьмёт.
+    std::vector<entt::entity> people;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        people.push_back(entity);
+    }
+    for (const entt::entity person : people) {
+        registry.remove<lw::Mind>(person);
+    }
+    entt::entity townShop = entt::null;
+    entt::entity villageShop = entt::null;
+    entt::entity farm = entt::null;
+    entt::entity closedShop = entt::null;
+    for (const lw::Places::SettlementPlace& place : world.places().settlements()) {
+        const bool town = registry.get<lw::Settlement>(world.find(place.id)).kind == lw::SettlementKind::Town;
+        entt::entity shop = entt::null;
+        entt::entity barn = entt::null;
+        for (const lw::Places::BuildingPlace& building : place.buildings) {
+            const entt::entity entity = world.find(building.id);
+            const bool staffed = registry.all_of<lw::Workplace>(entity);
+            if (building.kind == lw::BuildingKind::Shop && staffed && shop == entt::null) {
+                shop = entity;
+            }
+            if (building.kind == lw::BuildingKind::Shop && !staffed && closedShop == entt::null) {
+                closedShop = entity;
+            }
+            if (building.kind == lw::BuildingKind::Barn && barn == entt::null) {
+                barn = entity;
+            }
+        }
+        if (town && townShop == entt::null) {
+            townShop = shop;
+        } else if (!town && villageShop == entt::null && shop != entt::null && barn != entt::null) {
+            villageShop = shop;
+            farm = barn;
+        }
+    }
+    CHECK(townShop != entt::null && closedShop != entt::null);
+    if (townShop == entt::null || closedShop == entt::null) {
+        return;
+    }
+    registry.get<lw::Inventory>(townShop).set(lw::ItemKind::Food, 0);
+    registry.get<lw::Workplace>(townShop).till = 50;
+    registry.get<lw::Inventory>(closedShop).set(lw::ItemKind::Food, 0);
+    if (villageShop != entt::null) {
+        registry.get<lw::Inventory>(villageShop).set(lw::ItemKind::Food, 0);
+        registry.get<lw::Inventory>(farm).set(lw::ItemKind::Food, 10);
+    }
+    std::vector<int> money;
+    for (const entt::entity person : people) {
+        money.push_back(registry.get<lw::Wallet>(person).money);
+    }
+    runUntil(world, 6, 1);
+    CHECK(registry.get<lw::Inventory>(townShop).food() == 40);
+    CHECK(registry.get<lw::Workplace>(townShop).till == 0);
+    CHECK(registry.get<lw::Inventory>(closedShop).food() == 0);
+    if (villageShop != entt::null) {
+        CHECK(registry.get<lw::Inventory>(villageShop).food() == 25);
+        CHECK(registry.get<lw::Inventory>(farm).food() == 0); // урожай фермы — в магазин
+    }
+    for (std::size_t i = 0; i < people.size(); ++i) {
+        const auto* job = registry.try_get<lw::Job>(people[i]);
+        const int income = registry.get<lw::Wallet>(people[i]).money - money[i];
+        CHECK(income == (job == nullptr ? lw::kAllowance : 0));
+    }
+}
+
+// Фермер в поле растит урожай: в сарае прибавляется еда — по сезону.
+void testHarvest() {
+    lw::World world(7, peaceConfig(150));
+    entt::registry& registry = world.registry();
+    const entt::entity farmer = workerOf(world, lw::Profession::Farmer);
+    CHECK(farmer != entt::null);
+    if (farmer == entt::null) {
+        return;
+    }
+    lw::Job& job = registry.get<lw::Job>(farmer);
+    job.start = 0;
+    job.end = 24 * 60;
+    job.days = 0b1111111;
+    registry.get<lw::Needs>(farmer) = {};
+    registry.get<lw::Traits>(farmer) = {};
+    for (int minute = 0; minute < 4 * 60 && !lw::isOnDuty(world, farmer); ++minute) {
+        runMinutes(world, 1);
+    }
+    CHECK(lw::isOnDuty(world, farmer));
+    const lw::Map& map = world.map();
+    const lw::Mind& mind = registry.get<lw::Mind>(farmer);
+    const entt::entity barn = world.find(job.workplace);
+    CHECK(map.ground.at(mind.spot.x, mind.spot.y) == lw::Ground::Field ||
+          mind.spot == registry.get<lw::Building>(barn).door);
+    const auto grown = [&] {
+        return static_cast<float>(registry.get<lw::Inventory>(barn).food()) +
+               registry.get<lw::Workplace>(barn).harvest;
+    };
+    const float before = grown();
+    runMinutes(world, 3 * 60);
+    const float rate = lw::harvestPerHour(lw::calendarAt(world.tick()).season);
+    CHECK(grown() - before > 2.5f * rate);
+}
+
+// Ранен, а бинта нет, — в больницу: врач на смене останавливает кровь и лечит;
+// вылеченный помнит, что врач ему помог.
+void testSeeDoctor() {
+    lw::World world(7, peaceConfig(150));
+    entt::registry& registry = world.registry();
+    runUntil(world, 10, 0); // врачи дневной смены на месте
+    const entt::entity patient = idlerNear(world, lw::BuildingKind::Hospital);
+    CHECK(patient != entt::null);
+    if (patient == entt::null) {
+        return;
+    }
+    registry.get<lw::Needs>(patient) = {};
+    registry.get<lw::Needs>(patient).health = 0.4f;
+    registry.get<lw::Traits>(patient) = {};
+    registry.get<lw::Inventory>(patient) = {};
+    registry.get<lw::Wounds>(patient).bleeding = 0.05f;
+    const lw::Mind& mind = thinkNow(world, patient);
+    CHECK(mind.action == lw::Action::SeeDoctor);
+    if (mind.action != lw::Action::SeeDoctor) {
+        return;
+    }
+    registry.get<lw::Inventory>(world.find(mind.target)).set(lw::ItemKind::Medicine, 5);
+    for (int minute = 0; minute < 5 * 60 && world.chronicle().countOf(lw::ChronicleKind::SawDoctor) == 0;
+         ++minute) {
+        runMinutes(world, 1);
+    }
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::SawDoctor) == 1);
+    CHECK(registry.get<lw::Wounds>(patient).bleeding == 0.0f);
+    CHECK(registry.get<lw::Needs>(patient).health > 0.5f);
+    const lw::ChronicleEvent& visit = world.chronicle().events().back();
+    const entt::entity doctor = world.find(visit.third);
+    CHECK(doctor != entt::null && registry.get<lw::Job>(doctor).profession == lw::Profession::Doctor);
+    CHECK(registry.get<lw::Memories>(patient).find(lw::MemoryKind::Helped, visit.third) != nullptr);
+}
+
+// При полицейском на службе лезть в чужое и красть страшно — кроме отчаявшихся.
+void testPoliceDeters() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    const entt::entity officer = workerOf(world, lw::Profession::PoliceOfficer);
+    entt::entity thief = entt::null;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        if (!registry.all_of<lw::Job>(entity) && person.home != lw::kInvalidId &&
+            (thief == entt::null || registry.get<lw::Id>(entity).value < registry.get<lw::Id>(thief).value)) {
+            thief = entity;
+        }
+    }
+    CHECK(officer != entt::null && thief != entt::null);
+    if (officer == entt::null || thief == entt::null) {
+        return;
+    }
+    // Голоден, еды и денег нет — тянет обыскать чужое.
+    registry.get<lw::Needs>(thief) = {};
+    registry.get<lw::Needs>(thief).hunger = 0.7f;
+    registry.get<lw::Traits>(thief) = {};
+    registry.get<lw::Inventory>(thief) = {};
+    registry.get<lw::Wallet>(thief).money = 0;
+    lw::Inventory& home = registry.get<lw::Inventory>(world.find(registry.get<lw::Person>(thief).home));
+    home.set(lw::ItemKind::Food, 0);
+    home.set(lw::ItemKind::Meat, 0);
+    // Полицейский — в другом конце мира.
+    const auto scavenge = [&] {
+        return lw::evaluateActions(world, thief)[static_cast<std::size_t>(lw::Action::Scavenge)];
+    };
+    registry.get<lw::Position>(officer) = {1.0f, 1.0f};
+    world.syncSpatial();
+    const float alone = scavenge();
+    CHECK(alone > 0.0f);
+    // На службе и рядом.
+    lw::Job& job = registry.get<lw::Job>(officer);
+    job.start = 0;
+    job.end = 24 * 60;
+    job.days = 0b1111111;
+    registry.get<lw::Person>(officer).asleep = false;
+    registry.get<lw::Mind>(officer).action = lw::Action::Work;
+    const lw::Position at = registry.get<lw::Position>(thief);
+    registry.get<lw::Position>(officer) = {at.x + 20.0f, at.y};
+    world.syncSpatial();
+    CHECK(lw::policeNearby(world, at.x, at.y, 50.0f));
+    CHECK(scavenge() < 0.5f * alone);
+    // Отчаявшемуся всё равно.
+    registry.get<lw::Needs>(thief).hunger = 0.95f;
+    const float desperate = scavenge();
+    registry.get<lw::Position>(officer) = {1.0f, 1.0f};
+    world.syncSpatial();
+    CHECK(std::abs(scavenge() - desperate) < 1e-4f);
+}
+
+// Водопровод: в жилье вода не кончается; без мирной жизни — нет.
+void testTapWater() {
+    for (const bool peace : {true, false}) {
+        lw::WorldConfig config = peaceConfig(0);
+        config.peacetime = peace;
+        lw::World world(7, config);
+        entt::registry& registry = world.registry();
+        entt::entity house = entt::null;
+        for (const auto [entity, building, inventory] :
+             registry.view<const lw::Building, lw::Inventory>().each()) {
+            if (building.kind == lw::BuildingKind::House && house == entt::null) {
+                house = entity;
+                inventory.set(lw::ItemKind::Water, 0);
+            }
+        }
+        CHECK(house != entt::null);
+        if (house == entt::null) {
+            continue;
+        }
+        world.weather().precipitation = 0.0f; // без дождя: бочки не наполняются
+        world.weather().minutesLeft = 100000;
+        runMinutes(world, 61);
+        CHECK(registry.get<lw::Inventory>(house).count(lw::ItemKind::Water) ==
+              (peace ? lw::tapWater(lw::BuildingKind::House) : 0));
+    }
+}
+
 } // namespace
 
 int main() {
@@ -5258,6 +5764,16 @@ int main() {
     testEventSmokeSeen();
     testLeadSpreads();
     testEventEnds();
+    testPeacefulStart();
+    testShifts();
+    testWorkday();
+    testBuyFood();
+    testShopNeedsStaff();
+    testRestock();
+    testHarvest();
+    testSeeDoctor();
+    testPoliceDeters();
+    testTapWater();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

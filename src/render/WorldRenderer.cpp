@@ -20,6 +20,7 @@ constexpr Color kSleepingColor = {70, 84, 140, 255};
 constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
 constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
 constexpr Color kSocialColor = {226, 128, 196, 255};
+constexpr Color kWorkingColor = {104, 140, 230, 255}; // на работе (этап 7.2)
 constexpr Color kFleeingColor = {255, 255, 255, 255};
 constexpr Color kAvengingColor = {190, 30, 40, 255}; // идёт мстить (этап 6.5)
 // Зомби: спокойные — болотные, идущие на шум — жёлто-зелёные, в погоне — красные.
@@ -57,6 +58,12 @@ Color buildingColor(BuildingKind kind) {
         return {176, 178, 186, 255};
     case BuildingKind::Shop:
         return {204, 132, 92, 255};
+    case BuildingKind::Hospital:
+        return {226, 226, 220, 255};
+    case BuildingKind::PoliceStation:
+        return {96, 120, 168, 255};
+    case BuildingKind::School:
+        return {214, 188, 96, 255};
     }
     return {198, 164, 124, 255};
 }
@@ -111,7 +118,10 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
     case Action::Socialize:
     case Action::Share:
     case Action::Trade:
+    case Action::Buy:
         return kSocialColor;
+    case Action::Work:
+        return kWorkingColor;
     default:
         return kRestingColor;
     }

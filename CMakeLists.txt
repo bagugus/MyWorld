@@ -76,8 +76,11 @@ add_library(lw_sim STATIC
     src/sim/Weapons.cpp
     src/sim/Weapons.h
     src/sim/Weather.h
+    src/sim/Work.cpp
+    src/sim/Work.h
     src/sim/World.cpp
     src/sim/World.h
+    src/sim/gen/Civic.cpp
     src/sim/gen/GenContext.h
     src/sim/gen/MapGenerator.cpp
     src/sim/gen/MapGenerator.h
@@ -116,6 +119,8 @@ add_library(lw_sim STATIC
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp
     src/sim/systems/WeatherSystem.h
+    src/sim/systems/WorkSystem.cpp
+    src/sim/systems/WorkSystem.h
     src/sim/systems/ZombieSystem.cpp
     src/sim/systems/ZombieSystem.h
 )

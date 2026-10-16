@@ -13,6 +13,10 @@ enum class Season : std::uint8_t { Spring, Summer, Autumn, Winter };
 // Первый день весны соответствует 1 марта: так привязаны солнце и климат (sim/Climate.h).
 inline constexpr std::uint64_t kStartGameTick = 8 * kTicksPerGameHour;
 
+// Неделя (этап 7.2: смены и выходные): первый день мира — понедельник.
+// С сезонами (по 15 суток) не связана.
+inline constexpr int kDaysPerWeek = 7;
+
 // Игровая дата и время. Всё считается из номера тика целочисленно, поэтому точно.
 struct CalendarTime {
     std::uint64_t gameTick = 0; // тиков от 00:00 первого дня первого года
@@ -21,6 +25,7 @@ struct CalendarTime {
     int dayOfSeason = 0;        // 0 .. kGameDaysPerSeason-1
     int dayOfYear = 0;          // 0 .. kGameDaysPerYear-1
     int day = 1;                // номер дня с начала календаря, с 1
+    int dayOfWeek = 0;          // 0 — понедельник .. 6 — воскресенье
     int hour = 0;
     int minute = 0;
     int minuteOfDay = 0;        // 0 .. 1439

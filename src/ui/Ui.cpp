@@ -419,6 +419,28 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::Text("Групп: %zu (людей в них: %zu); делятся и меняются: %zu, мстят: %zu",
                     world.registry().view<const Group>().size(), inGroups, helping, avenging);
+        // Мирная жизнь (этап 7.2).
+        std::size_t working = 0;
+        std::size_t shopping = 0;
+        for (const auto [entity, mind] : world.registry().view<const Mind>().each()) {
+            working += mind.action == Action::Work ? 1 : 0;
+            shopping += mind.action == Action::Buy ? 1 : 0;
+        }
+        std::size_t shops = 0;
+        std::size_t open = 0;
+        for (const auto [entity, building, workplace] :
+             world.registry().view<const Building, const Workplace>().each()) {
+            if (building.kind == BuildingKind::Shop) {
+                ++shops;
+                open += workplace.onDuty > 0 ? 1 : 0;
+            }
+        }
+        std::size_t employed = 0;
+        for (const auto [entity, person, job] : world.registry().view<const Person, const Job>().each()) {
+            employed += job.profession != Profession::None ? 1 : 0;
+        }
+        ImGui::Text("Работают: %zu (с профессией: %zu); за покупками: %zu; магазинов открыто: %zu из %zu",
+                    working, employed, shopping, open, shops);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 

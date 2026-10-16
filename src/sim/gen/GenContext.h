@@ -71,6 +71,7 @@ void buildRoads(Context& ctx);
 void buildStreets(Context& ctx);
 void placeBuildings(Context& ctx);
 void clearRoadsides(Context& ctx);
+void assignBuildingRoles(Context& ctx);
 
 // Кладёт дорогу на клетку: покрытие не ухудшает, лес убирает.
 inline void setRoad(Map& map, int x, int y, Road type) {

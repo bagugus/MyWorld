@@ -19,6 +19,7 @@ GeneratedMap generateMap(Map& map, Rng& rng) {
     gen::buildStreets(ctx);
     gen::placeBuildings(ctx);
     gen::clearRoadsides(ctx);
+    gen::assignBuildingRoles(ctx); // без рандома: меняет только виды зданий
     return result;
 }
 
