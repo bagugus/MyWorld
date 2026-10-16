@@ -3,13 +3,14 @@
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
 // память, долг и обида, чужие поступки и слухи, группы, социальные действия
-// (поделиться, обмен, предательство, месть).
+// (поделиться, обмен, предательство, месть), ивенты.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
 #include "sim/Chronicle.h"
 #include "sim/Climate.h"
 #include "sim/Death.h"
+#include "sim/Events.h"
 #include "sim/Components.h"
 #include "sim/Items.h"
 #include "sim/Map.h"
@@ -29,6 +30,7 @@
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
+#include "sim/systems/EventSystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
@@ -67,9 +69,10 @@ lw::WorldConfig smallConfig(int people) {
     config.mapWidth = 64;
     config.mapHeight = 64;
     config.people = people;
-    config.zombies = 0; // зомби, животные и птицы — в своих тестах
+    config.zombies = 0; // зомби, животные и птицы, ивенты — в своих тестах
     config.animals = 0;
     config.flocks = 0;
+    config.events = false;
     return config;
 }
 
@@ -184,6 +187,7 @@ lw::WorldConfig regionConfig() {
     config.zombies = 0;
     config.animals = 0;
     config.flocks = 0;
+    config.events = false;
     return config;
 }
 
@@ -330,6 +334,7 @@ void testEntitiesStayInWorld() {
     config.zombies = 0;
     config.animals = 0;
     config.flocks = 0;
+    config.events = false;
     // Люди и, отдельно, зомби: рядом с людьми зомби не селятся.
     lw::WorldConfig undead = config;
     undead.people = 0;
@@ -4932,6 +4937,218 @@ void testPersonThreat() {
                                                      field.id(friendOf)) == nullptr);
 }
 
+// --- Ивенты (этап 7.1) -----------------------------------------------------------
+
+// Ивент: место — открытая суша, грузы с припасами, гул и запись в летописи;
+// один seed — один и тот же ивент, а ивент меняет будущее мира.
+void testEventStarts() {
+    lw::World a(7, regionConfig());
+    lw::World b(7, regionConfig());
+    const lw::World untouched(7, regionConfig());
+    const lw::EntityId id = lw::startEvent(a, lw::EventKind::SupplyDrop);
+    CHECK(id != lw::kInvalidId);
+    CHECK(lw::startEvent(b, lw::EventKind::SupplyDrop) == id);
+    CHECK(a.stateHash() == b.stateHash());
+    CHECK(a.stateHash() != untouched.stateHash());
+    const entt::entity entity = a.find(id);
+    CHECK(entity != entt::null);
+    if (entity == entt::null) {
+        return;
+    }
+    const entt::registry& registry = a.registry();
+    const lw::WorldEvent& event = registry.get<lw::WorldEvent>(entity);
+    const lw::Map& map = a.map();
+    CHECK(map.water.at(event.site.x, event.site.y) == lw::Water::None);
+    CHECK(map.cover.at(event.site.x, event.site.y) == lw::Cover::None);
+    CHECK(a.nav().passable(event.site));
+    CHECK(event.signalUntil == event.began + 6 * lw::kTicksPerGameHour);
+    CHECK(event.caches.size() >= 1 && event.caches.size() <= 2);
+    for (const lw::EntityId cache : event.caches) {
+        const entt::entity crate = a.find(cache);
+        CHECK(crate != entt::null && registry.all_of<lw::Position>(crate));
+        if (crate == entt::null) {
+            continue;
+        }
+        CHECK(registry.get<lw::Cache>(crate).event == id);
+        const lw::Inventory& stock = registry.get<lw::Inventory>(crate);
+        CHECK(stock.food() >= 6 && stock.count(lw::ItemKind::Water) >= 5);
+        CHECK(stock.count(lw::ItemKind::Bandage) >= 2 && stock.count(lw::ItemKind::Medicine) >= 1);
+    }
+    CHECK(a.chronicle().countOf(lw::ChronicleKind::EventBegan) == 1);
+    CHECK(!a.sounds().empty() && a.sounds().back().kind == lw::SoundKind::Aircraft &&
+          a.sounds().back().source == id);
+    for (int i = 0; i < 2000; ++i) {
+        a.step();
+        b.step();
+    }
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Гул слышно в округе: человек узнаёт о грузе, идёт к нему и забирает
+// припасы; второй раз туда не пойдёт.
+void testEventSalvaged() {
+    Lone lone;
+    lw::World& world = lone.world;
+    entt::registry& registry = world.registry();
+    if (lone.home == entt::null) {
+        return;
+    }
+    registry.get<lw::Inventory>(lone.person) = {};
+    const lw::Cell door = registry.get<lw::Building>(lone.home).door;
+    const lw::EntityId id =
+        lw::startEvent(world, lw::EventKind::SupplyDrop, lw::Cell{door.x + 25, door.y});
+    CHECK(id != lw::kInvalidId);
+    const lw::Leads& leads = registry.get<lw::Leads>(lone.person);
+    const lw::Lead* lead = leads.find(id);
+    CHECK(lead != nullptr && lead->source == lw::kInvalidId && !lead->visited);
+    const auto& events = world.chronicle().events();
+    CHECK(std::any_of(events.begin(), events.end(), [&](const lw::ChronicleEvent& event) {
+        return event.kind == lw::ChronicleKind::LearnedOfEvent && event.object == id &&
+               event.a == static_cast<std::int32_t>(lw::EventClue::Heard);
+    }));
+    bool salvaged = false;
+    for (int minute = 0; minute < 6 * 60 && !salvaged; minute += 10) {
+        lone.run(10);
+        salvaged = world.chronicle().countOf(lw::ChronicleKind::Salvaged) > 0;
+    }
+    CHECK(salvaged);
+    const auto took = std::find_if(events.begin(), events.end(), [](const lw::ChronicleEvent& event) {
+        return event.kind == lw::ChronicleKind::Salvaged;
+    });
+    CHECK(took != events.end() && took->a == 3 && took->b == 2);
+    const entt::entity crate = took != events.end() ? world.find(took->object) : entt::null;
+    CHECK(crate != entt::null && registry.all_of<lw::Cache>(crate));
+    lead = leads.find(id);
+    CHECK(lead != nullptr && lead->visited && !lead->empty);
+    CHECK(lw::evaluateActions(world, lone.person)[static_cast<std::size_t>(lw::Action::Salvage)] ==
+          0.0f);
+}
+
+// Гула не слышно, но дым днём видно издалека: заметивший узнаёт о месте.
+void testEventSmokeSeen() {
+    Field field(1);
+    if (!field.open || field.people.size() != 1) {
+        return;
+    }
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity person = field.people[0];
+    field.freeze(person, 0);
+    // Суша в 1,9 км (475 клеток) — в какую сторону получится.
+    std::optional<lw::Cell> far;
+    constexpr int kOffsets[][2] = {{475, 0}, {-475, 0}, {0, 475}, {0, -475},
+                                   {336, 336}, {-336, 336}, {336, -336}, {-336, -336}};
+    for (const auto& offset : kOffsets) {
+        const lw::Cell cell{field.row.x + offset[0], field.row.y + offset[1]};
+        if (!far && world.map().contains(cell) && world.nav().passable(cell) &&
+            world.map().water.at(cell.x, cell.y) == lw::Water::None) {
+            far = cell;
+        }
+    }
+    CHECK(far.has_value());
+    if (!far) {
+        return;
+    }
+    const lw::EntityId id = lw::startEvent(world, lw::EventKind::SupplyDrop, *far);
+    const entt::entity entity = world.find(id);
+    CHECK(entity != entt::null);
+    if (entity == entt::null) {
+        return;
+    }
+    const lw::Cell site = registry.get<lw::WorldEvent>(entity).site;
+    const lw::Position& at = registry.get<lw::Position>(person);
+    const float d = std::hypot(lw::Map::cellCenter(site.x) - at.x, lw::Map::cellCenter(site.y) - at.y);
+    CHECK(d > 1600.0f && d < 2300.0f);
+    CHECK(registry.get<lw::Leads>(person).find(id) == nullptr); // не слышал
+    field.steps(60 * lw::kTicksPerGameMinute);
+    const lw::Lead* lead = registry.get<lw::Leads>(person).find(id);
+    CHECK(lead != nullptr && lead->source == lw::kInvalidId);
+    const auto& events = world.chronicle().events();
+    CHECK(std::any_of(events.begin(), events.end(), [&](const lw::ChronicleEvent& event) {
+        return event.kind == lw::ChronicleKind::LearnedOfEvent &&
+               event.a == static_cast<std::int32_t>(lw::EventClue::Saw);
+    }));
+}
+
+// Нежадный рассказывает о грузе тому, кто рядом; из вторых рук весть дальше не
+// идёт. Побывавший там, где пусто, говорит об этом тому, кто туда собирается.
+void testLeadSpreads() {
+    Field field(3);
+    if (!field.open || field.people.size() != 3) {
+        return;
+    }
+    lw::World& world = field.world;
+    entt::registry& registry = world.registry();
+    const entt::entity teller = field.people[0];
+    const entt::entity listener = field.people[1];
+    const entt::entity stranger = field.people[2];
+    for (const entt::entity person : field.people) {
+        calm(field, person, 0);
+        registry.get<lw::Leads>(person) = {};
+    }
+    field.freeze(teller, 0);
+    field.freeze(listener, 2);
+    field.dismiss(stranger);
+    registry.get<lw::Traits>(teller).greed = 0.2f; // нежадный: скажет и незнакомцу
+    constexpr lw::EntityId kEvent = 999999;        // ивента нет: весть ничего не проверяет
+    CHECK(lw::learnOf(world, teller, kEvent, field.at(20), lw::EventClue::Saw));
+    CHECK(!lw::learnOf(world, teller, kEvent, field.at(20), lw::EventClue::Saw)); // уже знал
+    field.steps(10 * lw::kTicksPerGameMinute);
+    const lw::Lead* own = registry.get<lw::Leads>(teller).find(kEvent);
+    const lw::Lead* told = registry.get<lw::Leads>(listener).find(kEvent);
+    CHECK(told != nullptr && told->source == field.id(teller));
+    CHECK(told != nullptr && own != nullptr && told->since == own->since);
+    CHECK(lw::leadToShare(world, listener, stranger) == nullptr);
+    // Жадный незнакомцу не скажет.
+    CHECK(lw::leadToShare(world, teller, stranger) != nullptr);
+    registry.get<lw::Traits>(teller).greed = 0.9f;
+    CHECK(lw::leadToShare(world, teller, stranger) == nullptr);
+
+    lw::markVisited(registry.get<lw::Leads>(teller), kEvent, true);
+    field.steps(10 * lw::kTicksPerGameMinute);
+    told = registry.get<lw::Leads>(listener).find(kEvent);
+    CHECK(told != nullptr && told->visited && told->empty);
+}
+
+// Знак погас, грузы пусты — ивент кончается, пустые грузы исчезают; груз с
+// добром переживает ивент.
+void testEventEnds() {
+    lw::World world(7, regionConfig());
+    entt::registry& registry = world.registry();
+    const lw::EntityId id = lw::startEvent(world, lw::EventKind::SupplyDrop);
+    const entt::entity entity = world.find(id);
+    CHECK(entity != entt::null);
+    if (entity == entt::null) {
+        return;
+    }
+    const lw::WorldEvent event = registry.get<lw::WorldEvent>(entity);
+    for (const lw::EntityId cache : event.caches) {
+        registry.get<lw::Inventory>(world.find(cache)) = {};
+    }
+    while (world.tick() <= event.signalUntil + lw::kTicksPerGameMinute) {
+        world.step();
+    }
+    CHECK(world.find(id) == entt::null);
+    for (const lw::EntityId cache : event.caches) {
+        CHECK(world.find(cache) == entt::null);
+    }
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::EventEnded) == 1);
+
+    const lw::EntityId second = lw::startEvent(world, lw::EventKind::SupplyDrop);
+    const lw::WorldEvent kept = registry.get<lw::WorldEvent>(world.find(second));
+    while (world.tick() <= kept.began + lw::kEventMaxTicks + lw::kTicksPerGameMinute) {
+        world.step();
+    }
+    CHECK(world.find(second) == entt::null);
+    for (const lw::EntityId cache : kept.caches) {
+        const entt::entity crate = world.find(cache);
+        CHECK(crate != entt::null && !registry.get<lw::Inventory>(crate).empty());
+    }
+    const lw::ChronicleEvent& ended = world.chronicle().events().back();
+    CHECK(ended.kind == lw::ChronicleKind::EventEnded && ended.subject == second &&
+          ended.a == static_cast<std::int32_t>(kept.caches.size()));
+}
+
 } // namespace
 
 int main() {
@@ -5036,6 +5253,11 @@ int main() {
     testDesertion();
     testAvenge();
     testPersonThreat();
+    testEventStarts();
+    testEventSalvaged();
+    testEventSmokeSeen();
+    testLeadSpreads();
+    testEventEnds();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

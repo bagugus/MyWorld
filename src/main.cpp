@@ -1,6 +1,9 @@
 // Living World — приложение с окном.
-//   living_world [--seed N] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2] [--nav-graph]
-//                [--select ID] [--screenshot FILE.png]
+//   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
+//                [--nav-graph] [--select ID] [--screenshot FILE.png]
+//
+// --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
+//               --hours прокручивает мир уже после него
 //
 // --hours       перед открытием окна прогнать мир на H игровых часов (посмотреть ночь, погоду)
 // --view        начальное положение камеры: центр в метрах и зум в пикселях на метр
@@ -14,7 +17,9 @@
 #include "render/WorldRenderer.h"
 #include "sim/Climate.h"
 #include "sim/SimDriver.h"
+#include "sim/Events.h"
 #include "sim/World.h"
+#include "sim/systems/EventSystem.h"
 #include "ui/ChronicleView.h"
 #include "ui/Inspector.h"
 #include "ui/PathTool.h"
@@ -26,6 +31,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
@@ -39,6 +45,7 @@ int main(int argc, char** argv) {
     float path[4] = {};
     bool navGraph = false;
     std::uint64_t selectId = 0;
+    std::optional<lw::EventKind> event;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = std::strtoull(argv[++i], nullptr, 10);
@@ -58,6 +65,8 @@ int main(int argc, char** argv) {
             hasPath = true;
         } else if (std::strcmp(argv[i], "--select") == 0 && i + 1 < argc) {
             selectId = std::strtoull(argv[++i], nullptr, 10);
+        } else if (std::strcmp(argv[i], "--event") == 0 && i + 1 < argc) {
+            event = lw::eventKindByName(argv[++i]);
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
             navGraph = true;
         }
@@ -66,6 +75,12 @@ int main(int argc, char** argv) {
     // Мир создаётся до окна: генерация карты занимает пару секунд, и пустое
     // окно в это время выглядело бы зависшим.
     lw::World world(seed);
+    if (event) {
+        const lw::EntityId id = lw::startEvent(world, *event);
+        if (selectId == 0) {
+            selectId = id;
+        }
+    }
     const auto skipTicks = static_cast<std::uint64_t>(std::max(0.0, hours) * lw::kTicksPerGameHour);
     for (std::uint64_t i = 0; i < skipTicks; ++i) {
         world.step();
@@ -129,6 +144,7 @@ int main(int argc, char** argv) {
             lw::ui::drawStatsPanel(world, environment, driver, camera, renderer);
             pathTool.drawPanel();
             inspector.drawPanel();
+            lw::ui::drawEventsPanel(world, driver, inspector, camera);
             lw::ui::drawChroniclePanel(world, inspector);
             lw::ui::endFrame();
 

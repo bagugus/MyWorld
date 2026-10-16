@@ -7,6 +7,7 @@
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
+#include "sim/systems/EventSystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
@@ -79,7 +80,7 @@ void World::generate() {
 namespace {
 
 constexpr const char* kPhaseNames[World::kStepPhases] = {
-    "weather", "resources", "needs", "relations", "memories", "groups", "bodies",
+    "weather", "resources", "events", "needs", "relations", "memories", "groups", "bodies",
     "perception", "zombies", "animals", "utility ai", "combat", "movement", "spatial sync"};
 
 } // namespace
@@ -105,6 +106,9 @@ void World::step() {
     updateWeather(*this);
     lap();
     updateResources(*this);
+    lap();
+    // Ивенты — до восприятия: шум начавшегося ивента слышат в этом же тике.
+    updateEvents(*this);
     lap();
     tickNeeds(*this);
     lap();
@@ -264,6 +268,37 @@ std::uint64_t World::stateHash() const {
             }
             hasher.add(group->base);
             hasher.add(group->formed);
+        }
+        if (const auto* event = registry_.try_get<WorldEvent>(entity)) {
+            hasher.add(std::uint64_t{28});
+            hasher.add(static_cast<std::uint8_t>(event->kind));
+            hasher.add(event->site.x);
+            hasher.add(event->site.y);
+            hasher.add(event->began);
+            hasher.add(event->signalUntil);
+            hasher.add(event->settlement);
+            hasher.add(static_cast<std::uint64_t>(event->caches.size()));
+            for (const EntityId cache : event->caches) {
+                hasher.add(cache);
+            }
+        }
+        if (const auto* cache = registry_.try_get<Cache>(entity)) {
+            hasher.add(std::uint64_t{29});
+            hasher.add(cache->event);
+        }
+        if (const auto* leads = registry_.try_get<Leads>(entity)) {
+            hasher.add(std::uint64_t{30});
+            hasher.add(leads->count);
+            for (std::size_t i = 0; i < leads->count; ++i) {
+                const Lead& lead = leads->items[i];
+                hasher.add(lead.event);
+                hasher.add(lead.site.x);
+                hasher.add(lead.site.y);
+                hasher.add(lead.since);
+                hasher.add(lead.source);
+                hasher.add(static_cast<std::uint8_t>(lead.visited));
+                hasher.add(static_cast<std::uint8_t>(lead.empty));
+            }
         }
         if (const auto* needs = registry_.try_get<Needs>(entity)) {
             hasher.add(std::uint64_t{9});

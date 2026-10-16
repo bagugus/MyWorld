@@ -6,7 +6,9 @@
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
+#include "sim/systems/EventSystem.h"
 #include "ui/Format.h"
+#include "ui/Inspector.h"
 
 #include <imgui.h>
 #include <raylib.h>
@@ -16,6 +18,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <utility>
+#include <vector>
 
 namespace lw::ui {
 
@@ -471,6 +475,75 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::TextDisabled("Колесо — зум, ПКМ или WASD — панорама,\n"
                             "Home — весь мир, ЛКМ — инспектор");
+    }
+    ImGui::End();
+}
+
+void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector,
+                     const CameraController& camera) {
+    // Начатый по кнопке ивент — открыть в инспекторе, как только мир его начнёт.
+    static EntityId opened = kInvalidId;
+    if (driver.lastEvent() != kInvalidId && driver.lastEvent() != opened) {
+        opened = driver.lastEvent();
+        inspector.select(opened);
+        inspector.setFollow(true);
+    }
+
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos({display.x - 12.0f, display.y * 0.5f}, ImGuiCond_FirstUseEver,
+                            {1.0f, 0.0f});
+    ImGui::SetNextWindowSize({320.0f, 0.0f}, ImGuiCond_FirstUseEver);
+    if (!ImGui::Begin("Ивенты###events")) {
+        ImGui::End();
+        return;
+    }
+    const entt::registry& registry = world.registry();
+    if (world.config().events) {
+        ImGui::TextWrapped("По расписанию (пока нет рассказчика): в среднем %.1f в сутки, днём",
+                           kEventsPerDay);
+    } else {
+        ImGui::TextDisabled("Расписание выключено");
+    }
+    ImGui::TextUnformatted("Сбросить груз:");
+    ImGui::SameLine();
+    if (ImGui::Button("где выберет мир")) {
+        driver.requestEvent(EventKind::SupplyDrop);
+    }
+    ImGui::SameLine();
+    if (ImGui::Button("у центра экрана")) {
+        const Vector2 center = camera.camera().target;
+        driver.requestEvent(EventKind::SupplyDrop, world.map().clampedCellAt(center.x, center.y));
+    }
+
+    std::vector<std::pair<EntityId, const WorldEvent*>> events;
+    for (const auto [entity, id, event] : registry.view<const Id, const WorldEvent>().each()) {
+        events.emplace_back(id.value, &event);
+    }
+    std::sort(events.begin(), events.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    ImGui::SeparatorText("Идут");
+    if (events.empty()) {
+        ImGui::TextDisabled("нет");
+    }
+    char duration[32];
+    for (const auto& [id, event] : events) {
+        ImGui::PushID(static_cast<int>(id));
+        if (idLink(id)) {
+            inspector.select(id);
+            inspector.setFollow(true);
+        }
+        ImGui::SameLine();
+        int loaded = 0;
+        for (const EntityId cache : event->caches) {
+            const entt::entity crate = world.find(cache);
+            const auto* stock = crate != entt::null ? registry.try_get<Inventory>(crate) : nullptr;
+            loaded += stock != nullptr && !stock->empty() ? 1 : 0;
+        }
+        formatGameDuration(duration, sizeof(duration), world.tick() - event->began);
+        ImGui::Text("%s, %s назад; грузов с добром %d из %zu%s", eventKindName(event->kind),
+                    duration, loaded, event->caches.size(),
+                    world.tick() < event->signalUntil ? ", дым" : "");
+        ImGui::PopID();
     }
     ImGui::End();
 }

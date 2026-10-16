@@ -329,6 +329,7 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Wounds>(entity);
         registry.emplace<Relations>(entity);
         registry.emplace<Memories>(entity);
+        registry.emplace<Leads>(entity);
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
     introduceNeighbours(world);

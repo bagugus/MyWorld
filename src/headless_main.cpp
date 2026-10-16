@@ -8,9 +8,12 @@
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 //   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
 //   lw_headless --seed 42 --ticks 1440000 --social        и список социальных событий (этап 6)
+//   lw_headless --seed 42 --ticks 720000 --events         и журнал ивентов (этап 7)
+//   lw_headless --seed 42 --no-events --event drop 3      без расписания, один сброс груза через 3 ч
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Events.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
@@ -18,6 +21,7 @@
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
 #include "sim/nav/NavGraph.h"
+#include "sim/systems/EventSystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -27,6 +31,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -119,7 +124,7 @@ void printPeople(const lw::World& world) {
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
                                         "forage", "socialize", "wander", "go home", "flee",
                                         "fight",  "hunt",      "treat",  "share",   "trade",
-                                        "steal",  "avenge"};
+                                        "steal",  "avenge",    "salvage"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -556,6 +561,88 @@ void printSocialLog(const lw::World& world) {
     }
 }
 
+// Ивенты (этап 7.1): сколько было, сколько идёт, что осталось в грузах, кто
+// узнал и сколько унесли.
+void printEvents(const lw::World& world) {
+    using K = lw::ChronicleKind;
+    const entt::registry& registry = world.registry();
+    const lw::Chronicle& chronicle = world.chronicle();
+    std::size_t clues[3] = {};
+    std::size_t empty = 0;
+    long long food = 0;
+    long long water = 0;
+    for (const lw::ChronicleEvent& event : chronicle.events()) {
+        if (event.kind == K::LearnedOfEvent) {
+            ++clues[std::min<std::size_t>(static_cast<std::size_t>(event.a), 2)];
+        } else if (event.kind == K::Salvaged) {
+            empty += event.a == 0 && event.b == 0 ? 1 : 0;
+            food += event.a;
+            water += event.b;
+        }
+    }
+    lw::Inventory left;
+    for (const auto [entity, cache, inventory] :
+         registry.view<const lw::Cache, const lw::Inventory>().each()) {
+        for (std::size_t i = 0; i < lw::kItemKinds; ++i) {
+            left.items[i] = static_cast<std::uint16_t>(left.items[i] + inventory.items[i]);
+        }
+    }
+    std::size_t knowing = 0;
+    for (const auto [entity, leads] : registry.view<const lw::Leads>().each()) {
+        knowing += leads.count > 0 ? 1 : 0;
+    }
+    std::size_t heading = 0;
+    for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
+        heading += mind.action == lw::Action::Salvage ? 1 : 0;
+    }
+    std::printf("events: began %zu, ended %zu, active %zu; caches %zu (food %d, water %d, "
+                "bandages %d, medicine %d)\n",
+                chronicle.countOf(K::EventBegan), chronicle.countOf(K::EventEnded),
+                registry.view<const lw::WorldEvent>().size(),
+                registry.view<const lw::Cache>().size(), left.food(),
+                left.count(lw::ItemKind::Water), left.count(lw::ItemKind::Bandage),
+                left.count(lw::ItemKind::Medicine));
+    std::printf("  learned: saw %zu, heard %zu, told %zu; people with leads %zu, heading there %zu; "
+                "salvaged %zu times (empty %zu): food %lld, water %lld\n",
+                clues[0], clues[1], clues[2], knowing, heading, chronicle.countOf(K::Salvaged),
+                empty, food, water);
+}
+
+// Журнал ивентов по порядку: начало и конец ивентов, кто что забрал из грузов;
+// вести — числом на ивент, иначе журнал утонет в них.
+void printEventLog(const lw::World& world) {
+    using K = lw::ChronicleKind;
+    std::vector<std::pair<lw::EntityId, int>> learned;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == K::LearnedOfEvent) {
+            auto it = std::find_if(learned.begin(), learned.end(),
+                                   [&](const auto& item) { return item.first == event.object; });
+            if (it == learned.end()) {
+                learned.emplace_back(event.object, 0);
+                it = learned.end() - 1;
+            }
+            ++it->second;
+        }
+    }
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind != K::EventBegan && event.kind != K::EventEnded && event.kind != K::Salvaged) {
+            continue;
+        }
+        const lw::CalendarTime time = lw::calendarAt(event.tick);
+        std::printf("  day %2d %02d:%02d %-12s #%llu -> #%llu a=%d b=%d", time.day, time.hour,
+                    time.minute, lw::chronicleKindName(event.kind),
+                    static_cast<unsigned long long>(event.subject),
+                    static_cast<unsigned long long>(event.object), event.a, event.b);
+        if (event.kind == K::EventBegan) {
+            const auto it = std::find_if(learned.begin(), learned.end(),
+                                         [&](const auto& item) { return item.first == event.subject; });
+            std::printf(" (%s, learned by %d)", lw::eventSpec(static_cast<lw::EventKind>(event.a)).name,
+                        it != learned.end() ? it->second : 0);
+        }
+        std::printf("\n");
+    }
+}
+
 // Летопись: сколько событий каждого вида.
 void printChronicle(const lw::World& world) {
     const lw::Chronicle& chronicle = world.chronicle();
@@ -591,6 +678,7 @@ void printClimate(std::uint64_t seed) {
     config.zombies = 0;
     config.animals = 0;
     config.flocks = 0;
+    config.events = false;
     lw::World world(seed, config);
 
     constexpr int kKinds = static_cast<int>(lw::WeatherKind::Count);
@@ -853,6 +941,10 @@ int main(int argc, char** argv) {
     bool daily = false;
     bool social = false;
     bool profile = false;
+    bool eventLog = false;
+    // Ивент вручную: вид и через сколько игровых часов.
+    std::optional<lw::EventKind> manualEvent;
+    double manualHour = 0.0;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -873,6 +965,14 @@ int main(int argc, char** argv) {
             social = true;
         } else if (std::strcmp(argv[i], "--profile") == 0) {
             profile = true;
+        } else if (std::strcmp(argv[i], "--events") == 0) {
+            eventLog = true;
+        } else if (std::strcmp(argv[i], "--no-events") == 0) {
+            config.events = false;
+        } else if (std::strcmp(argv[i], "--event") == 0 && i + 2 < argc &&
+                   lw::eventKindByName(argv[i + 1])) {
+            manualEvent = lw::eventKindByName(argv[++i]);
+            manualHour = std::strtod(argv[++i], nullptr);
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
@@ -884,7 +984,7 @@ int main(int argc, char** argv) {
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
-                        "[--social] [--profile]\n");
+                        "[--social] [--events] [--no-events] [--event drop HOURS] [--profile]\n");
             return 2;
         }
     }
@@ -907,7 +1007,14 @@ int main(int argc, char** argv) {
     if (daily) {
         printDailyHeader();
     }
+    const auto manualTick =
+        static_cast<std::uint64_t>(std::max(0.0, manualHour) * lw::kTicksPerGameHour);
     for (std::uint64_t i = 0; i < ticks; ++i) {
+        if (manualEvent && world.tick() == manualTick) {
+            const lw::EntityId id = lw::startEvent(world, *manualEvent);
+            std::printf("event #%llu started at tick %llu\n", static_cast<unsigned long long>(id),
+                        static_cast<unsigned long long>(world.tick()));
+        }
         world.step();
         if (daily && world.tick() % lw::kTicksPerGameDay == 0) {
             printDaily(world);
@@ -931,10 +1038,15 @@ int main(int argc, char** argv) {
     printZombies(world);
     printAnimals(world);
     printCombat(world);
+    printEvents(world);
     printChronicle(world);
     if (social) {
         std::printf("social events:\n");
         printSocialLog(world);
+    }
+    if (eventLog) {
+        std::printf("event log:\n");
+        printEventLog(world);
     }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

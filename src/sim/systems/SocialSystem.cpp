@@ -1,6 +1,7 @@
 #include "sim/systems/SocialSystem.h"
 
 #include "sim/Components.h"
+#include "sim/Events.h"
 #include "sim/Memory.h"
 #include "sim/Relations.h"
 #include "sim/World.h"
@@ -68,7 +69,8 @@ struct Talk {
     bool conversation;
 };
 
-// Что рассказано: воспоминание (слух) и мнение о третьем.
+// Что рассказано: воспоминание (слух), мнение о третьем и весть об ивенте
+// (этап 7.1).
 struct Told {
     EntityId listener;
     EntityId teller;
@@ -78,6 +80,8 @@ struct Told {
     EntityId subject = kInvalidId; // о ком мнение
     float opinion = 0.0f;          // симпатия рассказчика к нему
     float weight = 1.0f;           // в разговоре — 1, просто рядом — kNearShare
+    bool news = false;
+    Lead lead{};                   // весть об ивенте
 };
 
 // О ком teller скажет listener: самое сильное чувство (|симпатия| × знакомство)
@@ -219,6 +223,15 @@ void updateRelations(World& world, float minutes) {
             item.memory = *rumor;
             told.push_back(item);
         }
+        // Где упал груз (этап 7.1) — тем же порядком, что и слухи.
+        const Lead* lead =
+            rumorTime ? leadToShare(world, talk.tellerEntity, talk.listenerEntity) : nullptr;
+        if (lead != nullptr) {
+            Told item{talk.listener, talk.teller, talk.listenerEntity};
+            item.news = true;
+            item.lead = *lead;
+            told.push_back(item);
+        }
         const Relations& tellers = registry.get<Relations>(talk.tellerEntity);
         const Relations& listeners = registry.get<Relations>(talk.listenerEntity);
         const EntityId subject = opinionSubject(world, tellers, talk.listener, listeners);
@@ -231,13 +244,23 @@ void updateRelations(World& world, float minutes) {
         }
     }
     // Услышанное — по слушателю и рассказчику (от одного рассказчика сначала
-    // слух, потом мнение — так они и собраны): не зависит от порядка реестра.
+    // слух, потом весть, потом мнение — так они и собраны): не зависит от
+    // порядка реестра.
     std::stable_sort(told.begin(), told.end(), [](const Told& a, const Told& b) {
         return std::tie(a.listener, a.teller) < std::tie(b.listener, b.teller);
     });
     for (const Told& item : told) {
         if (item.rumor) {
             hearRumor(world, item.listenerEntity, item.teller, item.memory);
+            continue;
+        }
+        if (item.news) {
+            if (item.lead.empty) {
+                hearEmpty(registry.get<Leads>(item.listenerEntity), item.lead.event);
+            } else {
+                learnOf(world, item.listenerEntity, item.lead.event, item.lead.site,
+                        EventClue::Told, item.teller, item.lead.since);
+            }
             continue;
         }
         // Враг моего друга — и мне не мил: к неприятному не прислушиваются.

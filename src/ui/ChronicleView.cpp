@@ -1,6 +1,7 @@
 ﻿#include "ui/ChronicleView.h"
 
 #include "sim/Calendar.h"
+#include "sim/Events.h"
 #include "sim/World.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
@@ -22,7 +23,7 @@ struct Phrase {
     bool withThird = false;
     // Третий участник — тот, чью биографию смотрят: вместо ссылки на него самого.
     const char* thirdSelf = "его";
-    char tail[64] = "";
+    char tail[96] = "";
 };
 
 // Поступок для «видел, как X …» и «узнал, что X …» (MemoryKind).
@@ -357,6 +358,41 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.verb = "отомстил";
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "%s", event.a == 1 ? "— убил" : "— избил");
+        break;
+    case ChronicleKind::EventBegan:
+        phrase.verb = event.object != kInvalidId ? "— ивент у поселения" : "— ивент:";
+        phrase.withObject = event.object != kInvalidId;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%s%s, грузов: %d",
+                      event.object != kInvalidId ? "— " : "",
+                      eventKindName(static_cast<EventKind>(event.a)), event.b);
+        break;
+    case ChronicleKind::LearnedOfEvent:
+        phrase.verb = "узнал об ивенте";
+        phrase.withObject = true;
+        if (static_cast<EventClue>(event.a) == EventClue::Told && event.third != kInvalidId) {
+            phrase.middle = "— рассказал";
+            phrase.withThird = true;
+            phrase.thirdSelf = "он";
+        } else {
+            phrase.middle = static_cast<EventClue>(event.a) == EventClue::Heard ? "— услышал гул"
+                                                                                 : "— увидел дым";
+        }
+        break;
+    case ChronicleKind::Salvaged:
+        phrase.verb = "добрался до груза";
+        phrase.withObject = true;
+        if (event.a == 0 && event.b == 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— пусто, опоздал");
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        }
+        break;
+    case ChronicleKind::EventEnded:
+        phrase.verb = "— ивент закончился";
+        if (event.a > 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "; грузов с добром осталось: %d",
+                          event.a);
+        }
         break;
     case ChronicleKind::Count:
         break;

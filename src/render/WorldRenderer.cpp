@@ -36,6 +36,12 @@ constexpr Color kHumanBodyColor = {110, 40, 36, 255};
 constexpr Color kZombieBodyColor = {52, 62, 36, 255};
 constexpr Color kCarcassColor = {84, 56, 36, 255};
 constexpr Color kBuildingOutline = {40, 34, 30, 255};
+// Ивенты (этап 7.1): груз — ящик защитного цвета (пустой — тёмный), знак —
+// красный дым, сносимый ветром.
+constexpr Color kCacheColor = {176, 160, 92, 255};
+constexpr Color kEmptyCacheColor = {88, 82, 60, 255};
+constexpr Color kCacheOutline = {40, 38, 24, 255};
+constexpr Color kSmokeColor = {222, 92, 80, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
 constexpr float kEntityMinRadiusPx = 3.0f;
@@ -100,6 +106,7 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
     case Action::Scavenge:
     case Action::Forage:
     case Action::Steal:
+    case Action::Salvage:
         return kSearchingColor;
     case Action::Socialize:
     case Action::Share:
@@ -108,6 +115,30 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
     default:
         return kRestingColor;
     }
+}
+
+// Знак ивента — столб дыма: клубы сносит по ветру, они растут и тают. На общем
+// плане — ещё и кольцо в несколько пикселей, чтобы место было видно издалека.
+void drawSmoke(const World& world, const WorldEvent& event, float zoom) {
+    const float x = Map::cellCenter(event.site.x);
+    const float y = Map::cellCenter(event.site.y);
+    const Weather& weather = world.weather();
+    // Откуда дует (0 — север, 90 — восток): дым идёт в обратную сторону, ось y — на юг.
+    const float radians = weather.windFrom * DEG2RAD;
+    const float toX = -std::sin(radians);
+    const float toY = std::cos(radians);
+    const float drift = 4.0f + 2.5f * weather.windSpeed;
+    const float rise = static_cast<float>(std::fmod(GetTime() * 0.4, 1.0));
+    constexpr int kPuffs = 7;
+    for (int i = kPuffs - 1; i >= 0; --i) {
+        const float t = (static_cast<float>(i) + rise) / static_cast<float>(kPuffs);
+        const float along = t * drift * static_cast<float>(kPuffs);
+        Color color = kSmokeColor;
+        color.a = static_cast<unsigned char>(170.0f * (1.0f - t));
+        DrawCircleV({x + toX * along, y + toY * along}, 3.0f + 9.0f * t, color);
+    }
+    const float ring = std::max(6.0f, 9.0f / zoom);
+    DrawRing({x, y}, ring, ring + 2.0f / zoom, 0.0f, 360.0f, 32, kSmokeColor);
 }
 
 // Стая — россыпь точек вокруг её позиции: место каждой птицы — из хеша id
@@ -167,6 +198,12 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
         }
     }
 
+    for (const auto [entity, event] : world.registry().view<const WorldEvent>().each()) {
+        if (world.tick() < event.signalUntil) {
+            drawSmoke(world, event, zoom);
+        }
+    }
+
     // Радиус в метрах, но не меньше нескольких пикселей — чтобы существа
     // было видно и на общем плане.
     const float radius = std::max(kEntityRadiusMeters, kEntityMinRadiusPx / zoom);
@@ -185,6 +222,15 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
         }
         if (const auto* flock = registry.try_get<Flock>(entity)) {
             drawFlock(*flock, registry.get<Id>(entity).value, at, zoom);
+            continue;
+        }
+        if (registry.all_of<Cache>(entity)) {
+            const auto* stock = registry.try_get<Inventory>(entity);
+            const bool empty = stock == nullptr || stock->empty();
+            const float half = radius * 1.1f;
+            const Rectangle crate = {at.x - half, at.y - half, 2.0f * half, 2.0f * half};
+            DrawRectangleRec(crate, empty ? kEmptyCacheColor : kCacheColor);
+            DrawRectangleLinesEx(crate, std::max(0.1f, 1.0f / zoom), kCacheOutline);
             continue;
         }
         if (const auto* corpse = registry.try_get<Corpse>(entity)) {

@@ -2,6 +2,7 @@
 
 #include "render/CameraController.h"
 #include "sim/Components.h"
+#include "sim/Events.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
@@ -54,6 +55,9 @@ constexpr Color kFoeColor = {200, 50, 50, 170};
 // Группа (этап 6.4): участники, вожак и база.
 constexpr Color kGroupColor = {110, 230, 220, 200};
 constexpr Color kGroupLeaderColor = {190, 255, 250, 255};
+// Ивенты (этап 7.1): место, грузы, кто туда идёт; у человека — вести.
+constexpr Color kEventColor = {255, 120, 100, 230};
+constexpr Color kLeadColor = {255, 170, 90, 170};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -116,7 +120,7 @@ EntityId Inspector::pick(float x, float y, float zoom) const {
     const entt::registry& registry = world_.registry();
     const float radius = std::max(1.0f, kPickPixels / zoom);
     if (const auto person = world_.spatial().nearest(x, y, radius, [&registry](const SpatialHit& hit) {
-            return registry.any_of<Person, Zombie, Animal, Flock, Corpse>(hit.entity);
+            return registry.any_of<Person, Zombie, Animal, Flock, Corpse, Cache>(hit.entity);
         })) {
         return person->id;
     }
@@ -166,6 +170,9 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
             const Vector2 at = drawnPosition(registry, leader, alpha);
             camera.lookAt(at.x, at.y, camera.zoom());
         }
+    } else if (const auto* event = registry.try_get<WorldEvent>(entity)) {
+        const Vector2 at = cellCenter(event->site);
+        camera.lookAt(at.x, at.y, camera.zoom());
     }
 }
 
@@ -227,6 +234,23 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
         }
         return;
     }
+    if (const auto* event = registry.try_get<WorldEvent>(entity)) {
+        // Место — кольцом, грузы — линиями от него, идущие туда — линиями к нему.
+        const Vector2 site = cellCenter(event->site);
+        const float radius = std::max(6.0f, 12.0f * px);
+        DrawRing(site, radius, radius + line, 0.0f, 360.0f, 48, kSelectionColor);
+        for (const EntityId cache : event->caches) {
+            if (const entt::entity crate = world_.find(cache); crate != entt::null) {
+                DrawLineEx(site, drawnPosition(registry, crate, alpha), line, kEventColor);
+            }
+        }
+        for (const auto [other, mind] : registry.view<const Mind>().each()) {
+            if (mind.action == Action::Salvage && mind.target == selected_) {
+                DrawLineEx(drawnPosition(registry, other, alpha), site, line, kLeadColor);
+            }
+        }
+        return;
+    }
     if (!registry.all_of<Position>(entity)) {
         return;
     }
@@ -276,6 +300,15 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (danger.until > world_.tick()) {
                 DrawRing(cellCenter(danger.cell), kDangerRadius - line, kDangerRadius, 0.0f, 360.0f,
                          64, kDangerColor);
+            }
+        }
+    }
+    // Места ивентов, о которых знает и куда ещё не ходил, — оранжевыми линиями.
+    if (const auto* leads = registry.try_get<Leads>(entity)) {
+        for (std::size_t i = 0; i < leads->count; ++i) {
+            const Lead& lead = leads->items[i];
+            if (!lead.visited && leadFresh(lead, world_.tick())) {
+                DrawLineEx(at, cellCenter(lead.site), line, kLeadColor);
             }
         }
     }
@@ -379,7 +412,7 @@ void Inspector::drawPanel() {
         } else if (entity == entt::null) {
             ImGui::Text("Объекта #%llu нет", static_cast<unsigned long long>(selected_));
         } else {
-            if (registry.any_of<Position, Building, Horde, Group>(entity)) {
+            if (registry.any_of<Position, Building, Horde, Group, WorldEvent>(entity)) {
                 ImGui::Checkbox("Следить камерой", &follow_);
             }
             if (registry.all_of<Person>(entity)) {
@@ -396,6 +429,10 @@ void Inspector::drawPanel() {
                 drawHorde(entity);
             } else if (registry.all_of<Group>(entity)) {
                 drawGroup(entity);
+            } else if (registry.all_of<WorldEvent>(entity)) {
+                drawEvent(entity);
+            } else if (registry.all_of<Cache>(entity)) {
+                drawCache(entity);
             } else if (registry.all_of<Building>(entity)) {
                 drawBuilding(entity);
             } else if (registry.all_of<Settlement>(entity)) {
@@ -615,7 +652,7 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
-    if (!drawRelations(entity) || !drawMemories(entity)) {
+    if (!drawRelations(entity) || !drawMemories(entity) || !drawLeads(entity)) {
         return;
     }
 
@@ -1169,6 +1206,157 @@ void Inspector::drawCorpse(entt::entity entity) {
         char text[256];
         formatInventory(text, sizeof(text), *carry);
         ImGui::TextWrapped("При теле: %s", text);
+    }
+}
+
+bool Inspector::drawLeads(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* leads = registry.try_get<Leads>(entity);
+    if (leads == nullptr || leads->count == 0) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Вести об ивентах: %d###leads", leads->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    const Position& at = registry.get<Position>(entity);
+    char duration[32];
+    for (std::size_t i = 0; i < leads->count; ++i) {
+        const Lead& lead = leads->items[i];
+        ImGui::PushID(static_cast<int>(i));
+        if (idLink(lead.event)) {
+            ImGui::PopID();
+            select(lead.event);
+            return false;
+        }
+        ImGui::SameLine();
+        formatGameDuration(duration, sizeof(duration), world_.tick() - lead.since);
+        ImGui::Text("в %.0f м, узнали %s назад;",
+                    std::hypot(Map::cellCenter(lead.site.x) - at.x,
+                               Map::cellCenter(lead.site.y) - at.y),
+                    duration);
+        ImGui::SameLine();
+        if (lead.empty) {
+            ImGui::TextUnformatted("там пусто");
+        } else if (lead.visited) {
+            ImGui::TextUnformatted("побывал");
+        } else if (!leadFresh(lead, world_.tick())) {
+            ImGui::TextDisabled("устарела");
+        } else {
+            ImGui::Text("свежесть %.0f%%", leadFreshness(lead, world_.tick()) * 100.0f);
+        }
+        if (lead.source != kInvalidId) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("рассказал");
+            ImGui::SameLine();
+            if (idLink(lead.source)) {
+                ImGui::PopID();
+                select(lead.source);
+                return false;
+            }
+        }
+        ImGui::PopID();
+    }
+    return true;
+}
+
+void Inspector::drawEvent(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const WorldEvent& event = registry.get<WorldEvent>(entity);
+    const std::uint64_t tick = world_.tick();
+    char duration[32];
+
+    ImGui::Text("Ивент #%llu: %s", static_cast<unsigned long long>(selected_),
+                eventKindName(event.kind));
+    formatGameDuration(duration, sizeof(duration), tick - event.began);
+    ImGui::Text("Начался %s назад; место (%.0f, %.0f) м", duration,
+                Map::cellCenter(event.site.x), Map::cellCenter(event.site.y));
+    if (event.settlement != kInvalidId) {
+        ImGui::TextUnformatted("Ближайшее поселение:");
+        ImGui::SameLine();
+        if (idLink(event.settlement)) {
+            select(event.settlement);
+            return;
+        }
+    }
+    if (tick < event.signalUntil) {
+        formatGameDuration(duration, sizeof(duration), event.signalUntil - tick);
+        ImGui::Text("Дым виден ещё %s (днём — за %.0f м)", duration,
+                    eventSpec(event.kind).signalRange);
+    } else {
+        ImGui::TextDisabled("Дым погас");
+    }
+
+    ImGui::SeparatorText("Грузы");
+    for (const EntityId cache : event.caches) {
+        ImGui::PushID(static_cast<int>(cache));
+        if (idLink(cache)) {
+            ImGui::PopID();
+            select(cache);
+            return;
+        }
+        ImGui::SameLine();
+        const entt::entity crate = world_.find(cache);
+        const auto* stock = crate != entt::null ? registry.try_get<Inventory>(crate) : nullptr;
+        if (stock == nullptr) {
+            ImGui::TextDisabled("исчез");
+        } else {
+            char text[256];
+            formatInventory(text, sizeof(text), *stock);
+            ImGui::TextWrapped("%s", text);
+        }
+        ImGui::PopID();
+    }
+
+    // Кто знает и кто идёт: по возрастанию id.
+    int knowing = 0;
+    int visited = 0;
+    for (const auto [other, leads] : registry.view<const Leads>().each()) {
+        if (const Lead* lead = leads.find(selected_)) {
+            ++knowing;
+            visited += lead->visited ? 1 : 0;
+        }
+    }
+    std::vector<EntityId> heading;
+    for (const auto [other, id, mind] : registry.view<const Id, const Mind>().each()) {
+        if (mind.action == Action::Salvage && mind.target == selected_) {
+            heading.push_back(id.value);
+        }
+    }
+    std::sort(heading.begin(), heading.end());
+    ImGui::SeparatorText("Люди");
+    ImGui::Text("Знают: %d, побывали: %d, идут сейчас: %zu", knowing, visited, heading.size());
+    EntityId clicked = kInvalidId;
+    for (std::size_t i = 0; i < heading.size(); ++i) {
+        if (i % 6 != 0) {
+            ImGui::SameLine();
+        }
+        if (idLink(heading[i])) {
+            clicked = heading[i];
+        }
+    }
+    if (clicked != kInvalidId) {
+        select(clicked);
+    }
+}
+
+void Inspector::drawCache(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Cache& cache = registry.get<Cache>(entity);
+    ImGui::Text("Груз #%llu", static_cast<unsigned long long>(selected_));
+    ImGui::TextUnformatted("Ивент:");
+    ImGui::SameLine();
+    if (world_.find(cache.event) == entt::null) {
+        ImGui::TextDisabled("#%llu закончился", static_cast<unsigned long long>(cache.event));
+    } else if (idLink(cache.event)) {
+        select(cache.event);
+        return;
+    }
+    if (const auto* stock = registry.try_get<Inventory>(entity)) {
+        char text[256];
+        formatInventory(text, sizeof(text), *stock);
+        ImGui::TextWrapped("Внутри: %s", text);
     }
 }
 

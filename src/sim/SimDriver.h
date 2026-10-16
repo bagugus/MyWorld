@@ -1,6 +1,10 @@
 #pragma once
 
+#include "sim/Components.h"
+#include "sim/Map.h"
+
 #include <cstdint>
+#include <optional>
 
 namespace lw {
 
@@ -35,6 +39,13 @@ public:
     // Доля выполненной промотки, 0..1.
     float skipProgress() const;
 
+    // Начать ивент (кнопка в интерфейсе): в начале следующего кадра, между
+    // тиками, на паузе тоже. near — где; без него место выбирает мир. Ивент,
+    // начатый наблюдателем, меняет будущее мира, как и любое его вмешательство.
+    void requestEvent(EventKind kind, std::optional<Cell> near = std::nullopt);
+    // Id последнего начатого по запросу ивента; kInvalidId — места не нашлось.
+    EntityId lastEvent() const { return lastEvent_; }
+
     // Сколько реального времени за кадр можно потратить на симуляцию.
     // Если тики не укладываются, отставание отбрасывается: мир идёт медленнее
     // заданной скорости, но окно не зависает. На состояние мира на данном тике
@@ -64,6 +75,12 @@ private:
     // На промотку кадр может тратить больше: смотреть всё равно не на что.
     double skipBudgetMs_ = 60.0;
     std::uint64_t skipRemaining_ = 0;
+    struct EventRequest {
+        EventKind kind;
+        std::optional<Cell> near;
+    };
+    std::optional<EventRequest> eventRequest_;
+    EntityId lastEvent_ = kInvalidId;
     std::uint64_t skipTotal_ = 0;
 
     int ticksLastFrame_ = 0;

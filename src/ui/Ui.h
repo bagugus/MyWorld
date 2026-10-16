@@ -10,6 +10,8 @@ class WorldRenderer;
 
 namespace ui {
 
+class Inspector;
+
 // Вызывать после InitWindow / перед CloseWindow.
 void init();
 void shutdown();
@@ -32,6 +34,11 @@ void drawSettlementLabels(const World& world, const CameraController& camera);
 void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver);
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     const CameraController& camera, const WorldRenderer& renderer);
+// Ивенты (этап 7.1): идущие ивенты (ссылки в инспектор) и кнопки «начать
+// ивент» — где выберет мир или у центра экрана. Начатый ивент открывается в
+// инспекторе.
+void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector,
+                     const CameraController& camera);
 
 } // namespace ui
 } // namespace lw

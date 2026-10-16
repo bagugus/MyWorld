@@ -36,6 +36,7 @@ enum class RngStream : std::uint8_t {
     Zombies,  // зомби: расселение, решения, орды
     Animals,  // животные и птицы: расселение, решения
     Combat,   // бой: оружие при рождении, попадания и урон
+    Events,   // ивенты: когда и где, что в грузе, кто заметил знак (этап 7.1)
     Count
 };
 
@@ -46,6 +47,9 @@ struct WorldConfig {
     int zombies = 400;    // зомби: одиночки в поселениях и на природе, орды
     int animals = 160;    // олени, кабаны, зайцы — вдали от поселений
     int flocks = 24;      // стаи ворон
+    // Ивенты по временному расписанию (до рассказчика, этап 7.4). Вручную
+    // (интерфейс, тесты) ивент можно начать и без него: startEvent.
+    bool events = true;
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
@@ -65,7 +69,7 @@ public:
     void step();
 
     // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
-    static constexpr int kStepPhases = 14;
+    static constexpr int kStepPhases = 15;
     static const char* stepPhaseName(int phase);
     void setProfiling(bool enabled) { profiling_ = enabled; }
     // Накопленные секунды на каждый шаг тика с включения замера.

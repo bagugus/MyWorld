@@ -47,6 +47,9 @@ private:
     void drawAnimal(entt::entity entity);
     void drawFlock(entt::entity entity);
     void drawCorpse(entt::entity entity);
+    // Ивент и его груз (этап 7.1).
+    void drawEvent(entt::entity entity);
+    void drawCache(entt::entity entity);
     // Позиция, скорость, оставшийся путь.
     void drawMovement(entt::entity entity);
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по
@@ -56,6 +59,8 @@ private:
     bool drawRelations(entt::entity entity);
     // Что человек помнит о других. false — щёлкнули по ссылке.
     bool drawMemories(entt::entity entity);
+    // Что человек знает об ивентах. false — щёлкнули по ссылке.
+    bool drawLeads(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.

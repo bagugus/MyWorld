@@ -39,6 +39,8 @@ add_library(lw_sim STATIC
     src/sim/Climate.h
     src/sim/Death.cpp
     src/sim/Death.h
+    src/sim/Events.cpp
+    src/sim/Events.h
     src/sim/Components.h
     src/sim/Grid.h
     src/sim/Hash.h
@@ -92,6 +94,8 @@ add_library(lw_sim STATIC
     src/sim/systems/AnimalSystem.h
     src/sim/systems/CombatSystem.cpp
     src/sim/systems/CombatSystem.h
+    src/sim/systems/EventSystem.cpp
+    src/sim/systems/EventSystem.h
     src/sim/systems/GroupSystem.cpp
     src/sim/systems/GroupSystem.h
     src/sim/systems/MemorySystem.cpp

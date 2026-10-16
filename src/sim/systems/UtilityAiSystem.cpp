@@ -1,6 +1,7 @@
 #include "sim/systems/UtilityAiSystem.h"
 
 #include "sim/Calendar.h"
+#include "sim/Events.h"
 #include "sim/Items.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
@@ -279,6 +280,24 @@ constexpr float kFrustration = 0.85f;
 // Обидчик убегает дальше этого — догонять бесполезно, метры.
 constexpr float kAvengeLostRange = 30.0f;
 
+// --- Ивенты (этап 7.1) ----------------------------------------------------------
+// К месту ивента — по свежей вести (Leads), не дальше kSalvageRange. Оценка —
+// kSalvageWeight × тяга × нервы × свежесть × near(d, kSalvageScale): тяга —
+// kSalvageBase + жадность и любопытство, а голодному без еды — ещё и голод;
+// нервы — kSalvageNerve + смелость: туда идут и зомби; свежесть вести — от 1
+// до 0 за сутки (leadFreshness). Ночью — kNightPenalty.
+constexpr float kSalvageWeight = 1.0f;
+constexpr float kSalvageBase = 0.3f;
+constexpr float kSalvageGreed = 0.4f;
+constexpr float kSalvageCuriosity = 0.2f;
+constexpr float kSalvageHunger = 0.8f;
+constexpr float kSalvageNerve = 0.5f;
+constexpr float kSalvageRange = 3000.0f;
+constexpr float kSalvageScale = 1500.0f;
+constexpr int kSalvageMinutes = 15;
+// Груз ищут вокруг места ивента в таком радиусе, метры: ящики сносит ветром.
+constexpr float kCacheSearch = 60.0f;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -363,6 +382,8 @@ struct Context {
     const Relations* relations = nullptr;
     // Группа (этап 6.4); kInvalidId — сам по себе.
     EntityId group = kInvalidId;
+    // Вести об ивентах (этап 7.1); nullptr — нет.
+    const Leads* leads = nullptr;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -398,6 +419,7 @@ Context makeContext(const World& world, entt::entity entity) {
     }
     ctx.relations = registry.try_get<Relations>(entity);
     ctx.group = person.group;
+    ctx.leads = registry.try_get<Leads>(entity);
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -817,6 +839,47 @@ Option evalHunt(const Context& ctx) {
     }
     const float d = std::sqrt(game->distanceSq);
     return {need * nearness(d, kHuntScale), Map::cellAt(game->x, game->y), game->id};
+}
+
+// К месту ивента (этап 7.1): по вести — туда, где упал груз (из нескольких —
+// куда заманчивее: свежее и ближе). Тянет жадного и любопытного, а голодного
+// без еды — сильнее всех; трус идёт неохотно: на шум ивента сходятся зомби.
+Option evalSalvage(const Context& ctx) {
+    if (ctx.leads == nullptr || roomFor(ctx.carry, ItemKind::Food) == 0) {
+        return {};
+    }
+    // Самая заманчивая весть: свежая и близкая.
+    const Lead* best = nullptr;
+    float bestAppeal = 0.0f;
+    for (std::size_t i = 0; i < ctx.leads->count; ++i) {
+        const Lead& lead = ctx.leads->items[i];
+        if (lead.visited) {
+            continue;
+        }
+        const float d = distance(ctx.x, ctx.y, cellX(lead.site), cellY(lead.site));
+        const float appeal =
+            leadFreshness(lead, ctx.world.tick()) * nearness(d, kSalvageScale);
+        if (d <= kSalvageRange && appeal > bestAppeal) {
+            best = &lead;
+            bestAppeal = appeal;
+        }
+    }
+    if (best == nullptr) {
+        return {};
+    }
+    const bool foodAtHand =
+        ctx.carry.food() > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0);
+    float pull = kSalvageBase + kSalvageGreed * ctx.traits.greed +
+                 kSalvageCuriosity * ctx.traits.curiosity;
+    if (!foodAtHand) {
+        pull += kSalvageHunger * urge(ctx.needs.hunger, needStart(ctx));
+    }
+    float score =
+        kSalvageWeight * pull * (kSalvageNerve + (1.0f - kSalvageNerve) * ctx.traits.bravery);
+    if (ctx.night) {
+        score *= kNightPenalty;
+    }
+    return {score * bestAppeal, best->site, best->event};
 }
 
 // Перевязаться, если течёт кровь и есть бинт; принять лекарство, если плохо
@@ -1319,6 +1382,8 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalSteal(ctx);
     case Action::Avenge:
         return evalAvenge(ctx);
+    case Action::Salvage:
+        return evalSalvage(ctx);
     case Action::Count:
         break;
     }
@@ -1363,9 +1428,9 @@ void remember(Mind& mind, EntityId building) {
     mind.searchedNext = static_cast<std::uint8_t>((mind.searchedNext + 1) % Mind::kSearchedMemory);
 }
 
-// Тело с вещами рядом, которое ещё не обыскивали, — первым (этап 5.6). Иначе
-// здание, где ещё не искали: из трёх случайных — ближайшее. Сначала в своём
-// поселении, потом в соседних.
+// Тело (этап 5.6) или груз ивента (этап 7.1) с вещами рядом, которые ещё не
+// обыскивали, — первыми. Иначе здание, где ещё не искали: из трёх случайных —
+// ближайшее. Сначала в своём поселении, потом в соседних.
 std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, const Mind& mind,
                                                         Rng& rng) {
     const World& world = ctx.world;
@@ -1373,8 +1438,8 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
     if (const auto body = world.spatial().nearest(
             ctx.x, ctx.y, kBodySearch, [&](const SpatialHit& hit) {
                 const auto* corpse = registry.try_get<Corpse>(hit.entity);
-                if (corpse == nullptr || corpse->kind == CorpseKind::Animal ||
-                    remembered(mind, hit.id)) {
+                const bool body = corpse != nullptr && corpse->kind != CorpseKind::Animal;
+                if ((!body && !registry.all_of<Cache>(hit.entity)) || remembered(mind, hit.id)) {
                     return false;
                 }
                 const auto* stuff = registry.try_get<Inventory>(hit.entity);
@@ -2208,6 +2273,9 @@ private:
         case Action::Avenge:
             duration = kFightMinutes;
             break;
+        case Action::Salvage:
+            duration = kSalvageMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -2288,8 +2356,39 @@ private:
                 butcher(carry);
             }
             break;
+        case Action::Salvage:
+            salvage(carry);
+            break;
         default:
             break;
+        }
+    }
+
+    // На месте ивента (этап 7.1): забрать из ближайшего непустого груза то же,
+    // что при обыске. Пусто или грузов нет — опоздал. Второй раз не пойдёт, а
+    // если ничего не осталось — расскажет тем, кто туда собирается.
+    void salvage(Inventory& carry) {
+        const EntityId event = mind_.target;
+        const Position& self = registry_.get<Position>(entity_);
+        const auto loadedCrate = [&] {
+            return world_.spatial().nearest(
+                self.x, self.y, kCacheSearch, [&](const SpatialHit& hit) {
+                    const auto* cache = registry_.try_get<Cache>(hit.entity);
+                    const auto* stock = registry_.try_get<Inventory>(hit.entity);
+                    return cache != nullptr && cache->event == event && stock != nullptr &&
+                           !stock->empty();
+                });
+        };
+        const auto crate = loadedCrate();
+        if (!crate) {
+            world_.record(ChronicleKind::Salvaged, id_, event, 0, 0);
+        } else {
+            mind_.target = crate->id;
+            remember(mind_, crate->id);
+            takeLoot(registry_.get<Inventory>(crate->entity), carry, false);
+        }
+        if (auto* leads = registry_.try_get<Leads>(entity_)) {
+            markVisited(*leads, event, !loadedCrate());
         }
     }
 
@@ -2335,6 +2434,7 @@ private:
         int water = stock.take(ItemKind::Water, wantWater);
         const entt::entity source = world_.find(mind_.target);
         const bool body = source != entt::null && registry_.all_of<Corpse>(source);
+        const bool cache = source != entt::null && registry_.all_of<Cache>(source);
         if (steal) {
             // Хозяин — живой жилец с меньшим id; своя база — без хозяина (сбежал).
             EntityId owner = kInvalidId;
@@ -2346,8 +2446,10 @@ private:
             }
             world_.record(ChronicleKind::Stole, id_, mind_.target, meat + food, water, owner);
         } else {
-            world_.record(body ? ChronicleKind::LootedBody : ChronicleKind::Scavenged, id_,
-                          mind_.target, meat + food, water);
+            world_.record(body    ? ChronicleKind::LootedBody
+                          : cache ? ChronicleKind::Salvaged
+                                  : ChronicleKind::Scavenged,
+                          id_, mind_.target, meat + food, water);
             countSearch(meat + food > 0);
         }
         if (meat + food > 0 && needs_.hunger > kSnackThreshold) {
@@ -2372,7 +2474,7 @@ private:
             taken += std::max(0, static_cast<int>(before.items[i]) - stock.items[i]);
         }
         // Хозяева, которые это видели, запомнят вора (этап 6.1).
-        if (!body) {
+        if (!body && !cache) {
             witnessTheft(world_, entity_, mind_.target, taken);
         }
         return taken;

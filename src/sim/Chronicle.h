@@ -64,6 +64,10 @@ enum class ChronicleKind : std::uint8_t {
     BetrayedBy,    // его предал object: обокрал (a вещей) или сбежал из группы
     AssaultedBy,   // на него напал object
     Avenged,       // отомстил object: a = 1 — убил, 0 — избил
+    EventBegan,    // ивент (subject) начался у поселения object: a — вид (EventKind), b — грузов (этап 7.1)
+    LearnedOfEvent, // узнал об ивенте object: a — как (EventClue); third — кто рассказал
+    Salvaged,      // забрал из груза object (или, если груза нет, пришёл к ивенту object): еды a, воды b
+    EventEnded,    // ивент (subject) закончился: a — грузов с добром осталось
     Count
 };
 

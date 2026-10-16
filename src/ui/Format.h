@@ -27,6 +27,8 @@ const char* deathCauseName(DeathCause cause);
 const char* corpseKindName(CorpseKind kind);
 // Воспоминание о ком-то: «спас», «бросил в беде», «погиб».
 const char* memoryKindName(MemoryKind kind);
+// Ивент: «падение припасов».
+const char* eventKindName(EventKind kind);
 // Предмет: «бинт», «патроны к винтовке».
 const char* itemName(ItemKind kind);
 // Строка «еда 3, вода 2, бинт 1» — непустые позиции инвентаря; «пусто».

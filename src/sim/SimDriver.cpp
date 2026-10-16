@@ -1,6 +1,7 @@
 #include "sim/SimDriver.h"
 
 #include "sim/World.h"
+#include "sim/systems/EventSystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -45,11 +46,20 @@ float SimDriver::skipProgress() const {
     return static_cast<float>(skipTotal_ - skipRemaining_) / static_cast<float>(skipTotal_);
 }
 
+void SimDriver::requestEvent(EventKind kind, std::optional<Cell> near) {
+    eventRequest_ = EventRequest{kind, near};
+}
+
 void SimDriver::advance(double realDt) {
     using Clock = std::chrono::steady_clock;
 
     ticksLastFrame_ = 0;
     behind_ = false;
+
+    if (eventRequest_) {
+        lastEvent_ = startEvent(world_, eventRequest_->kind, eventRequest_->near);
+        eventRequest_.reset();
+    }
 
     if (skipRemaining_ > 0) {
         accumulator_ = 0.0;
