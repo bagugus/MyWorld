@@ -191,6 +191,28 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
     }
 }
 
+std::optional<CameraSubject> Inspector::cameraSubject(float alpha) const {
+    const entt::registry& registry = world_.registry();
+    const entt::entity entity = world_.find(selected_);
+    if (entity == entt::null || !registry.all_of<Position>(entity) ||
+        !registry.any_of<Person, Zombie, Animal, Corpse>(entity)) {
+        return std::nullopt;
+    }
+    CameraSubject subject;
+    subject.id = selected_;
+    subject.at = drawnPosition(registry, entity, alpha);
+    if (const auto* velocity = registry.try_get<Velocity>(entity);
+        velocity != nullptr && (velocity->x != 0.0f || velocity->y != 0.0f)) {
+        subject.heading = std::atan2(velocity->x, velocity->y);
+    }
+    if (registry.any_of<Animal>(entity)) {
+        subject.height = 0.9f;
+    } else if (registry.any_of<Corpse>(entity)) {
+        subject.height = 0.5f;
+    }
+    return subject;
+}
+
 void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
     const entt::registry& registry = world_.registry();
     const entt::entity entity = world_.find(selected_);

@@ -1,10 +1,13 @@
 #pragma once
 
+#include "render/CameraController.h"
 #include "sim/Id.h"
 
 #include <raylib.h>
 
 #include <entt/entt.hpp>
+
+#include <optional>
 
 namespace lw {
 
@@ -32,6 +35,9 @@ public:
     // Камера следует за выбранным, если включено слежение. alpha — доля тика
     // (SimDriver::interpolationAlpha), чтобы камера шла вровень с отрисовкой.
     void updateCamera(CameraController& camera, float alpha);
+    // Выбранное существо (или тело) для вида из-за плеча: где оно на экране
+    // (как у отрисовки), курс по скорости и высота глаз; нет — если выбрано не оно.
+    std::optional<CameraSubject> cameraSubject(float alpha) const;
     // Подсветка выбранного, его путь и цель; между BeginMode2D и EndMode2D.
     void drawOverlay(const Camera2D& camera, float alpha) const;
     void drawPanel();

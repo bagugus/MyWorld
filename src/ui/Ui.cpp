@@ -13,6 +13,7 @@
 
 #include <imgui.h>
 #include <raylib.h>
+#include <raymath.h>
 #include <rlImGui.h>
 
 #include <algorithm>
@@ -20,6 +21,7 @@
 #include <cmath>
 #include <cstdio>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -122,7 +124,165 @@ void drawCellInfo(const World& world, Cell cell) {
     }
 }
 
+// Настройки камеры — рядом с imgui.ini, строки «ключ=значение».
+constexpr const char* kCameraIni = "camera.ini";
+bool gShowKeys = false; // окно «Клавиши» (F1)
+std::optional<CameraSettings> gSavedCamera; // что сейчас в файле
+
+// Вид, высота глаз и настройки камеры — в панели «Статистика».
+void drawCameraControls(CameraController& camera) {
+    struct View {
+        ViewMode mode;
+        const char* label;
+    };
+    constexpr View kViews[] = {{ViewMode::TopDown, "сверху (V)"},
+                               {ViewMode::Orbit, "3D"},
+                               {ViewMode::Fly, "полёт (G)"},
+                               {ViewMode::Shoulder, "из-за плеча (T)"}};
+    ImGui::TextUnformatted("Вид:");
+    for (const View& view : kViews) {
+        ImGui::SameLine();
+        const bool unavailable = view.mode == ViewMode::Shoulder && !camera.hasSubject();
+        ImGui::BeginDisabled(unavailable);
+        if (ImGui::RadioButton(view.label, camera.mode() == view.mode)) {
+            camera.setMode(view.mode);
+        }
+        ImGui::EndDisabled();
+        if (unavailable) {
+            ImGui::SetItemTooltip("Выберите в инспекторе человека, зомби или зверя");
+        }
+    }
+    if (camera.is3d()) {
+        ImGui::Text("Глаза над землёй: %.1f м", camera.eyeHeight());
+        ImGui::SameLine();
+    }
+    if (ImGui::SmallButton("Клавиши (F1)")) {
+        gShowKeys = !gShowKeys;
+    }
+
+    if (!ImGui::TreeNode("Настройки камеры")) {
+        return;
+    }
+    CameraSettings& settings = camera.settings();
+    ImGui::SliderFloat("Плавность, с", &settings.smoothing, 0.0f, 0.5f, "%.2f");
+    ImGui::SetItemTooltip("За сколько камера проходит большую часть пути к цели; 0 — сразу");
+    ImGui::SliderFloat("Инерция, с", &settings.inertia, 0.0f, 1.5f, "%.2f");
+    ImGui::SetItemTooltip("Сколько панорама и полёт катятся после отпускания; 0 — останавливаются сразу");
+    ImGui::SliderFloat("Мышь", &settings.mouseSensitivity, 0.2f, 3.0f, "×%.2f");
+    ImGui::SliderFloat("Клавиши", &settings.keyboardSpeed, 0.2f, 3.0f, "×%.2f");
+    ImGui::SliderFloat("Полёт", &settings.flySpeed, 0.1f, 10.0f, "×%.2f", ImGuiSliderFlags_Logarithmic);
+    ImGui::SetItemTooltip("Скорость полёта; в полёте меняется и колесом мыши");
+    ImGui::Checkbox("Мышь по вертикали наоборот", &settings.invertY);
+    ImGui::Checkbox("Полёт: держать высоту над рельефом", &settings.holdAltitude);
+    if (ImGui::SmallButton("По умолчанию")) {
+        settings = CameraSettings{};
+    }
+    ImGui::TreePop();
+}
+
+void keyRow(const char* keys, const char* action) {
+    ImGui::TableNextRow();
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(keys);
+    ImGui::TableNextColumn();
+    ImGui::TextUnformatted(action);
+}
+
 } // namespace
+
+void loadCameraSettings(CameraSettings& settings) {
+    if (FILE* file = std::fopen(kCameraIni, "r")) {
+        char key[64];
+        float value = 0.0f;
+        while (std::fscanf(file, " %63[^=]=%f", key, &value) == 2) {
+            const std::string name = key;
+            if (name == "smoothing") settings.smoothing = std::clamp(value, 0.0f, 0.5f);
+            if (name == "inertia") settings.inertia = std::clamp(value, 0.0f, 1.5f);
+            if (name == "mouse") settings.mouseSensitivity = std::clamp(value, 0.2f, 3.0f);
+            if (name == "keyboard") settings.keyboardSpeed = std::clamp(value, 0.2f, 3.0f);
+            if (name == "fly") settings.flySpeed = std::clamp(value, 0.1f, 10.0f);
+            if (name == "invert_y") settings.invertY = value != 0.0f;
+            if (name == "hold_altitude") settings.holdAltitude = value != 0.0f;
+        }
+        std::fclose(file);
+    }
+    gSavedCamera = settings;
+}
+
+void saveCameraSettings(const CameraSettings& settings) {
+    if (gSavedCamera && *gSavedCamera == settings) {
+        return;
+    }
+    if (FILE* file = std::fopen(kCameraIni, "w")) {
+        std::fprintf(file, "smoothing=%.3f\ninertia=%.3f\nmouse=%.3f\nkeyboard=%.3f\nfly=%.3f\n",
+                     settings.smoothing, settings.inertia, settings.mouseSensitivity, settings.keyboardSpeed,
+                     settings.flySpeed);
+        std::fprintf(file, "invert_y=%d\nhold_altitude=%d\n", settings.invertY ? 1 : 0,
+                     settings.holdAltitude ? 1 : 0);
+        std::fclose(file);
+    }
+    gSavedCamera = settings;
+}
+
+void drawKeyHelp(const CameraController& camera) {
+    if (!gShowKeys) {
+        return;
+    }
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos({display.x * 0.5f, display.y * 0.5f}, ImGuiCond_FirstUseEver, {0.5f, 0.5f});
+    if (!ImGui::Begin("Клавиши###keys", &gShowKeys, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::End();
+        return;
+    }
+    const auto table = [](const char* title) {
+        ImGui::SeparatorText(title);
+        return ImGui::BeginTable(title, 2, ImGuiTableFlags_SizingFixedFit);
+    };
+    if (table("Сейчас")) {
+        switch (camera.mode()) {
+        case ViewMode::TopDown:
+            keyRow("колесо", "зум к курсору");
+            keyRow("ПКМ / СКМ + мышь", "панорама (отпустить на ходу — покатится)");
+            keyRow("WASD / стрелки", "панорама");
+            break;
+        case ViewMode::Orbit:
+            keyRow("колесо", "ближе / дальше, к курсору");
+            keyRow("ПКМ + мышь", "вращение и наклон");
+            keyRow("СКМ + мышь", "панорама «за землю»");
+            keyRow("WASD / стрелки", "панорама относительно взгляда");
+            keyRow("Q / E, R / F", "вращение, наклон");
+            break;
+        case ViewMode::Fly:
+            keyRow("WASD / стрелки", "вперёд, назад, вбок");
+            keyRow("E / Q", "выше / ниже");
+            keyRow("Shift", "вчетверо быстрее");
+            keyRow("ПКМ + мышь", "осмотреться");
+            keyRow("колесо", "скорость полёта");
+            break;
+        case ViewMode::Shoulder:
+            keyRow("ПКМ + мышь", "осмотреться вокруг");
+            keyRow("колесо", "ближе / дальше");
+            break;
+        }
+        ImGui::EndTable();
+    }
+    if (table("Виды")) {
+        keyRow("V", "сверху / 3D");
+        keyRow("G", "свободный полёт / орбита");
+        keyRow("T", "из-за плеча выбранного / орбита");
+        keyRow("Home", "весь мир");
+        ImGui::EndTable();
+    }
+    if (table("Мир")) {
+        keyRow("ЛКМ", "выбрать в инспекторе");
+        keyRow("Ctrl+ЛКМ", "путь: начало, Ctrl+Shift+ЛКМ — конец");
+        keyRow("Пробел", "пауза");
+        keyRow("1 / 2 / 3", "скорость x1 / x10 / x100");
+        keyRow("F1", "это окно");
+        ImGui::EndTable();
+    }
+    ImGui::End();
+}
 
 void init() {
     rlImGuiBeginInitImGui();
@@ -164,6 +324,9 @@ void handleHotkeys(SimDriver& driver) {
     }
     if (IsKeyPressed(KEY_SPACE)) {
         driver.togglePause();
+    }
+    if (IsKeyPressed(KEY_F1)) {
+        gShowKeys = !gShowKeys;
     }
     constexpr int keys[] = {KEY_ONE, KEY_TWO, KEY_THREE};
     for (int i = 0; i < 3; ++i) {
@@ -312,6 +475,8 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
     constexpr float kTownSize = 24.0f;
     constexpr float kVillageSize = 17.0f;
     constexpr float kMaxLift = 70.0f; // пикселей: подпись не уезжает далеко от центра вблизи
+    constexpr float kFarLabel = 2500.0f; // метров: в 3D дальше не подписываем,
+    constexpr float kFarLabelHeights = 8.0f; // если глаз не выше 1/8 этого
     constexpr ImU32 kTextColor = IM_COL32(255, 255, 255, 235);
     constexpr ImU32 kShadowColor = IM_COL32(0, 0, 0, 200);
 
@@ -321,6 +486,14 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
 
     for (const auto [entity, settlement] : world.registry().view<const Settlement>().each()) {
         const Vector2 at = {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)};
+        if (camera.is3d()) {
+            // Низко над землёй дальние подписи сбились бы в ряд у горизонта.
+            const Vector3 eye = camera.camera3d().position;
+            const float limit = std::max(kFarLabel, kFarLabelHeights * camera.eyeHeight());
+            if (Vector2Distance(at, {eye.x, eye.z}) > limit) {
+                continue;
+            }
+        }
         const std::optional<Vector2> center = camera.worldToScreen(at);
         if (!center) {
             continue;
@@ -448,14 +621,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                     working, employed, shopping, open, shops);
 
         ImGui::Separator();
-        int view = camera.orbit() ? 1 : 0;
-        ImGui::TextUnformatted("Вид (V):");
-        ImGui::SameLine();
-        ImGui::RadioButton("сверху", &view, 0);
-        ImGui::SameLine();
-        ImGui::RadioButton("3D", &view, 1);
-        camera.setMode(view == 1 ? ViewMode::Orbit : ViewMode::TopDown);
-        if (camera.orbit()) {
+        drawCameraControls(camera);
+        if (camera.is3d()) {
             const Terrain3D& terrain = renderer3d.terrain();
             ImGui::Text("Зданий в кадре: %d, существ: %d", renderer3d.buildingsDrawn(),
                         renderer3d.creaturesDrawn());
@@ -506,7 +673,6 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                                    WorldRenderer3D::kMaxDrawDistance, "%.0f", ImGuiSliderFlags_Logarithmic)) {
                 renderer3d.setDrawDistance(range);
             }
-            ImGui::TextDisabled("ПКМ — вращение, СКМ — панорама, Q/E, R/F");
         } else {
             ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                         renderer.map().chunkCount());
@@ -520,7 +686,7 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         const Vector2 mouse = *cursor;
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
-        if (camera.orbit()) {
+        if (camera.is3d()) {
             const Terrain3D& terrain = renderer3d.terrain();
             const float ground = terrain.groundAt(mouse.x, mouse.y);
             const float surface = terrain.surfaceAt(mouse.x, mouse.y);

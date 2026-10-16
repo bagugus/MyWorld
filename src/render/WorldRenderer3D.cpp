@@ -218,6 +218,14 @@ void WorldRenderer3D::setDrawDistance(float meters) {
     drawDistance_ = std::clamp(meters, kMinDrawDistance, kMaxDrawDistance);
 }
 
+std::optional<float> WorldRenderer3D::drawnHeading(EntityId id) const {
+    const auto it = motion_.find(id);
+    if (it == motion_.end() || frame_ - it->second.seen > 1) {
+        return std::nullopt;
+    }
+    return it->second.heading;
+}
+
 WorldRenderer3D::Motion& WorldRenderer3D::motionOf(EntityId id, float dx, float dy, float stride, float dt) {
     const auto [it, inserted] = motion_.try_emplace(id);
     Motion& motion = it->second;

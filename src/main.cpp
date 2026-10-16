@@ -1,7 +1,7 @@
 // Living World — приложение с окном.
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
-//                [--screenshot FILE.png]
+//                [--camera fly|shoulder] [--screenshot FILE.png]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -14,6 +14,8 @@
 // --3d          начать с 3D-вида (V переключает вид); --view задаёт точку и зум и в 3D
 // --orbit       3D-вид под углом: YAW — с какой стороны (0 — с юга, 90 — с востока),
 //               PITCH — наклон над горизонтом, градусы
+// --camera      начать с полёта (с той же точки, что и 3D-вид) или из-за плеча
+//               выбранного (--select)
 // --foliage     облик сезона в 3D (листва и снег) — как на долю года F (0 — 1 марта,
 //               0,3 — лето, 0,6 — осень, 0,9 — зима), а не по календарю; только облик
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
@@ -59,6 +61,7 @@ int main(int argc, char** argv) {
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
     std::optional<float> foliage;
+    std::optional<lw::ViewMode> startView; // --camera: полёт или из-за плеча
     std::optional<lw::EventKind> event;
     lw::WorldConfig config;
     for (int i = 1; i < argc; ++i) {
@@ -87,6 +90,14 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--orbit") == 0 && i + 2 < argc) {
             const float yaw = std::strtof(argv[++i], nullptr);
             orbit = {{yaw, std::strtof(argv[++i], nullptr)}};
+            view3d = true;
+        } else if (std::strcmp(argv[i], "--camera") == 0 && i + 1 < argc) {
+            const char* name = argv[++i];
+            if (std::strcmp(name, "fly") == 0) {
+                startView = lw::ViewMode::Fly;
+            } else if (std::strcmp(name, "shoulder") == 0) {
+                startView = lw::ViewMode::Shoulder;
+            }
             view3d = true;
         } else if (std::strcmp(argv[i], "--foliage") == 0 && i + 1 < argc) {
             foliage = std::strtof(argv[++i], nullptr);
@@ -125,6 +136,7 @@ int main(int argc, char** argv) {
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
         camera.setTerrain(&renderer3d.terrain());
+        lw::ui::loadCameraSettings(camera.settings());
         renderer3d.setFoliageYear(foliage);
         if (orbit) {
             camera.setOrbitAngles(orbit->first, orbit->second);
@@ -135,6 +147,7 @@ int main(int argc, char** argv) {
         if (hasView) {
             camera.lookAt(viewX, viewY, viewZoom);
         }
+        camera.snap(); // с командной строки — сразу, без плавного перехода
         lw::ui::init();
         lw::ui::PathTool pathTool(world);
         pathTool.setShowGraph(navGraph);
@@ -153,17 +166,34 @@ int main(int argc, char** argv) {
             const float dt = GetFrameTime();
 
             lw::ui::handleHotkeys(driver);
-            camera.update(dt, !lw::ui::wantsMouse(), !lw::ui::wantsKeyboard());
+            // Щелчок — по тому, что было на экране в прошлом кадре.
             pathTool.handleInput(camera, !lw::ui::wantsMouse());
             inspector.handleInput(camera, !lw::ui::wantsMouse());
             driver.advance(dt);
             const float alpha = driver.interpolationAlpha();
+            // Камера — после шага мира: слежение и вид из-за плеча идут вровень
+            // с отрисовкой этого кадра.
             inspector.updateCamera(camera, alpha);
+            std::optional<lw::CameraSubject> subject = inspector.cameraSubject(alpha);
+            if (subject) {
+                if (const std::optional<float> heading = renderer3d.drawnHeading(inspector.selected())) {
+                    subject->heading = *heading;
+                }
+            }
+            camera.setSubject(subject);
+            if (frame == 0 && startView) {
+                camera.setMode(*startView); // из-за плеча — когда выбранный уже известен
+            }
+            camera.update(dt, !lw::ui::wantsMouse(), !lw::ui::wantsKeyboard());
+            if (frame == 0) {
+                camera.snap(); // снимок с командной строки — без плавного подлёта
+            }
+            lw::ui::saveCameraSettings(camera.settings());
             weatherRenderer.update(dt, !driver.paused());
             const lw::Environment environment = lw::environmentAt(world);
 
             BeginDrawing();
-            if (camera.orbit()) {
+            if (camera.is3d()) {
                 ClearBackground(lw::kSkyColor);
                 renderer3d.setHighlight(inspector.selected());
                 renderer3d.draw(world, camera, alpha);
@@ -173,7 +203,7 @@ int main(int argc, char** argv) {
                 renderer.draw(world, camera.camera(), alpha);
                 EndMode2D();
             }
-            weatherRenderer.draw(environment, world.weather(), camera.orbit());
+            weatherRenderer.draw(environment, world.weather(), camera.is3d());
             // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
             camera.beginOverlay();
             pathTool.drawOverlay(camera.camera());
@@ -187,13 +217,14 @@ int main(int argc, char** argv) {
             lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
             pathTool.drawPanel();
             inspector.drawPanel();
+            lw::ui::drawKeyHelp(camera);
             lw::ui::drawEventsPanel(world, driver, inspector, camera);
             lw::ui::drawChroniclePanel(world, inspector);
             lw::ui::endFrame();
 
             EndDrawing();
 
-            const bool settled = !camera.orbit() || renderer3d.trees().pending() == 0;
+            const bool settled = !camera.is3d() || renderer3d.trees().pending() == 0;
             if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait)) {
                 const Image image = LoadImageFromScreen();
                 ExportImage(image, screenshot);

@@ -60,6 +60,9 @@ public:
     static constexpr float kNearTreeRange = 350.0f;
     // Выбранный в инспекторе: виден на любой дальности, над ним — метка.
     void setHighlight(EntityId id) { highlight_ = id; }
+    // Куда обращено существо на экране (atan2(dx, dy), сглаженный поворот модели);
+    // нет — если оно не рисовалось в прошлом кадре. Для вида из-за плеча.
+    std::optional<float> drawnHeading(EntityId id) const;
 
 private:
     // Как движется существо на экране: куда смотрит и фаза шага. Только для

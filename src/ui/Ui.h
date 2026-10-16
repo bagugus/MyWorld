@@ -3,6 +3,7 @@
 namespace lw {
 
 class CameraController;
+struct CameraSettings;
 struct Environment;
 class SimDriver;
 class World;
@@ -25,15 +26,22 @@ void endFrame();
 bool wantsMouse();
 bool wantsKeyboard();
 
-// Space — пауза, 1/2/3 — скорость x1/x10/x100.
+// Space — пауза, 1/2/3 — скорость x1/x10/x100, F1 — окно «Клавиши».
 void handleHotkeys(SimDriver& driver);
+
+// Настройки камеры из camera.ini (если файла нет — остаются как есть) и
+// запись туда, когда они изменились.
+void loadCameraSettings(CameraSettings& settings);
+void saveCameraSettings(const CameraSettings& settings);
+// Окно «Клавиши» (F1): управление камерой в текущем виде и общие клавиши.
+void drawKeyHelp(const CameraController& camera);
 
 // Названия поселений поверх карты, под панелями.
 void drawSettlementLabels(const World& world, const CameraController& camera);
 
 // Время, дата, солнце, погода.
 void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver);
-// Там же — выбор вида (сверху или 3D) и тени в 3D.
+// Там же — выбор вида (сверху, 3D, полёт, из-за плеча), настройки камеры и тени в 3D.
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     CameraController& camera, const WorldRenderer& renderer,
                     WorldRenderer3D& renderer3d);
