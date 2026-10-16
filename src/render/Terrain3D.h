@@ -12,6 +12,7 @@
 namespace lw {
 
 class MapRenderer;
+class SceneShading;
 
 // Рельеф и вода в 3D (этап 11.2). Высоты берутся из слоёв карты: сетка высот —
 // по углам клеток (среднее соседних клеток; у воды — дно), поверх неё — вода на
@@ -23,7 +24,8 @@ class MapRenderer;
 // сколько пикселей экрана занимает клетка: вдали — грубее. Щели между плитками
 // разных уровней закрывают «юбки» — полосы вниз по краю плитки. Грубые уровни
 // строятся сразу, подробные — по мере надобности и выгружаются, когда давно не
-// нужны. Текстура — та же карта, что и в виде сверху (отмывка рельефа в ней).
+// нужны. Текстура — та же карта, что и в виде сверху, но без отмывки: склоны
+// лепит свет по нормалям (этап 11.4, render/Lighting3D).
 //
 // Только читает карту. Создавать после InitWindow, уничтожать до CloseWindow.
 class Terrain3D {
@@ -53,11 +55,13 @@ public:
 
     const std::vector<Bridge>& bridges() const { return bridges_; }
 
-    // Земля (и снег поверх, amount 0..1). Между BeginMode3D и EndMode3D, первым.
-    void drawGround(const Camera3D& camera, float snowAmount);
-    // Вода — после всего непрозрачного: она полупрозрачна. time — секунды для
-    // ряби, sky — цвет неба для отражения.
-    void drawWater(const Camera3D& camera, float time, Color sky);
+    // Земля со снегом (amount 0..1), светом, тенью и дымкой. Между BeginMode3D
+    // и EndMode3D, первым.
+    void drawGround(const Camera3D& camera, float snowAmount, const SceneShading& shading);
+    // Вода — после всего непрозрачного: она полупрозрачна. time — секунды для ряби.
+    void drawWater(float time, const SceneShading& shading);
+    // Рельеф в карту теней: плитки квадрата center ± radius тех же уровней, что в кадре.
+    void drawShadowCasters(const Camera3D& camera, Vector2 center, float radius);
 
     // Отладочные слои по рельефу: между ними всё, что рисуется батчем rlgl,
     // поднимается на поверхность (вершинный шейдер берёт высоту из текстуры высот).
@@ -98,6 +102,8 @@ private:
     float sample(const std::vector<float>& grid, float x, float y) const;
     // Уровень детализации, при котором клетка плитки на экране не крупнее kMaxQuadPixels.
     int levelFor(const Tile& tile, const Camera3D& camera) const;
+    // Уровень, который рисуется: нужный или, пока его нет, ближайший грубее.
+    int shownLevel(const Tile& tile, const Camera3D& camera) const;
     void build(Tile& tile, int level);
     void buildGround(Tile& tile, int level);
     void buildWater(Tile& tile, int level);
@@ -118,10 +124,12 @@ private:
     std::vector<Visible> visible_;
     std::uint32_t frame_ = 0;
 
+    Shader groundShader_{};
+    int snowLoc_ = -1;
     Material groundMaterial_{};
+    Material casterMaterial_{}; // рельеф в карте теней: шейдер по умолчанию
     Material waterMaterial_{};
     Shader waterShader_{};
-    int viewPosLoc_ = -1;
     int timeLoc_ = -1;
     int skyLoc_ = -1;
     Shader drapeShader_{};

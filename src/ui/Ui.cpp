@@ -343,7 +343,7 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
 
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     CameraController& camera, const WorldRenderer& renderer,
-                    const WorldRenderer3D& renderer3d) {
+                    WorldRenderer3D& renderer3d) {
     // Справа: слева под временем места нет.
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos({display.x - 12.0f, 12.0f}, ImGuiCond_FirstUseEver, {1.0f, 0.0f});
@@ -462,6 +462,21 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
             ImGui::Text("Плиток рельефа: %d, треугольников: %d тыс.", terrain.tilesDrawn(),
                         terrain.trianglesDrawn() / 1000);
             ImGui::Text("Сеток в памяти: %d", terrain.meshesLoaded());
+            const SceneShading& shading = renderer3d.shading();
+            const SceneLight& light = shading.light();
+            ImGui::Text("Свет: %s %.2f, рассеянный %.2f", light.moonlit ? "луна" : "солнце",
+                        std::max({light.lightColor.x, light.lightColor.y, light.lightColor.z}),
+                        light.ambientSky.y);
+            bool shadows = renderer3d.shadowsEnabled();
+            if (ImGui::Checkbox("Тени", &shadows)) {
+                renderer3d.setShadowsEnabled(shadows);
+            }
+            ImGui::SameLine();
+            if (shading.shadowsOn()) {
+                ImGui::Text("квадрат %.0f м", 2.0f * shading.shadowRadius());
+            } else {
+                ImGui::TextDisabled("в этом кадре нет");
+            }
             ImGui::TextDisabled("ПКМ — вращение, СКМ — панорама, Q/E, R/F");
         } else {
             ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),

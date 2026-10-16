@@ -12,19 +12,6 @@ namespace lw {
 
 namespace {
 
-// Солнце с северо-запада, как в отмывке рельефа карты: свет по земле — (−1, −1).
-constexpr float kLightX = -0.7071f;
-constexpr float kLightZ = -0.7071f;
-
-// Яркость грани с внешней нормалью n: верх — полная, стены — от стороны света,
-// низ — в тени.
-float shadeOf(Vector3 n) {
-    if (n.y < -0.3f) {
-        return 0.55f;
-    }
-    return 0.72f + 0.16f * (n.x * kLightX + n.z * kLightZ) + 0.28f * std::max(n.y, 0.0f);
-}
-
 Color shaded(Color color, float factor) {
     const auto channel = [factor](unsigned char value) {
         return static_cast<unsigned char>(std::clamp(static_cast<float>(value) * factor, 0.0f, 255.0f));
@@ -100,15 +87,19 @@ public:
     }
 
     // Четырёхугольник a-b-c-d против часовой стрелки снаружи; треугольник — d = c.
-    void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Color color, const Joint* joint = nullptr) const {
+    // glow — светится сам, свет на него не влияет (окно ночью).
+    void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Color color, const Joint* joint = nullptr,
+              bool glow = false) const {
         const Vector3 wa = toWorld(a, joint);
         const Vector3 wb = toWorld(b, joint);
         const Vector3 wc = toWorld(c, joint);
         const Vector3 wd = toWorld(d, joint);
         const Vector3 normal =
             Vector3Normalize(Vector3CrossProduct(Vector3Subtract(wb, wa), Vector3Subtract(wc, wa)));
-        const Color lit = shaded(color, shadeOf(normal));
-        rlColor4ub(lit.r, lit.g, lit.b, lit.a);
+        // Освещает шейдер (render/Lighting3D) по нормали грани.
+        rlNormal3f(normal.x, normal.y, normal.z);
+        rlTexCoord2f(glow ? 1.0f : 0.0f, 0.0f);
+        rlColor4ub(color.r, color.g, color.b, color.a);
         rlVertex3f(wa.x, wa.y, wa.z);
         rlVertex3f(wb.x, wb.y, wb.z);
         rlVertex3f(wc.x, wc.y, wc.z);
@@ -312,6 +303,7 @@ constexpr float kFoundation = 0.5f; // уходит в землю: на скло
 constexpr float kPlinth = 0.25f;    // пол над верхним углом земли
 constexpr float kEaves = 0.35f;     // свес крыши
 constexpr Color kGlassColor = {62, 80, 102, 255};
+constexpr Color kWindowLight = {255, 206, 128, 255};
 constexpr Color kDoorColor = {86, 58, 40, 255};
 constexpr Color kStoneColor = {112, 108, 102, 255};
 constexpr Color kFlatRoofColor = {92, 92, 96, 255};
@@ -419,27 +411,27 @@ enum class Side : std::uint8_t { PlusX, MinusX, PlusZ, MinusZ };
 // Прямоугольник на стене side: вдоль стены [a0, a1], по высоте [y0, y1],
 // чуть снаружи, чтобы не сливаться со стеной.
 void emitOnWall(const Emitter& e, const Layout& layout, Side side, float a0, float a1, float y0, float y1,
-                Color color) {
+                Color color, bool glow = false) {
     constexpr float kOut = 0.04f;
     switch (side) {
     case Side::PlusZ: {
         const float z = layout.hz + kOut;
-        e.quad({a0, y0, z}, {a1, y0, z}, {a1, y1, z}, {a0, y1, z}, color);
+        e.quad({a0, y0, z}, {a1, y0, z}, {a1, y1, z}, {a0, y1, z}, color, nullptr, glow);
         break;
     }
     case Side::MinusZ: {
         const float z = -layout.hz - kOut;
-        e.quad({a1, y0, z}, {a0, y0, z}, {a0, y1, z}, {a1, y1, z}, color);
+        e.quad({a1, y0, z}, {a0, y0, z}, {a0, y1, z}, {a1, y1, z}, color, nullptr, glow);
         break;
     }
     case Side::PlusX: {
         const float x = layout.hx + kOut;
-        e.quad({x, y0, a1}, {x, y0, a0}, {x, y1, a0}, {x, y1, a1}, color);
+        e.quad({x, y0, a1}, {x, y0, a0}, {x, y1, a0}, {x, y1, a1}, color, nullptr, glow);
         break;
     }
     case Side::MinusX: {
         const float x = -layout.hx - kOut;
-        e.quad({x, y0, a0}, {x, y0, a1}, {x, y1, a1}, {x, y1, a0}, color);
+        e.quad({x, y0, a0}, {x, y0, a1}, {x, y1, a1}, {x, y1, a0}, color, nullptr, glow);
         break;
     }
     }
@@ -593,7 +585,15 @@ void emitBuilding(const BuildingModel& model) {
                 if (storey == 0 && side == doorSide && std::abs(along - doorAlong) < doorHalf + windowHalf + 0.2f) {
                     continue;
                 }
-                emitOnWall(e, layout, side, along - windowHalf, along + windowHalf, y0, y1, kGlassColor);
+                // Ночью светится часть окон — по хешу окна, одни и те же.
+                const std::uint64_t bits = (model.seed >> 8) ^ (static_cast<std::uint64_t>(side) * 0x9E3779B1u) ^
+                                           (static_cast<std::uint64_t>(storey) * 0x85EBCA77u) ^
+                                           (static_cast<std::uint64_t>(i) * 0xC2B2AE3Du);
+                const bool glow = model.lights > 0.0f &&
+                                  static_cast<float>((bits * 0x2545F4914F6CDD1DULL) >> 40 & 0xFFFFu) / 65535.0f <
+                                      model.lights;
+                emitOnWall(e, layout, side, along - windowHalf, along + windowHalf, y0, y1,
+                           glow ? kWindowLight : kGlassColor, glow);
             }
         }
     }

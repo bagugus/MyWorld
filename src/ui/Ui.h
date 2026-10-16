@@ -33,10 +33,10 @@ void drawSettlementLabels(const World& world, const CameraController& camera);
 
 // Время, дата, солнце, погода.
 void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver);
-// Там же — выбор вида (сверху или 3D).
+// Там же — выбор вида (сверху или 3D) и тени в 3D.
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     CameraController& camera, const WorldRenderer& renderer,
-                    const WorldRenderer3D& renderer3d);
+                    WorldRenderer3D& renderer3d);
 // Ивенты (этап 7.1): идущие ивенты (ссылки в инспектор) и кнопки «начать
 // ивент» — где выберет мир или у центра экрана. Начатый ивент открывается в
 // инспекторе.

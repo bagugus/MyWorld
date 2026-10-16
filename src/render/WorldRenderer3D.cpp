@@ -1,9 +1,11 @@
 #include "render/WorldRenderer3D.h"
 
 #include "render/CameraController.h"
+#include "render/Lighting.h"
 #include "render/Models3D.h"
 #include "render/Palette.h"
 #include "render/Terrain3D.h"
+#include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/TimeScale.h"
 #include "sim/Weapons.h"
@@ -36,6 +38,14 @@ constexpr Color kTimberColor = {92, 70, 50, 255};
 constexpr float kTurnRate = 8.0f;
 // Сколько кадров помнить облик существа, которое не рисуется.
 constexpr std::uint32_t kForgetFrames = 600;
+// Тени — в квадрате вокруг точки взгляда: полусторона растёт с расстоянием
+// камеры ступенями (чтобы при зуме тени не дрожали), дальше kShadowsOff — теней нет.
+constexpr float kShadowMinRadius = 40.0f;
+constexpr float kShadowMaxRadius = 1600.0f;
+constexpr float kShadowStep = 1.2f;
+constexpr float kShadowsOff = 4000.0f;
+// Дымка — слой у земли: с высоты H метров её видно в 1 + H / kHazeHeight раз меньше.
+constexpr float kHazeHeight = 1500.0f;
 
 constexpr Color kTrousersColor = {58, 62, 78, 255};
 constexpr Color kZombieSkin = {138, 156, 112, 255};
@@ -100,7 +110,7 @@ float carcassLift(AnimalKind kind) {
 // Столб дыма над местом ивента: клубы поднимаются, их сносит по ветру, они
 // растут и тают. Рисуется после непрозрачного.
 void drawSmoke(const World& world, const WorldEvent& event, const CameraController& camera,
-               const Terrain3D& terrain) {
+               const Terrain3D& terrain, const SceneLight& light) {
     const Vector2 site = {Map::cellCenter(event.site.x), Map::cellCenter(event.site.y)};
     const float ground = terrain.surfaceAt(site.x, site.y);
     const Weather& weather = world.weather();
@@ -115,8 +125,12 @@ void drawSmoke(const World& world, const WorldEvent& event, const CameraControll
     for (int i = kPuffs - 1; i >= 0; --i) {
         const float t = (static_cast<float>(i) + rise) / static_cast<float>(kPuffs);
         const float along = t * drift * static_cast<float>(kPuffs);
-        Color c = kSmokeColor;
-        c.a = static_cast<unsigned char>(190.0f * (1.0f - t));
+        // Дым освещён, как всё вокруг: ночью тёмный.
+        const Vector3 lit = Vector3Add(light.ambientSky, Vector3Scale(light.lightColor, 0.7f));
+        Color c = {static_cast<unsigned char>(std::min(255.0f, kSmokeColor.r * lit.x)),
+                   static_cast<unsigned char>(std::min(255.0f, kSmokeColor.g * lit.y)),
+                   static_cast<unsigned char>(std::min(255.0f, kSmokeColor.b * lit.z)),
+                   static_cast<unsigned char>(190.0f * (1.0f - t))};
         const Vector3 center = {site.x + toX * along * scale, ground + (2.0f + 40.0f * t) * scale,
                                 site.y + toZ * along * scale};
         DrawSphereEx(center, (2.0f + 7.0f * t) * scale, 6, 8, c);
@@ -200,6 +214,10 @@ WorldRenderer3D::Motion& WorldRenderer3D::motionOf(EntityId id, float dx, float 
         motion.heading = speed > 0.05f ? headingOf(dx, dy) : angleOf(bits);
         motion.phase = angleOf(bits >> 20);
     }
+    // Облик меняется раз за кадр, сколько бы проходов (тень, кадр) его ни рисовали.
+    if (motion.seen == frame_) {
+        return motion;
+    }
     if (speed > 0.05f) {
         const float turn = std::remainder(headingOf(dx, dy) - motion.heading, 2.0f * PI);
         motion.heading += std::clamp(turn, -kTurnRate * dt, kTurnRate * dt);
@@ -213,26 +231,106 @@ WorldRenderer3D::Motion& WorldRenderer3D::motionOf(EntityId id, float dx, float 
 void WorldRenderer3D::draw(const World& world, const CameraController& camera, float alpha) {
     const Camera3D& view = camera.camera3d();
     const Vector3 eye = view.position;
-    const Vector3 forward = Vector3Normalize(Vector3Subtract(view.target, eye));
-    // Грубое отсечение: что целиком позади камеры, не рисуется.
-    const auto behind = [&](Vector3 point, float size) {
-        return Vector3DotProduct(Vector3Subtract(point, eye), forward) < -size;
-    };
     ++frame_;
-    const float dt = std::min(GetFrameTime(), 0.1f);
+    dt_ = std::min(GetFrameTime(), 0.1f);
     const float snow = world.weather().snowCover;
+
+    // Свет кадра: солнце или луна, небо, дымка (сверху её видно меньше).
+    const SceneLight light = sceneLightAt(environmentAt(world), world.weather());
+    const float height = std::max(0.0f, eye.y - terrain_.surfaceAt(eye.x, eye.z));
+    shading_.setLight(light, eye, 1.0f / (1.0f + height / kHazeHeight));
+
+    // Где ночью горит свет: дома, где кто-то не спит, и открытая работа.
+    litBuildings_.clear();
+    lights_ = 0.6f * std::clamp((light.night - 0.05f) / 0.5f, 0.0f, 1.0f);
+    const entt::registry& registry = world.registry();
+    if (lights_ > 0.0f) {
+        for (const auto [entity, person] : registry.view<const Person>().each()) {
+            if (person.indoors && !person.asleep && person.home != kInvalidId) {
+                litBuildings_.insert(person.home);
+            }
+        }
+        for (const auto [entity, workplace, id] : registry.view<const Workplace, const Id>().each()) {
+            if (workplace.onDuty > 0) {
+                litBuildings_.insert(id.value);
+            }
+        }
+    }
+
+    // Тени: квадрат вокруг точки взгляда, чуть вперёд по взгляду.
+    const float distance = Vector3Distance(eye, view.target);
+    if (shadowsEnabled_ && distance < kShadowsOff) {
+        const float wanted = std::clamp(distance * 1.1f, kShadowMinRadius, kShadowMaxRadius);
+        const float steps = std::ceil(std::log(wanted / kShadowMinRadius) / std::log(kShadowStep));
+        const float radius = std::min(kShadowMinRadius * std::pow(kShadowStep, steps), kShadowMaxRadius);
+        Vector3 ahead = {view.target.x - eye.x, 0.0f, view.target.z - eye.z};
+        ahead = Vector3Length(ahead) > 1e-3f ? Vector3Normalize(ahead) : Vector3{};
+        const Vector3 center = Vector3Add(view.target, Vector3Scale(ahead, 0.35f * radius));
+        if (shading_.beginShadowPass(center, radius)) {
+            terrain_.drawShadowCasters(view, shading_.shadowCenter(), shading_.shadowRadius());
+            rlSetTexture(rlGetTextureIdDefault());
+            rlBegin(RL_QUADS);
+            emitScene(world, camera, alpha, true);
+            rlEnd();
+            rlSetTexture(0);
+            shading_.endShadowPass();
+        }
+    }
+
+    shading_.bindTextures();
+    const float time = static_cast<float>(GetTime());
+    shading_.drawSky(view, time);
 
     BeginMode3D(view);
     // Даже полный покров оставляет карту читаемой.
-    terrain_.drawGround(view, snow * 0.85f);
+    terrain_.drawGround(view, snow * 0.85f, shading_);
 
     // Всё непрозрачное — одним набором четырёхугольников без текстуры.
+    shading_.beginModels();
     rlSetTexture(rlGetTextureIdDefault());
     rlBegin(RL_QUADS);
-    rlNormal3f(0.0f, 1.0f, 0.0f);
+    emitScene(world, camera, alpha, false);
+    rlEnd();
+    rlSetTexture(0);
+    rlDrawRenderBatchActive();
+    shading_.endModels();
+
+    // Забыть облик тех, кого давно нет в кадре.
+    if (frame_ % kForgetFrames == 0) {
+        std::erase_if(motion_, [this](const auto& entry) { return frame_ - entry.second.seen > kForgetFrames; });
+    }
+
+    terrain_.drawWater(time, shading_);
+
+    for (const auto [entity, event] : registry.view<const WorldEvent>().each()) {
+        if (world.tick() < event.signalUntil) {
+            drawSmoke(world, event, camera, terrain_, light);
+        }
+    }
+    EndMode3D();
+    shading_.unbindTextures();
+}
+
+void WorldRenderer3D::emitScene(const World& world, const CameraController& camera, float alpha, bool shadowPass) {
+    const Camera3D& view = camera.camera3d();
+    const Vector3 eye = view.position;
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(view.target, eye));
+    // Что не нужно этому проходу: в кадре — целиком позади камеры, в тени — вне
+    // квадрата карты теней.
+    const auto skip = [&](Vector3 point, float size) {
+        if (shadowPass) {
+            return !shading_.inShadowArea(point, size);
+        }
+        return Vector3DotProduct(Vector3Subtract(point, eye), forward) < -size;
+    };
+    const float dt = dt_;
+    const float snow = world.weather().snowCover;
 
     const entt::registry& registry = world.registry();
-    buildingsDrawn_ = 0;
+    if (!shadowPass) {
+        buildingsDrawn_ = 0;
+        creaturesDrawn_ = 0;
+    }
     for (const auto [entity, building] : registry.view<const Building>().each()) {
         BuildingModel model;
         model.kind = building.kind;
@@ -251,7 +349,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         }
         const Vector2 center = {(model.x0 + model.x1) * 0.5f, (model.z0 + model.z1) * 0.5f};
         const float top = buildingTop(model);
-        if (behind({center.x, (model.low + top) * 0.5f, center.y},
+        if (skip({center.x, (model.low + top) * 0.5f, center.y},
                    std::max(model.x1 - model.x0, model.z1 - model.z0) + top - model.low)) {
             continue;
         }
@@ -259,18 +357,21 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         const Vector2 doorCell = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
         model.door = {std::clamp(doorCell.x, model.x0, model.x1), std::clamp(doorCell.y, model.z0, model.z1)};
         model.doorGround = terrain_.groundAt(doorCell.x, doorCell.y);
-        model.seed = mixBits(registry.get<Id>(entity).value);
+        const EntityId id = registry.get<Id>(entity).value;
+        model.seed = mixBits(id);
         model.snow = snow;
-        model.detailed = camera.zoomAt(center) >= kDetailPixels;
+        // Мелочь на стенах тени не отбрасывает.
+        model.detailed = !shadowPass && camera.zoomAt(center) >= kDetailPixels;
+        model.lights = !shadowPass && litBuildings_.contains(id) ? lights_ : 0.0f;
         emitBuilding(model);
-        ++buildingsDrawn_;
+        buildingsDrawn_ += shadowPass ? 0 : 1;
     }
 
     // Мосты: настил над водой по клеткам дороги, перила и опоры.
     for (const Terrain3D::Bridge& bridge : terrain_.bridges()) {
         const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
         const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
-        if (behind({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
+        if (skip({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
             continue;
         }
         emitWorldBox({x0, bridge.deck - kBridgeThickness, z0},
@@ -278,7 +379,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
                      bridge.road == Road::Asphalt ? kBridgeAsphalt : kBridgeWood, true);
     }
     for (const Part& part : bridgeParts_) {
-        if (!behind(part.min, 2.0f * Map::kCellSize)) {
+        if (!skip(part.min, 2.0f * Map::kCellSize)) {
             emitWorldBox(part.min, part.max, part.color);
         }
     }
@@ -286,7 +387,6 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     // Позиция на начало тика — текущая минус смещение за тик (Velocity · kTickDt).
     const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
     const float wingTime = static_cast<float>(GetTime()) * 9.0f;
-    creaturesDrawn_ = 0;
     for (const auto [entity, position] : registry.view<const Position>().each()) {
         Vector2 at = {position.x, position.y};
         Vector2 velocity = {0.0f, 0.0f};
@@ -296,7 +396,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
             at.y -= v->y * back;
         }
         const float stand = terrain_.standAt(at.x, at.y);
-        if (behind({at.x, stand, at.y}, 50.0f)) {
+        if (skip({at.x, stand, at.y}, 50.0f)) {
             continue;
         }
         const EntityId id = registry.get<Id>(entity).value;
@@ -374,7 +474,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         ModelFrame frame;
         frame.origin = {at.x, stand, at.y};
         frame.yaw = motion.heading;
-        ++creaturesDrawn_;
+        creaturesDrawn_ += shadowPass ? 0 : 1;
 
         if (animal != nullptr) {
             frame.scale = visibleScale(camera, at, animalSize(animal->kind));
@@ -407,22 +507,6 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         }
         emitHuman(frame, look, gait);
     }
-    rlEnd();
-    rlSetTexture(0);
-
-    // Забыть облик тех, кого давно нет в кадре.
-    if (frame_ % kForgetFrames == 0) {
-        std::erase_if(motion_, [this](const auto& entry) { return frame_ - entry.second.seen > kForgetFrames; });
-    }
-
-    terrain_.drawWater(view, static_cast<float>(GetTime()), kSkyColor);
-
-    for (const auto [entity, event] : registry.view<const WorldEvent>().each()) {
-        if (world.tick() < event.signalUntil) {
-            drawSmoke(world, event, camera, terrain_);
-        }
-    }
-    EndMode3D();
 }
 
 } // namespace lw

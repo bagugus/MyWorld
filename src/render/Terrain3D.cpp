@@ -1,5 +1,6 @@
 #include "render/Terrain3D.h"
 
+#include "render/Lighting3D.h"
 #include "render/MapRenderer.h"
 
 #include <raymath.h>
@@ -53,9 +54,55 @@ float waterLevel(const Map& map, Cell cell) {
     return map.elevationMeters(cell) + map.depthMeters(cell);
 }
 
-// Вода: рябь — сумма бегущих волн, цвет — от глубины, под углом отражает небо,
-// у берега прозрачна. Солнце пока постоянное, с северо-запада, как отмывка карты
-// (свет по времени суток — этап 11.4).
+// Земля: текстура карты (пиксель — клетка) с рваными краями клеток, детальный
+// шум, снег по маске, свет по нормали, тень и дымка (render/Lighting3D).
+constexpr const char* kGroundVs = R"(#version 330
+in vec3 vertexPosition;
+in vec2 vertexTexCoord;
+in vec3 vertexNormal;
+uniform mat4 mvp;
+out vec3 fragPosition;
+out vec2 fragTexCoord;
+out vec3 fragNormal;
+void main() {
+    fragPosition = vertexPosition;
+    fragTexCoord = vertexTexCoord;
+    fragNormal = vertexNormal;
+    gl_Position = mvp * vec4(vertexPosition, 1.0);
+}
+)";
+
+constexpr const char* kGroundFs = R"(
+in vec3 fragPosition;
+in vec2 fragTexCoord;
+in vec3 fragNormal;
+uniform sampler2D texture0; // карта
+uniform sampler2D texture1; // снег: альфа — сколько клетки заносит
+uniform float snowAmount;
+out vec4 finalColor;
+void main() {
+    vec2 size = vec2(textureSize(texture0, 0));
+    vec2 p = fragPosition.xz;
+    // Края клеток — рваные, а не квадраты: координата текстуры чуть сдвинута
+    // шумом. Вдали, где клетка мельче пикселя, сдвиг только рябил бы.
+    vec2 cellsPerPixel = fwidth(fragTexCoord * size);
+    float near = 1.0 - smoothstep(0.3, 1.0, max(cellsPerPixel.x, cellsPerPixel.y));
+    vec2 jitter = (texture(detailMap, p / 12.0).ba - 0.5) * 0.5 * near;
+    vec2 uv = fragTexCoord + jitter / size;
+    vec3 base = texture(texture0, uv).rgb;
+    float fine = texture(detailMap, p / 21.0).r;
+    float broad = texture(detailMap, p / 230.0).g;
+    base *= 0.78 + 0.26 * fine + 0.18 * broad;
+    float snow = texture(texture1, uv).a * snowAmount;
+    base = mix(base, vec3(0.90, 0.92, 0.96) * (0.94 + 0.08 * fine), snow);
+    vec3 n = normalize(fragNormal);
+    vec3 color = base * lighting(n, shadowAt(fragPosition, n));
+    finalColor = vec4(withFog(color, fragPosition), 1.0);
+}
+)";
+
+// Вода: рябь — сумма бегущих волн, цвет — от глубины и света, под углом
+// отражает небо, у берега прозрачна; блик — от солнца или луны.
 constexpr const char* kWaterVs = R"(#version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
@@ -69,10 +116,9 @@ void main() {
 }
 )";
 
-constexpr const char* kWaterFs = R"(#version 330
+constexpr const char* kWaterFs = R"(
 in vec3 fragPosition;
 in float fragDepth;
-uniform vec3 viewPos;
 uniform float time;
 uniform vec3 skyColor;
 uniform vec4 colDiffuse;
@@ -80,7 +126,6 @@ out vec4 finalColor;
 
 const vec3 shallowColor = vec3(0.20, 0.44, 0.48);
 const vec3 deepColor = vec3(0.04, 0.15, 0.28);
-const vec3 sunDir = vec3(-0.45, 0.77, -0.45);
 
 vec2 wave(vec2 p, vec2 dir, float frequency, float speed, float amplitude) {
     return dir * (amplitude * cos(dot(p, dir) * frequency + time * speed));
@@ -101,11 +146,12 @@ void main() {
     float fresnel = 0.03 + 0.97 * pow(1.0 - max(dot(n, v), 0.0), 5.0);
     float depth = max(fragDepth, 0.0);
     float deep = clamp(depth / 10.0, 0.0, 1.0);
-    vec3 color = mix(mix(shallowColor, deepColor, sqrt(deep)), skyColor, fresnel);
-    color += vec3(0.7 * pow(max(dot(n, normalize(sunDir + v)), 0.0), 250.0));
+    vec3 body = mix(shallowColor, deepColor, sqrt(deep)) * lighting(vec3(0.0, 1.0, 0.0), 1.0);
+    vec3 color = mix(body, skyColor, fresnel);
+    color += lightColor * (0.9 * pow(max(dot(n, normalize(lightDir + v)), 0.0), 250.0));
     float alpha = smoothstep(0.0, 0.5, depth) * mix(0.5, 0.9, deep);
     alpha = mix(alpha, 1.0, fresnel * smoothstep(0.0, 0.3, depth));
-    finalColor = vec4(color, alpha) * colDiffuse;
+    finalColor = vec4(withFog(color, fragPosition), alpha) * colDiffuse;
 }
 )";
 
@@ -180,12 +226,15 @@ bool outsideFrustum(const Matrix& m, Vector3 min, Vector3 max) {
     return false;
 }
 
-Mesh allocateMesh(int vertexCount, int triangleCount) {
+Mesh allocateMesh(int vertexCount, int triangleCount, bool normals = false) {
     Mesh mesh{};
     mesh.vertexCount = vertexCount;
     mesh.triangleCount = triangleCount;
     mesh.vertices = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 3 * sizeof(float)));
     mesh.texcoords = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 2 * sizeof(float)));
+    if (normals) {
+        mesh.normals = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 3 * sizeof(float)));
+    }
     mesh.indices = static_cast<unsigned short*>(
         MemAlloc(static_cast<unsigned>(triangleCount) * 3 * sizeof(unsigned short)));
     return mesh;
@@ -197,8 +246,10 @@ void upload(Mesh& mesh) {
     UploadMesh(&mesh, false);
     MemFree(mesh.vertices);
     MemFree(mesh.texcoords);
+    MemFree(mesh.normals);
     mesh.vertices = nullptr;
     mesh.texcoords = nullptr;
+    mesh.normals = nullptr;
 }
 
 } // namespace
@@ -291,10 +342,13 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
         }
     }
 
+    groundShader_ = SceneShading::loadShader(kGroundVs, kGroundFs);
+    snowLoc_ = GetShaderLocation(groundShader_, "snowAmount");
     groundMaterial_ = LoadMaterialDefault();
+    groundMaterial_.shader = groundShader_;
+    casterMaterial_ = LoadMaterialDefault();
 
-    waterShader_ = LoadShaderFromMemory(kWaterVs, kWaterFs);
-    viewPosLoc_ = GetShaderLocation(waterShader_, "viewPos");
+    waterShader_ = SceneShading::loadShader(kWaterVs, kWaterFs);
     timeLoc_ = GetShaderLocation(waterShader_, "time");
     skyLoc_ = GetShaderLocation(waterShader_, "skyColor");
     waterMaterial_ = LoadMaterialDefault();
@@ -324,11 +378,13 @@ Terrain3D::~Terrain3D() {
             unload(tile, level);
         }
     }
+    UnloadShader(groundShader_);
     UnloadShader(waterShader_);
     UnloadShader(drapeShader_);
     UnloadTexture(heights_);
     // UnloadMaterial выгрузил бы и текстуры карты, а они не наши.
     MemFree(groundMaterial_.maps);
+    MemFree(casterMaterial_.maps);
     MemFree(waterMaterial_.maps);
 }
 
@@ -465,7 +521,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
     const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
     const int gridQuads = (nx - 1) * (nz - 1);
     const int skirtQuads = 2 * (nx - 1) + 2 * (nz - 1);
-    Mesh mesh = allocateMesh(nx * nz + 2 * nx + 2 * nz, 2 * (gridQuads + skirtQuads));
+    Mesh mesh = allocateMesh(nx * nz + 2 * nx + 2 * nz, 2 * (gridQuads + skirtQuads), true);
 
     int vertices = 0;
     const auto put = [&](int cx, int cz, float y) {
@@ -476,6 +532,16 @@ void Terrain3D::buildGround(Tile& tile, int level) {
         // Пиксель текстуры — клетка; угол клетки — край пикселя.
         mesh.texcoords[2 * vertices] = static_cast<float>(cx - chunk.left) / static_cast<float>(chunk.width);
         mesh.texcoords[2 * vertices + 1] = static_cast<float>(cz - chunk.top) / static_cast<float>(chunk.height);
+        // Нормаль — по соседним углам самой подробной сетки: и на грубых уровнях
+        // свет лепит мелкие склоны.
+        const auto h = [&](int x, int z) {
+            return ground_[vertexIndex(std::clamp(x, 0, map_.width()), std::clamp(z, 0, map_.height()))];
+        };
+        const Vector3 normal = Vector3Normalize(
+            {(h(cx - 1, cz) - h(cx + 1, cz)) / (2.0f * kCell), 1.0f, (h(cx, cz - 1) - h(cx, cz + 1)) / (2.0f * kCell)});
+        mesh.normals[3 * vertices] = normal.x;
+        mesh.normals[3 * vertices + 1] = normal.y;
+        mesh.normals[3 * vertices + 2] = normal.z;
         return vertices++;
     };
     const auto cellX = [&](int i) { return tile.left + std::min(i * step, tile.width); };
@@ -516,6 +582,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
             std::copy_n(position, 3, mesh.vertices + 3 * v);
             mesh.vertices[3 * v + 1] -= skirt;
             std::copy_n(mesh.texcoords + 2 * g, 2, mesh.texcoords + 2 * v);
+            std::copy_n(mesh.normals + 3 * g, 3, mesh.normals + 3 * v);
         }
         for (int k = 0; k + 1 < count; ++k) {
             triangle(gridVertex(k), first + k, first + k + 1);
@@ -655,7 +722,32 @@ void Terrain3D::unload(Tile& tile, int level) {
     --meshesLoaded_;
 }
 
-void Terrain3D::drawGround(const Camera3D& camera, float snowAmount) {
+int Terrain3D::shownLevel(const Tile& tile, const Camera3D& camera) const {
+    int level = levelFor(tile, camera);
+    // Пока подробный уровень не построен — ближайший грубее (грубые есть всегда).
+    while (!tile.built[level]) {
+        ++level;
+    }
+    return level;
+}
+
+void Terrain3D::drawShadowCasters(const Camera3D& camera, Vector2 center, float radius) {
+    // Тот же уровень, что и в кадре: тень ложится на ту же поверхность.
+    rlDisableBackfaceCulling();
+    for (const Tile& tile : tiles_) {
+        const float x0 = static_cast<float>(tile.left) * kCell;
+        const float z0 = static_cast<float>(tile.top) * kCell;
+        const float x1 = static_cast<float>(tile.left + tile.width) * kCell;
+        const float z1 = static_cast<float>(tile.top + tile.height) * kCell;
+        if (x1 < center.x - radius || x0 > center.x + radius || z1 < center.y - radius || z0 > center.y + radius) {
+            continue;
+        }
+        DrawMesh(tile.ground[static_cast<std::size_t>(shownLevel(tile, camera))], casterMaterial_, MatrixIdentity());
+    }
+    rlEnableBackfaceCulling();
+}
+
+void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, const SceneShading& shading) {
     ++frame_;
     textures_.useGroundFilter();
     // Внутри BeginMode3D модельно-видовая матрица — это вид камеры.
@@ -672,40 +764,31 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount) {
         if (outsideFrustum(viewProjection, min, max)) {
             continue;
         }
-        int level = levelFor(tile, camera);
-        if (!tile.built[level] && builds < kBuildsPerFrame) {
-            build(tile, level);
+        const int wanted = levelFor(tile, camera);
+        if (!tile.built[wanted] && builds < kBuildsPerFrame) {
+            build(tile, wanted);
             ++builds;
         }
-        // Пока подробный уровень не построен — ближайший грубее (грубые есть всегда).
-        while (!tile.built[level]) {
-            ++level;
-        }
+        const int level = shownLevel(tile, camera);
         tile.lastUsed[level] = frame_;
         visible_.push_back({static_cast<int>(index), level});
     }
 
     tilesDrawn_ = static_cast<int>(visible_.size());
     trianglesDrawn_ = 0;
-    const unsigned char snow = static_cast<unsigned char>(std::clamp(snowAmount, 0.0f, 1.0f) * 255.0f);
-    // Цвета вершин у сетки нет: шейдер берёт значение атрибута по умолчанию,
-    // а оно общее для всех — ставим белое явно.
-    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-    rlSetVertexAttributeDefault(RL_DEFAULT_SHADER_ATTRIB_LOCATION_COLOR, white, SHADER_ATTRIB_VEC4, 4);
+    shading.apply(groundShader_);
+    const float snow = std::clamp(snowAmount, 0.0f, 1.0f);
+    SetShaderValue(groundShader_, snowLoc_, &snow, SHADER_UNIFORM_FLOAT);
     // Юбки видны с обеих сторон; снизу на землю не смотрят, так что отсечение не нужно.
     rlDisableBackfaceCulling();
-    for (int layer = 0; layer < (snow > 0 ? 2 : 1); ++layer) {
-        // Снег — та же сетка второй раз: глубина совпадает, и он ложится сверху.
-        const unsigned char alpha = layer == 0 ? static_cast<unsigned char>(255) : snow;
-        groundMaterial_.maps[MATERIAL_MAP_DIFFUSE].color = {255, 255, 255, alpha};
-        for (const Visible& visible : visible_) {
-            const Tile& tile = tiles_[static_cast<std::size_t>(visible.tile)];
-            const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
-            groundMaterial_.maps[MATERIAL_MAP_DIFFUSE].texture = layer == 0 ? chunk.texture : chunk.snow;
-            const Mesh& mesh = tile.ground[static_cast<std::size_t>(visible.level)];
-            DrawMesh(mesh, groundMaterial_, MatrixIdentity());
-            trianglesDrawn_ += layer == 0 ? mesh.triangleCount : 0;
-        }
+    for (const Visible& visible : visible_) {
+        const Tile& tile = tiles_[static_cast<std::size_t>(visible.tile)];
+        const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
+        groundMaterial_.maps[MATERIAL_MAP_DIFFUSE].texture = chunk.texture;
+        groundMaterial_.maps[MATERIAL_MAP_SPECULAR].texture = chunk.snow;
+        const Mesh& mesh = tile.ground[static_cast<std::size_t>(visible.level)];
+        DrawMesh(mesh, groundMaterial_, MatrixIdentity());
+        trianglesDrawn_ += mesh.triangleCount;
     }
     rlEnableBackfaceCulling();
 
@@ -719,15 +802,16 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount) {
     }
 }
 
-void Terrain3D::drawWater(const Camera3D& camera, float time, Color sky) {
+void Terrain3D::drawWater(float time, const SceneShading& shading) {
     // Всё непрозрачное, накопленное в батче rlgl, — раньше воды: сквозь воду
     // видно то, что под ней.
     rlDrawRenderBatchActive();
-    const Vector3 skyColor = {static_cast<float>(sky.r) / 255.0f, static_cast<float>(sky.g) / 255.0f,
-                              static_cast<float>(sky.b) / 255.0f};
-    SetShaderValue(waterShader_, viewPosLoc_, &camera.position, SHADER_UNIFORM_VEC3);
+    // Отражается небо чуть выше горизонта.
+    const SceneLight& light = shading.light();
+    const Vector3 sky = Vector3Lerp(light.horizon, light.zenith, 0.3f);
+    shading.apply(waterShader_);
     SetShaderValue(waterShader_, timeLoc_, &time, SHADER_UNIFORM_FLOAT);
-    SetShaderValue(waterShader_, skyLoc_, &skyColor, SHADER_UNIFORM_VEC3);
+    SetShaderValue(waterShader_, skyLoc_, &sky, SHADER_UNIFORM_VEC3);
     for (const Visible& visible : visible_) {
         const Mesh& mesh = tiles_[static_cast<std::size_t>(visible.tile)].water[static_cast<std::size_t>(visible.level)];
         if (mesh.vertexCount > 0) {

@@ -67,7 +67,9 @@ float hillshade(const Map& map, int x, int y) {
     return std::clamp(lambert / lightZ, kMinShade, kMaxShade);
 }
 
-Color cellColor(const Map& map, int x, int y) {
+// Цвет клетки; shade — с отмывкой рельефа (вид сверху), без неё — для 3D, где
+// склоны лепит свет.
+Color cellColor(const Map& map, int x, int y, bool shade) {
     // Дорога поверх всего, включая воду (мост).
     switch (map.road.at(x, y)) {
     case Road::Asphalt:
@@ -109,7 +111,7 @@ Color cellColor(const Map& map, int x, int y) {
             break;
         }
     }
-    return scale(color, hillshade(map, x, y));
+    return shade ? scale(color, hillshade(map, x, y)) : color;
 }
 
 // Насколько клетку видно белой под снегом: вода не заносится, лес и дороги — меньше.
@@ -142,18 +144,21 @@ Texture2D makeTexture(const std::vector<Color>& pixels, int width, int height) {
 
 MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells - 1) / kChunkCells) {
     std::vector<Color> pixels;
+    std::vector<Color> plain;
     std::vector<Color> snow;
     for (int top = 0; top < map.height(); top += kChunkCells) {
         for (int left = 0; left < map.width(); left += kChunkCells) {
             const int width = std::min(kChunkCells, map.width() - left);
             const int height = std::min(kChunkCells, map.height() - top);
             pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+            plain.resize(pixels.size());
             snow.resize(pixels.size());
             for (int y = 0; y < height; ++y) {
                 for (int x = 0; x < width; ++x) {
                     const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
                                               static_cast<std::size_t>(x);
-                    pixels[index] = cellColor(map, left + x, top + y);
+                    pixels[index] = cellColor(map, left + x, top + y, true);
+                    plain[index] = cellColor(map, left + x, top + y, false);
                     // Снег тоже с отмывкой: склоны остаются читаемыми.
                     snow[index] = scale({236, 240, 246, snowAlpha(map, left + x, top + y)},
                                         std::min(1.0f, hillshade(map, left + x, top + y) * 1.05f));
@@ -162,6 +167,7 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
 
             Chunk chunk;
             chunk.texture = makeTexture(pixels, width, height);
+            chunk.plain = makeTexture(plain, width, height);
             chunk.snow = makeTexture(snow, width, height);
             chunk.bounds = {static_cast<float>(left) * Map::kCellSize,
                             static_cast<float>(top) * Map::kCellSize,
@@ -175,6 +181,7 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
 MapRenderer::~MapRenderer() {
     for (const Chunk& chunk : chunks_) {
         UnloadTexture(chunk.texture);
+        UnloadTexture(chunk.plain);
         UnloadTexture(chunk.snow);
     }
 }
@@ -184,7 +191,7 @@ void MapRenderer::setFilter(int filter) {
         return;
     }
     for (const Chunk& chunk : chunks_) {
-        for (const Texture2D& texture : {chunk.texture, chunk.snow}) {
+        for (const Texture2D& texture : {chunk.texture, chunk.plain, chunk.snow}) {
             if (filter != kGroundFilter) {
                 SetTextureFilter(texture, filter);
                 continue;
@@ -231,7 +238,7 @@ void MapRenderer::drawSnow(const Rectangle& visible, float amount) {
 MapRenderer::GroundChunk MapRenderer::groundChunk(int x, int y) const {
     const Chunk& chunk = chunks_[static_cast<std::size_t>((y / kChunkCells) * chunksX_ + x / kChunkCells)];
     GroundChunk result;
-    result.texture = chunk.texture;
+    result.texture = chunk.plain;
     result.snow = chunk.snow;
     result.left = x / kChunkCells * kChunkCells;
     result.top = y / kChunkCells * kChunkCells;

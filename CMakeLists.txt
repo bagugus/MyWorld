@@ -136,6 +136,10 @@ if(LW_BUILD_APP)
         src/main.cpp
         src/render/CameraController.cpp
         src/render/CameraController.h
+        src/render/Lighting.cpp
+        src/render/Lighting.h
+        src/render/Lighting3D.cpp
+        src/render/Lighting3D.h
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
         src/render/Models3D.cpp

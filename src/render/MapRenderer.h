@@ -27,8 +27,8 @@ public:
 
     // Текстуры чанка и его место на карте в клетках — для рельефа в 3D (Terrain3D).
     struct GroundChunk {
-        Texture2D texture{};
-        Texture2D snow{};
+        Texture2D texture{}; // без отмывки: в 3D склоны лепит свет
+        Texture2D snow{};    // в 3D нужна только альфа: сколько клетки заносит
         int left = 0;
         int top = 0;
         int width = 0;
@@ -45,6 +45,7 @@ public:
 private:
     struct Chunk {
         Texture2D texture{};
+        Texture2D plain{}; // без отмывки рельефа — для 3D
         Texture2D snow{}; // белая маска: прозрачна на воде, полупрозрачна на лесе и дорогах
         Rectangle bounds{}; // метры
     };

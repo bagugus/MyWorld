@@ -163,7 +163,7 @@ int main(int argc, char** argv) {
                 renderer.draw(world, camera.camera(), alpha);
                 EndMode2D();
             }
-            weatherRenderer.draw(environment, world.weather());
+            weatherRenderer.draw(environment, world.weather(), camera.orbit());
             // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
             camera.beginOverlay();
             pathTool.drawOverlay(camera.camera());

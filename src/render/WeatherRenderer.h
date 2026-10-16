@@ -13,8 +13,10 @@ public:
     // Анимация идёт по реальному времени и стоит на паузе вместе с миром.
     void update(float realDt, bool running);
 
-    // Вызывать после EndMode2D, до интерфейса.
-    void draw(const Environment& environment, const Weather& weather) const;
+    // Вызывать после EndMode2D, до интерфейса. lit — сцена уже освещена по
+    // времени суток (3D-вид): ночь, туман и закат там в шейдерах, поверх —
+    // только осадки и молнии.
+    void draw(const Environment& environment, const Weather& weather, bool lit = false) const;
 
 private:
     void drawPrecipitation(const Weather& weather, bool snow) const;
