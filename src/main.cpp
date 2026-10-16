@@ -1,6 +1,6 @@
 // Living World — приложение с окном.
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
-//                [--nav-graph] [--select ID] [--screenshot FILE.png]
+//                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--screenshot FILE.png]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -10,11 +10,15 @@
 // --path        проверить поиск пути из точки (X1, Y1) в (X2, Y2), метры
 // --nav-graph   показать граф навигации (дороги и местность)
 // --select      открыть объект в инспекторе и следить за ним камерой
+// --3d          начать с 3D-вида (V переключает вид); --view задаёт точку и зум и в 3D
+// --orbit       3D-вид под углом: YAW — с какой стороны (0 — с юга, 90 — с востока),
+//               PITCH — наклон над горизонтом, градусы
 // --screenshot  нарисовать несколько кадров, сохранить снимок окна и выйти
 
 #include "render/CameraController.h"
 #include "render/WeatherRenderer.h"
 #include "render/WorldRenderer.h"
+#include "render/WorldRenderer3D.h"
 #include "sim/Climate.h"
 #include "sim/SimDriver.h"
 #include "sim/Events.h"
@@ -33,6 +37,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <utility>
 
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
@@ -46,6 +51,8 @@ int main(int argc, char** argv) {
     float path[4] = {};
     bool navGraph = false;
     std::uint64_t selectId = 0;
+    bool view3d = false;
+    std::optional<std::pair<float, float>> orbit;
     std::optional<lw::EventKind> event;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -68,6 +75,12 @@ int main(int argc, char** argv) {
             selectId = std::strtoull(argv[++i], nullptr, 10);
         } else if (std::strcmp(argv[i], "--event") == 0 && i + 1 < argc) {
             event = lw::eventKindByName(argv[++i]);
+        } else if (std::strcmp(argv[i], "--3d") == 0) {
+            view3d = true;
+        } else if (std::strcmp(argv[i], "--orbit") == 0 && i + 2 < argc) {
+            const float yaw = std::strtof(argv[++i], nullptr);
+            orbit = {{yaw, std::strtof(argv[++i], nullptr)}};
+            view3d = true;
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
             navGraph = true;
         }
@@ -95,8 +108,15 @@ int main(int argc, char** argv) {
     {
         // Текстуры карты должны быть освобождены до CloseWindow.
         lw::WorldRenderer renderer(world);
+        lw::WorldRenderer3D renderer3d(renderer.map());
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
+        if (orbit) {
+            camera.setOrbitAngles(orbit->first, orbit->second);
+        }
+        if (view3d) {
+            camera.setMode(lw::ViewMode::Orbit);
+        }
         if (hasView) {
             camera.lookAt(viewX, viewY, viewZoom);
         }
@@ -127,23 +147,27 @@ int main(int argc, char** argv) {
             const lw::Environment environment = lw::environmentAt(world);
 
             BeginDrawing();
-            ClearBackground({16, 18, 22, 255});
-
-            BeginMode2D(camera.camera());
-            renderer.draw(world, camera.camera(), alpha);
-            EndMode2D();
+            if (camera.orbit()) {
+                ClearBackground({132, 166, 200, 255}); // небо; ночью его затемнит погода
+                renderer3d.draw(world, camera, alpha);
+            } else {
+                ClearBackground({16, 18, 22, 255});
+                BeginMode2D(camera.camera());
+                renderer.draw(world, camera.camera(), alpha);
+                EndMode2D();
+            }
             weatherRenderer.draw(environment, world.weather());
             // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
-            BeginMode2D(camera.camera());
+            camera.beginOverlay();
             pathTool.drawOverlay(camera.camera());
             inspector.drawOverlay(camera.camera(), alpha);
-            EndMode2D();
+            camera.endOverlay();
 
             lw::ui::beginFrame();
             lw::ui::setNameSource(&world);
             lw::ui::drawSettlementLabels(world, camera);
             lw::ui::drawTimePanel(world, environment, driver);
-            lw::ui::drawStatsPanel(world, environment, driver, camera, renderer);
+            lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
             pathTool.drawPanel();
             inspector.drawPanel();
             lw::ui::drawEventsPanel(world, driver, inspector, camera);

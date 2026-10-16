@@ -24,6 +24,9 @@ public:
     void draw(const Rectangle& visible, float zoom);
     // Снег на суше поверх карты; amount — 0..1. Вызывать после draw.
     void drawSnow(const Rectangle& visible, float amount);
+    // Карта в 3D — плоскостью на высоте 0, со снегом поверх (этап 11.1).
+    // Вызывать между BeginMode3D и EndMode3D.
+    void drawGround(float snowAmount);
 
     int chunkCount() const { return static_cast<int>(chunks_.size()); }
     int chunksDrawn() const { return chunksDrawn_; }
@@ -34,6 +37,9 @@ private:
         Texture2D snow{}; // белая маска: прозрачна на воде, полупрозрачна на лесе и дорогах
         Rectangle bounds{}; // метры
     };
+
+    // Фильтр текстур: значение TextureFilter или kGroundFilter.
+    void setFilter(int filter);
 
     std::vector<Chunk> chunks_;
     int filter_ = -1;

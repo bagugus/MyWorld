@@ -2,6 +2,8 @@
 
 #include "sim/Map.h"
 
+#include <rlgl.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -23,6 +25,10 @@ constexpr Color kShallowSea = {72, 144, 178, 255};
 constexpr Color kDeepSea = {24, 62, 112, 255};
 constexpr Color kLake = {58, 122, 170, 255};
 constexpr Color kRiver = {78, 146, 192, 255};
+
+// Фильтр для 3D: вблизи клетки чёткие, вдаль — мип-уровни и анизотропия,
+// иначе земля под углом рябит и мылится.
+constexpr int kGroundFilter = 100;
 
 constexpr float kDeepSeaMeters = 45.0f;   // глубже цвет моря не меняется
 constexpr float kReliefExaggeration = 3.0f; // во сколько раз подчёркнуты склоны в отмывке
@@ -173,16 +179,27 @@ MapRenderer::~MapRenderer() {
     }
 }
 
+void MapRenderer::setFilter(int filter) {
+    if (filter == filter_) {
+        return;
+    }
+    for (const Chunk& chunk : chunks_) {
+        for (const Texture2D& texture : {chunk.texture, chunk.snow}) {
+            if (filter != kGroundFilter) {
+                SetTextureFilter(texture, filter);
+                continue;
+            }
+            rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            rlTextureParameters(texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+            rlTextureParameters(texture.id, RL_TEXTURE_FILTER_ANISOTROPIC, 16);
+        }
+    }
+    filter_ = filter;
+}
+
 void MapRenderer::draw(const Rectangle& visible, float zoom) {
     // Вблизи клетки рисуются чёткими квадратами, издали — сглаживаются.
-    const int filter = zoom * Map::kCellSize >= 1.0f ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR;
-    if (filter != filter_) {
-        for (const Chunk& chunk : chunks_) {
-            SetTextureFilter(chunk.texture, filter);
-            SetTextureFilter(chunk.snow, filter);
-        }
-        filter_ = filter;
-    }
+    setFilter(zoom * Map::kCellSize >= 1.0f ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR);
 
     chunksDrawn_ = 0;
     for (const Chunk& chunk : chunks_) {
@@ -209,6 +226,36 @@ void MapRenderer::drawSnow(const Rectangle& visible, float amount) {
                                   static_cast<float>(chunk.snow.height)};
         DrawTexturePro(chunk.snow, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, tint);
     }
+}
+
+void MapRenderer::drawGround(float snowAmount) {
+    setFilter(kGroundFilter);
+    const unsigned char snow = static_cast<unsigned char>(std::clamp(snowAmount, 0.0f, 1.0f) * 255.0f);
+    for (const Chunk& chunk : chunks_) {
+        // Чанк — квадрат на земле: x карты — ось X, y карты (на юг) — ось Z.
+        // Обход против часовой при взгляде сверху: лицевая сторона смотрит вверх.
+        const float x0 = chunk.bounds.x;
+        const float z0 = chunk.bounds.y;
+        const float x1 = x0 + chunk.bounds.width;
+        const float z1 = z0 + chunk.bounds.height;
+        // Снег — та же плоскость второй раз: глубина совпадает, и он ложится сверху.
+        for (int layer = 0; layer < (snow > 0 ? 2 : 1); ++layer) {
+            rlSetTexture(layer == 0 ? chunk.texture.id : chunk.snow.id);
+            rlBegin(RL_QUADS);
+            rlColor4ub(255, 255, 255, layer == 0 ? 255 : snow);
+            rlNormal3f(0.0f, 1.0f, 0.0f);
+            rlTexCoord2f(0.0f, 0.0f);
+            rlVertex3f(x0, 0.0f, z0);
+            rlTexCoord2f(0.0f, 1.0f);
+            rlVertex3f(x0, 0.0f, z1);
+            rlTexCoord2f(1.0f, 1.0f);
+            rlVertex3f(x1, 0.0f, z1);
+            rlTexCoord2f(1.0f, 0.0f);
+            rlVertex3f(x1, 0.0f, z0);
+            rlEnd();
+        }
+    }
+    rlSetTexture(0);
 }
 
 } // namespace lw

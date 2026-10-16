@@ -2,6 +2,7 @@
 
 #include "render/CameraController.h"
 #include "render/WorldRenderer.h"
+#include "render/WorldRenderer3D.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
@@ -18,6 +19,7 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdio>
+#include <optional>
 #include <utility>
 #include <vector>
 
@@ -318,15 +320,17 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
     const ImVec2 screen = ImGui::GetIO().DisplaySize;
 
     for (const auto [entity, settlement] : world.registry().view<const Settlement>().each()) {
-        const Vector2 center = GetWorldToScreen2D(
-            {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)},
-            camera.camera());
+        const Vector2 at = {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)};
+        const std::optional<Vector2> center = camera.worldToScreen(at);
+        if (!center) {
+            continue;
+        }
         const float size = settlement.kind == SettlementKind::Town ? kTownSize : kVillageSize;
         const ImVec2 extent = font->CalcTextSizeA(size, FLT_MAX, 0.0f, settlement.name.c_str());
         // Подпись — над поселением.
-        const float radiusPx = static_cast<float>(settlement.radius) * Map::kCellSize * camera.zoom();
-        const ImVec2 position = {center.x - extent.x * 0.5f,
-                                 center.y - std::min(radiusPx, kMaxLift) - extent.y};
+        const float radiusPx = static_cast<float>(settlement.radius) * Map::kCellSize * camera.zoomAt(at);
+        const ImVec2 position = {center->x - extent.x * 0.5f,
+                                 center->y - std::min(radiusPx, kMaxLift) - extent.y};
         if (position.x + extent.x < 0.0f || position.y + extent.y < 0.0f ||
             position.x > screen.x || position.y > screen.y) {
             continue;
@@ -338,7 +342,8 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
 }
 
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
-                    const CameraController& camera, const WorldRenderer& renderer) {
+                    CameraController& camera, const WorldRenderer& renderer,
+                    const WorldRenderer3D& renderer3d) {
     // Справа: слева под временем места нет.
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos({display.x - 12.0f, 12.0f}, ImGuiCond_FirstUseEver, {1.0f, 0.0f});
@@ -441,12 +446,30 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::Text("Работают: %zu (с профессией: %zu); за покупками: %zu; магазинов открыто: %zu из %zu",
                     working, employed, shopping, open, shops);
-        ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
-                    renderer.map().chunkCount());
 
         ImGui::Separator();
-        const Vector2 mouse = GetScreenToWorld2D(GetMousePosition(), camera.camera());
+        int view = camera.orbit() ? 1 : 0;
+        ImGui::TextUnformatted("Вид (V):");
+        ImGui::SameLine();
+        ImGui::RadioButton("сверху", &view, 0);
+        ImGui::SameLine();
+        ImGui::RadioButton("3D", &view, 1);
+        camera.setMode(view == 1 ? ViewMode::Orbit : ViewMode::TopDown);
+        if (camera.orbit()) {
+            ImGui::Text("Зданий в кадре: %d", renderer3d.buildingsDrawn());
+            ImGui::TextDisabled("ПКМ — вращение, СКМ — панорама, Q/E, R/F");
+        } else {
+            ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
+                        renderer.map().chunkCount());
+        }
         ImGui::Text("Зум: %.2f пикс/м", camera.zoom());
+        const std::optional<Vector2> cursor = camera.screenToWorld(GetMousePosition());
+        if (!cursor) {
+            ImGui::TextUnformatted("Курсор: над горизонтом");
+            ImGui::End();
+            return;
+        }
+        const Vector2 mouse = *cursor;
         ImGui::Text("Курсор: %.0f, %.0f м", mouse.x, mouse.y);
         // Проверка пространственного индекса: соседи курсора.
         constexpr float kNeighbourRadius = 50.0f;
@@ -462,7 +485,7 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         // Человек или зомби под курсором: не дальше нескольких пикселей.
         constexpr float kPickPixels = 8.0f;
-        const float pickRadius = std::max(1.0f, kPickPixels / camera.zoom());
+        const float pickRadius = std::max(1.0f, kPickPixels / camera.zoomAt(mouse));
         if (const auto picked = world.spatial().nearest(
                 mouse.x, mouse.y, pickRadius, [&world](const SpatialHit& hit) {
                     return world.registry().any_of<Person, Zombie, Animal, Flock, Corpse>(hit.entity);
@@ -533,7 +556,7 @@ void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector
     }
     ImGui::SameLine();
     if (ImGui::Button("у центра экрана")) {
-        const Vector2 center = camera.camera().target;
+        const Vector2 center = camera.focus();
         driver.requestEvent(EventKind::SupplyDrop, world.map().clampedCellAt(center.x, center.y));
     }
 

@@ -152,8 +152,9 @@ void Inspector::handleInput(const CameraController& camera, bool mouseFree) {
     if (!mouseFree || ctrl || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         return;
     }
-    const Vector2 point = GetScreenToWorld2D(GetMousePosition(), camera.camera());
-    select(pick(point.x, point.y, camera.zoom()));
+    if (const auto point = camera.screenToWorld(GetMousePosition())) {
+        select(pick(point->x, point->y, camera.zoomAt(*point)));
+    }
 }
 
 void Inspector::updateCamera(CameraController& camera, float alpha) {
@@ -168,25 +169,25 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
     }
     if (registry.all_of<Position>(entity)) {
         const Vector2 at = drawnPosition(registry, entity, alpha);
-        camera.lookAt(at.x, at.y, camera.zoom());
+        camera.moveTo(at.x, at.y);
     } else if (const auto* building = registry.try_get<Building>(entity)) {
         const Rectangle rect = buildingRect(*building);
-        camera.lookAt(rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f, camera.zoom());
+        camera.moveTo(rect.x + rect.width * 0.5f, rect.y + rect.height * 0.5f);
     } else if (const auto* horde = registry.try_get<Horde>(entity)) {
         // За вожаком: центр орды пересчитывается раз в минуту и прыгает.
         if (const entt::entity leader = world_.find(horde->leader); leader != entt::null) {
             const Vector2 at = drawnPosition(registry, leader, alpha);
-            camera.lookAt(at.x, at.y, camera.zoom());
+            camera.moveTo(at.x, at.y);
         }
     } else if (const auto* group = registry.try_get<Group>(entity)) {
         if (const entt::entity leader = world_.find(group->leader);
             leader != entt::null && registry.all_of<Position>(leader)) {
             const Vector2 at = drawnPosition(registry, leader, alpha);
-            camera.lookAt(at.x, at.y, camera.zoom());
+            camera.moveTo(at.x, at.y);
         }
     } else if (const auto* event = registry.try_get<WorldEvent>(entity)) {
         const Vector2 at = cellCenter(event->site);
-        camera.lookAt(at.x, at.y, camera.zoom());
+        camera.moveTo(at.x, at.y);
     }
 }
 

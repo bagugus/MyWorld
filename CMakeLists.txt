@@ -138,10 +138,14 @@ if(LW_BUILD_APP)
         src/render/CameraController.h
         src/render/MapRenderer.cpp
         src/render/MapRenderer.h
+        src/render/Palette.cpp
+        src/render/Palette.h
         src/render/WeatherRenderer.cpp
         src/render/WeatherRenderer.h
         src/render/WorldRenderer.cpp
         src/render/WorldRenderer.h
+        src/render/WorldRenderer3D.cpp
+        src/render/WorldRenderer3D.h
         src/ui/ChronicleView.cpp
         src/ui/ChronicleView.h
         src/ui/Format.cpp

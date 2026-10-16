@@ -21,6 +21,7 @@ public:
     void draw(const World& world, const Camera2D& camera, float alpha);
 
     const MapRenderer& map() const { return map_; }
+    MapRenderer& map() { return map_; }
 
 private:
     MapRenderer map_;
