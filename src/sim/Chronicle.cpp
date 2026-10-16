@@ -60,7 +60,10 @@ const char* chronicleKindName(ChronicleKind kind) {
                                       "treated", "befriended", "disliked", "saved by",
                                       "defended by", "abandoned by", "caught thief",
                                       "mourned", "saw turned", "witnessed", "heard of",
-                                      "reconciled"};
+                                      "reconciled", "group formed", "joined group",
+                                      "left group", "expelled", "led group",
+                                      "group disbanded", "shared", "traded", "stole",
+                                      "deserted", "betrayed by", "assaulted by", "avenged"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(ChronicleKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "?";

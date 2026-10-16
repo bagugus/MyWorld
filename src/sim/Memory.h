@@ -49,6 +49,9 @@ inline constexpr float kRetellStrength = 0.3f;
 // Свидетель поступка — тот, кто видит сделавшего не дальше этого, метры
 // (дальность зрения человека днём).
 inline constexpr float kWitnessSight = 150.0f;
+// Кража у того, кто вору доверял (не меньше этого) или был с ним в одной
+// группе, — предательство (этап 6.5).
+inline constexpr float kBetrayTrust = 0.2f;
 
 // Поступок ли это (кто-то что-то сделал с кем-то), а не весть о близком
 // (погиб, встал зомби): у поступка есть с кем — victim.
@@ -95,14 +98,27 @@ float concernFor(const World& world, entt::entity self, EntityId victim);
 // до die() — пока у зомби есть цель.
 void witnessRescue(World& world, EntityId rescuer, entt::entity zombie);
 
-// Зомби zombie ранил человека victim: кто из близких рядом убегал — бросил, кто
-// дрался с напавшими на него зомби — заступился.
-void witnessAttack(World& world, entt::entity victim, EntityId zombie);
+// Зомби (с этапа 6.5 — или человек) attacker ранил человека victim: кто из
+// близких и товарищей рядом убегал — бросил, кто дрался с напавшими на
+// него — заступился.
+void witnessAttack(World& world, entt::entity victim, EntityId attacker);
 
 // Человек thief обыскал чужое жилое здание building и взял items вещей:
-// хозяева, которые это видели или были дома (не спали), запоминают вора, а кто
-// видел его со стороны — что он обокрал хозяина.
+// хозяева, которые это видели или были дома (не спали), запоминают вора (кто
+// ему доверял или был с ним в группе — как предателя, этап 6.5), а кто видел
+// его со стороны — что он обокрал хозяина.
 void witnessTheft(World& world, entt::entity thief, EntityId building, int items);
+
+// Человек attacker ударил человека victim (этап 6.5). Если victim сам напал
+// на attacker, это самооборона — ничего; если victim нападал на другого
+// человека — attacker заступился за того; иначе — нападение: victim и
+// свидетели запоминают нападавшего. Звать до die().
+void witnessAssault(World& world, entt::entity attacker, entt::entity victim);
+
+// Человек killer убил человека dead (этап 6.5): если dead нападал на другого
+// человека — killer его спас; если на самого killer — самооборона; иначе
+// свидетели запоминают убийство. Звать до die().
+void witnessKilling(World& world, entt::entity killer, entt::entity dead);
 
 // Сторонние свидетели (этап 6.3): кто сейчас видит doer (свежий контакт
 // «видит»), кроме самого doer и victim, запоминает, что doer сделал с victim.

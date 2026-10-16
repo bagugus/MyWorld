@@ -22,11 +22,56 @@ void SimDriver::setSpeed(int multiplier) {
     speed_ = std::max(1, multiplier);
 }
 
+void SimDriver::requestSkip(std::uint64_t ticks) {
+    if (ticks == 0) {
+        return;
+    }
+    if (skipRemaining_ == 0) {
+        skipTotal_ = 0;
+    }
+    skipRemaining_ += ticks;
+    skipTotal_ += ticks;
+}
+
+void SimDriver::cancelSkip() {
+    skipRemaining_ = 0;
+    skipTotal_ = 0;
+}
+
+float SimDriver::skipProgress() const {
+    if (skipTotal_ == 0) {
+        return 1.0f;
+    }
+    return static_cast<float>(skipTotal_ - skipRemaining_) / static_cast<float>(skipTotal_);
+}
+
 void SimDriver::advance(double realDt) {
     using Clock = std::chrono::steady_clock;
 
     ticksLastFrame_ = 0;
     behind_ = false;
+
+    if (skipRemaining_ > 0) {
+        accumulator_ = 0.0;
+        stepRequested_ = false;
+        const Clock::time_point start = Clock::now();
+        while (skipRemaining_ > 0) {
+            world_.step();
+            --skipRemaining_;
+            ++ticksLastFrame_;
+            if ((ticksLastFrame_ & 7) == 0) {
+                const std::chrono::duration<double, std::milli> elapsed = Clock::now() - start;
+                if (elapsed.count() > skipBudgetMs_) {
+                    break;
+                }
+            }
+        }
+        if (skipRemaining_ == 0) {
+            skipTotal_ = 0;
+        }
+        updateStats(realDt);
+        return;
+    }
 
     if (paused_) {
         accumulator_ = 0.0;
@@ -64,7 +109,7 @@ void SimDriver::advance(double realDt) {
 }
 
 float SimDriver::interpolationAlpha() const {
-    if (paused_) {
+    if (paused_ || skipRemaining_ > 0) {
         return 1.0f;
     }
     const double alpha = accumulator_ * World::kTicksPerSecond;

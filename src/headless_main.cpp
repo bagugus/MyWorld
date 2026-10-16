@@ -7,6 +7,7 @@
 //   lw_headless --seed 42 --zombies 0                    мир без зомби
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 //   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
+//   lw_headless --seed 42 --ticks 1440000 --social        и список социальных событий (этап 6)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -117,7 +118,8 @@ void printPeople(const lw::World& world) {
                 asleep);
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
                                         "forage", "socialize", "wander", "go home", "flee",
-                                        "fight",  "hunt",      "treat"};
+                                        "fight",  "hunt",      "treat",  "share",   "trade",
+                                        "steal",  "avenge"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -266,8 +268,9 @@ void printMemories(const lw::World& world) {
     if (people == 0) {
         return;
     }
-    constexpr const char* kNames[] = {"saved", "defended", "abandoned", "robbed", "bereaved",
-                                      "turned"};
+    constexpr const char* kNames[] = {"saved",    "defended", "abandoned", "robbed",
+                                      "bereaved", "turned",   "expelled",  "helped",
+                                      "betrayed", "assaulted", "killed"};
     static_assert(std::size(kNames) == kKinds);
     std::printf("memories: %zu (%zu of %zu people remember something):", memories, remembering,
                 people);
@@ -308,6 +311,38 @@ void printMemories(const lw::World& world) {
                     worstReputation.known, static_cast<unsigned long long>(best),
                     bestReputation.affinity, bestReputation.known);
     }
+}
+
+// Группы (этап 6.4): сколько, каких размеров, сколько людей в группах,
+// самая большая (её удобно открыть в окне: living_world --select ID).
+void printGroups(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::vector<std::size_t> sizes;
+    std::size_t members = 0;
+    std::size_t moved = 0;
+    lw::EntityId largest = lw::kInvalidId;
+    std::size_t most = 0;
+    for (const auto [entity, id, group] : registry.view<const lw::Id, const lw::Group>().each()) {
+        sizes.push_back(group.members.size());
+        members += group.members.size();
+        if (group.members.size() > most || (group.members.size() == most && id.value < largest)) {
+            most = group.members.size();
+            largest = id.value;
+        }
+    }
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        moved += person.formerHome != lw::kInvalidId ? 1 : 0;
+    }
+    if (sizes.empty()) {
+        std::printf("groups 0\n");
+        return;
+    }
+    std::sort(sizes.begin(), sizes.end());
+    std::printf("groups %zu (%zu people, %zu moved to a base), sizes:", sizes.size(), members, moved);
+    for (const std::size_t size : sizes) {
+        std::printf(" %zu", size);
+    }
+    std::printf("; largest #%llu\n", static_cast<unsigned long long>(largest));
 }
 
 // Восприятие: сколько контактов у существ и как они замечены.
@@ -457,6 +492,67 @@ void printCombat(const lw::World& world) {
     std::printf("  people died:");
     for (std::size_t i = 0; i < std::size(kCauses); ++i) {
         std::printf(" %s %zu%s", kCauses[i], causes[i], i + 1 < std::size(kCauses) ? "," : "\n");
+    }
+}
+
+// Социальные события этапа 6 по порядку — из них читаются истории: спасения,
+// предательства, месть, группы, убийства людьми.
+void printSocialLog(const lw::World& world) {
+    using K = lw::ChronicleKind;
+    const entt::registry& registry = world.registry();
+    const auto isPerson = [&](lw::EntityId id) {
+        // Убийца — человек: живой человек или тело человека (обратившийся
+        // помнит черты, но он зомби).
+        const entt::entity entity = world.find(id);
+        if (entity == entt::null || registry.all_of<lw::Zombie>(entity)) {
+            return false;
+        }
+        const auto* corpse = registry.try_get<lw::Corpse>(entity);
+        return corpse != nullptr ? corpse->kind == lw::CorpseKind::Human
+                                 : registry.all_of<lw::Person>(entity);
+    };
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        switch (event.kind) {
+        case K::SavedBy:
+        case K::DefendedBy:
+        case K::AbandonedBy:
+        case K::HeardOf:
+        case K::Reconciled:
+        case K::GroupFormed:
+        case K::LeftGroup:
+        case K::Expelled:
+        case K::LedGroup:
+        case K::GroupDisbanded:
+        case K::Shared:
+        case K::Traded:
+        case K::Stole:
+        case K::Deserted:
+        case K::BetrayedBy:
+        case K::AssaultedBy:
+        case K::Avenged:
+            break;
+        case K::Witnessed:
+            if (event.a != static_cast<std::int32_t>(lw::MemoryKind::Killed)) {
+                continue;
+            }
+            break;
+        case K::Died:
+            if (event.object == lw::kInvalidId || !isPerson(event.object)) {
+                continue;
+            }
+            break;
+        default:
+            continue;
+        }
+        const lw::CalendarTime time = lw::calendarAt(event.tick);
+        std::printf("  day %2d %02d:%02d %-15s #%llu -> #%llu a=%d b=%d", time.day, time.hour,
+                    time.minute, lw::chronicleKindName(event.kind),
+                    static_cast<unsigned long long>(event.subject),
+                    static_cast<unsigned long long>(event.object), event.a, event.b);
+        if (event.third != lw::kInvalidId) {
+            std::printf(" third=#%llu", static_cast<unsigned long long>(event.third));
+        }
+        std::printf("\n");
     }
 }
 
@@ -755,6 +851,8 @@ int main(int argc, char** argv) {
     int paths = 0;
     bool compare = false;
     bool daily = false;
+    bool social = false;
+    bool profile = false;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -771,6 +869,10 @@ int main(int argc, char** argv) {
             compare = true;
         } else if (std::strcmp(argv[i], "--daily") == 0) {
             daily = true;
+        } else if (std::strcmp(argv[i], "--social") == 0) {
+            social = true;
+        } else if (std::strcmp(argv[i], "--profile") == 0) {
+            profile = true;
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
@@ -781,7 +883,8 @@ int main(int argc, char** argv) {
             config.flocks = std::atoi(argv[++i]);
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
-                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily]\n");
+                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
+                        "[--social] [--profile]\n");
             return 2;
         }
     }
@@ -799,6 +902,7 @@ int main(int argc, char** argv) {
         benchmarkPaths(world, paths, compare);
     }
 
+    world.setProfiling(profile);
     const auto start = std::chrono::steady_clock::now();
     if (daily) {
         printDailyHeader();
@@ -822,14 +926,27 @@ int main(int argc, char** argv) {
     printPeople(world);
     printRelations(world);
     printMemories(world);
+    printGroups(world);
     printPerception(world);
     printZombies(world);
     printAnimals(world);
     printCombat(world);
     printChronicle(world);
+    if (social) {
+        std::printf("social events:\n");
+        printSocialLog(world);
+    }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());
+    }
+    if (profile && elapsed.count() > 0.0) {
+        std::printf("profile (share of tick time):\n");
+        for (int phase = 0; phase < lw::World::kStepPhases; ++phase) {
+            const double seconds = world.stepPhaseSeconds(phase);
+            std::printf("  %-13s %7.3f s  %5.1f %%\n", lw::World::stepPhaseName(phase), seconds,
+                        100.0 * seconds / elapsed.count());
+        }
     }
     return 0;
 }

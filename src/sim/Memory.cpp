@@ -28,6 +28,14 @@ constexpr float kAbandonedCloseGrudge = 0.4f;
 constexpr float kRobbedGrudge = 0.15f;        // + kRobbedItemGrudge за вещь
 constexpr float kRobbedItemGrudge = 0.05f;
 constexpr float kRobbedMaxGrudge = 0.5f;
+constexpr float kExpelledGrudge = 0.35f;      // изгнали из группы (этап 6.4)
+// Этап 6.5: поделился — долг; предал — обида больше кражи (+ за вещь, не
+// больше kBetrayedMaxGrudge); напал; убил (только у свидетелей).
+constexpr float kHelpedDebt = 0.3f;
+constexpr float kBetrayedGrudge = 0.4f;
+constexpr float kBetrayedMaxGrudge = 0.8f;
+constexpr float kAssaultedGrudge = 0.3f;
+constexpr float kKilledGrudge = 0.8f;
 // Кого запомнил по поступку, того знает хотя бы так; кого только по слухам —
 // так (по имени).
 constexpr float kMetInEvent = 0.2f;
@@ -42,6 +50,8 @@ constexpr float kGriefFear = 0.3f;
 // с силой от kWitnessMemory (пострадал чужой) до полной (пострадал близкий).
 constexpr float kBystanderConcern = 0.1f;
 constexpr float kWitnessMemory = 0.5f;
+// Товарищ по группе (этап 6.4) небезразличен ещё на столько.
+constexpr float kGroupConcern = 0.3f;
 // Ради меньших долга и обиды незнакомца не запоминают в лицо.
 constexpr float kMinBondEffect = 0.05f;
 // Сколько вещей взял вор, по слухам неизвестно: считается столько.
@@ -49,6 +59,9 @@ constexpr int kRumoredItems = 3;
 
 // Свидетель нападения — не дальше этого от жертвы, метры.
 constexpr float kWitnessRange = 30.0f;
+// Ударить того, кто бил тебя не раньше стольких тиков назад, — самооборона
+// (этап 6.5): 10 секунд симуляции.
+constexpr std::uint64_t kSelfDefenseTicks = 10 * kTicksPerSecond;
 // Спас — если зомби был не дальше этого от жертвы, метры.
 constexpr float kRescueRange = 30.0f;
 
@@ -60,7 +73,8 @@ float clamp01(float value) {
     return std::clamp(value, 0.0f, 1.0f);
 }
 
-// Последствия пережитого: сила воспоминания, долг, обида, горе, запись в летописи.
+// Последствия пережитого: сила воспоминания, долг, обида, горе, запись в
+// летописи (ChronicleKind::Count — без записи: событие уже записал сделавший).
 struct Impression {
     float strength = 0.0f;
     float debt = 0.0f;
@@ -101,6 +115,26 @@ Impression impressionOf(MemoryKind kind, const Traits& traits, float close, bool
     case MemoryKind::Turned:
         impression = {0.5f + 0.5f * close, 0.0f, 0.0f, mourned ? 0.5f * close : close,
                       ChronicleKind::SawTurned};
+        break;
+    case MemoryKind::Expelled:
+        impression = {0.7f, 0.0f, kExpelledGrudge * vindictiveness, 0.0f, ChronicleKind::Count};
+        break;
+    case MemoryKind::Helped:
+        impression = {0.6f, kHelpedDebt * gratitude, 0.0f, 0.0f, ChronicleKind::Count};
+        break;
+    case MemoryKind::Betrayed:
+        impression = {0.9f, 0.0f,
+                      std::min(kBetrayedMaxGrudge,
+                               kBetrayedGrudge + kRobbedItemGrudge * static_cast<float>(items)) *
+                          vindictiveness,
+                      0.0f, ChronicleKind::BetrayedBy};
+        break;
+    case MemoryKind::Assaulted:
+        impression = {0.8f, 0.0f, kAssaultedGrudge * vindictiveness, 0.0f,
+                      ChronicleKind::AssaultedBy};
+        break;
+    case MemoryKind::Killed:
+        impression = {1.0f, 0.0f, kKilledGrudge * vindictiveness, 0.0f, ChronicleKind::Count};
         break;
     case MemoryKind::Count:
         break;
@@ -183,6 +217,12 @@ float concernFor(const World& world, entt::entity self, EntityId victim) {
         return 1.0f;
     }
     float concern = kBystanderConcern * (0.5f + traitsOf(registry, self).altruism);
+    if (const auto* person = registry.try_get<Person>(self); person != nullptr &&
+        person->group != kInvalidId) {
+        const entt::entity other = world.find(victim);
+        const auto* theirs = other != entt::null ? registry.try_get<Person>(other) : nullptr;
+        concern += theirs != nullptr && theirs->group == person->group ? kGroupConcern : 0.0f;
+    }
     if (const auto* relations = registry.try_get<Relations>(self)) {
         if (const Bond* bond = relations->find(victim)) {
             if (bond->hostile()) {
@@ -231,7 +271,9 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
     }
 
     if (!heard && own) {
-        world.record(impression.chronicle, id, who, a);
+        if (impression.chronicle != ChronicleKind::Count) {
+            world.record(impression.chronicle, id, who, a);
+        }
     } else if (!heard) {
         // Видел, как обидели (или выручили) близкого.
         if (concern >= kCloseEnough) {
@@ -268,6 +310,19 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
             const float grief = impression.grief * belief;
             needs->loneliness = clamp01(needs->loneliness + kGriefLoneliness * grief);
             needs->fear = clamp01(needs->fear + kGriefFear * grief);
+        }
+    }
+    // Убили близкого (видел или слышал) — это и весть о его гибели (этап 6.5).
+    if (kind == MemoryKind::Killed && !own && relations != nullptr &&
+        memories->find(MemoryKind::Bereaved, account.victim) == nullptr) {
+        const Bond* lost = relations->find(account.victim);
+        if (lost != nullptr && closeness(*lost) >= kCloseEnough) {
+            Account news;
+            news.source = account.source;
+            news.credibility = account.credibility;
+            news.tick = account.tick;
+            experience(world, self, MemoryKind::Bereaved, account.victim, who, heard ? 0 : 1,
+                       news);
         }
     }
     return true;
@@ -348,7 +403,7 @@ void witnessRescue(World& world, EntityId rescuer, entt::entity zombie) {
     }
 }
 
-void witnessAttack(World& world, entt::entity victim, EntityId zombie) {
+void witnessAttack(World& world, entt::entity victim, EntityId attacker) {
     entt::registry& registry = world.registry();
     const auto* awareness = registry.try_get<Awareness>(victim);
     const auto* relations = registry.try_get<Relations>(victim);
@@ -358,6 +413,8 @@ void witnessAttack(World& world, entt::entity victim, EntityId zombie) {
     const EntityId victimId = registry.get<Id>(victim).value;
     const Position& position = registry.get<Position>(victim);
     const std::uint64_t tick = world.tick();
+    const auto* self = registry.try_get<Person>(victim);
+    const EntityId group = self != nullptr ? self->group : kInvalidId;
     // Сначала — кого и за что; потом переживать: experience меняет память жертвы.
     std::vector<std::pair<MemoryKind, EntityId>> seen;
     for (std::size_t i = 0; i < awareness->count; ++i) {
@@ -372,25 +429,81 @@ void witnessAttack(World& world, entt::entity victim, EntityId zombie) {
             continue;
         }
         if (mind->action == Action::Flee) {
+            // Бросил близкий или товарищ по группе (этап 6.4).
             const Bond* bond = relations != nullptr ? relations->find(contact.id) : nullptr;
-            if (bond != nullptr && closeness(*bond) >= kCloseEnough) {
+            const Person& theirs = registry.get<Person>(other);
+            const bool mate = group != kInvalidId && theirs.group == group;
+            if (mate || (bond != nullptr && closeness(*bond) >= kCloseEnough)) {
                 seen.emplace_back(MemoryKind::Abandoned, contact.id);
             }
         } else if (mind->action == Action::Fight) {
-            // Дерётся с одним из тех, кто нападает на жертву.
+            // Дерётся с одним из тех, кто нападает на жертву: зомби или человеком.
             const entt::entity foe = world.find(registry.get<Combat>(other).target);
             const auto* foeZombie = foe != entt::null ? registry.try_get<Zombie>(foe) : nullptr;
             const auto* foeCombat = foe != entt::null ? registry.try_get<Combat>(foe) : nullptr;
-            if (foeZombie != nullptr &&
-                (foeZombie->target == victimId ||
-                 (foeCombat != nullptr && foeCombat->target == victimId))) {
+            if ((foeZombie != nullptr && foeZombie->target == victimId) ||
+                (foeCombat != nullptr && foeCombat->target == victimId)) {
                 seen.emplace_back(MemoryKind::Defended, contact.id);
             }
         }
     }
     for (const auto& [kind, who] : seen) {
-        experience(world, victim, kind, who, zombie);
+        experience(world, victim, kind, who, attacker);
     }
+}
+
+namespace {
+
+// Бьёт в ответ: victim сейчас нападает на self или недавно его ранил.
+bool retaliates(const World& world, entt::entity self, EntityId selfId, EntityId victim,
+                EntityId victimTarget) {
+    if (victimTarget == selfId) {
+        return true;
+    }
+    const auto* wounds = world.registry().try_get<Wounds>(self);
+    return wounds != nullptr && wounds->hurtBy == victim &&
+           wounds->hurtAt + kSelfDefenseTicks >= world.tick();
+}
+
+} // namespace
+
+void witnessAssault(World& world, entt::entity attacker, entt::entity victim) {
+    entt::registry& registry = world.registry();
+    const EntityId attackerId = registry.get<Id>(attacker).value;
+    const EntityId victimId = registry.get<Id>(victim).value;
+    const auto* combat = registry.try_get<Combat>(victim);
+    const EntityId victimTarget = combat != nullptr ? combat->target : kInvalidId;
+    if (retaliates(world, attacker, attackerId, victimId, victimTarget)) {
+        return; // отбивается от того, кто напал на него первым
+    }
+    if (const entt::entity protegee = world.find(victimTarget);
+        protegee != entt::null && registry.all_of<Person>(protegee)) {
+        // Бьёт того, кто напал на другого человека, — заступается за него.
+        experience(world, protegee, MemoryKind::Defended, attackerId, victimId);
+        witnessDeed(world, MemoryKind::Defended, attacker, victimTarget, victimId);
+        return;
+    }
+    experience(world, victim, MemoryKind::Assaulted, attackerId, kInvalidId);
+    witnessDeed(world, MemoryKind::Assaulted, attacker, victimId, kInvalidId);
+}
+
+void witnessKilling(World& world, entt::entity killer, entt::entity dead) {
+    entt::registry& registry = world.registry();
+    const EntityId killerId = registry.get<Id>(killer).value;
+    const EntityId deadId = registry.get<Id>(dead).value;
+    const auto* combat = registry.try_get<Combat>(dead);
+    const EntityId deadTarget = combat != nullptr ? combat->target : kInvalidId;
+    if (retaliates(world, killer, killerId, deadId, deadTarget)) {
+        return; // самооборона
+    }
+    if (const entt::entity protegee = world.find(deadTarget);
+        protegee != entt::null && registry.all_of<Person>(protegee)) {
+        // Убил того, кто напал на другого, — спас его.
+        experience(world, protegee, MemoryKind::Saved, killerId, deadId);
+        witnessDeed(world, MemoryKind::Saved, killer, deadTarget, deadId);
+        return;
+    }
+    witnessDeed(world, MemoryKind::Killed, killer, deadId, kInvalidId);
 }
 
 void witnessTheft(World& world, entt::entity thief, EntityId building, int items) {
@@ -421,8 +534,15 @@ void witnessTheft(World& world, entt::entity thief, EntityId building, int items
             owners.push_back(entity);
         }
     }
+    const EntityId band = registry.get<Person>(thief).group;
     for (const entt::entity owner : owners) {
-        experience(world, owner, MemoryKind::Robbed, thiefId, building, items);
+        // Обокрал тот, кому доверял, или товарищ по группе — предал (этап 6.5).
+        const auto* relations = registry.try_get<Relations>(owner);
+        const Bond* bond = relations != nullptr ? relations->find(thiefId) : nullptr;
+        const bool trusted = (bond != nullptr && bond->trust >= kBetrayTrust) ||
+                             (band != kInvalidId && registry.get<Person>(owner).group == band);
+        experience(world, owner, trusted ? MemoryKind::Betrayed : MemoryKind::Robbed, thiefId,
+                   building, items);
     }
     if (victim != kInvalidId) {
         witnessDeed(world, MemoryKind::Robbed, thief, victim, building, items);

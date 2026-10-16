@@ -10,6 +10,7 @@
 #include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
+#include "sim/systems/GroupSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/ZombieSystem.h"
@@ -50,6 +51,9 @@ constexpr Color kLeaderColor = {255, 170, 120, 255};
 // Отношения: линии к друзьям и недругам.
 constexpr Color kFriendColor = {255, 150, 220, 170};
 constexpr Color kFoeColor = {200, 50, 50, 170};
+// Группа (этап 6.4): участники, вожак и база.
+constexpr Color kGroupColor = {110, 230, 220, 200};
+constexpr Color kGroupLeaderColor = {190, 255, 250, 255};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -156,6 +160,12 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
             const Vector2 at = drawnPosition(registry, leader, alpha);
             camera.lookAt(at.x, at.y, camera.zoom());
         }
+    } else if (const auto* group = registry.try_get<Group>(entity)) {
+        if (const entt::entity leader = world_.find(group->leader);
+            leader != entt::null && registry.all_of<Position>(leader)) {
+            const Vector2 at = drawnPosition(registry, leader, alpha);
+            camera.lookAt(at.x, at.y, camera.zoom());
+        }
     }
 }
 
@@ -198,6 +208,22 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (leader && horde->travelling) {
                 DrawLineEx(at, cellCenter(horde->goal), line, kTargetColor);
             }
+        }
+        return;
+    }
+    if (const auto* group = registry.try_get<Group>(entity)) {
+        // Кольцо у каждого участника, у вожака — ярче; база — рамкой.
+        const float radius = std::max(1.2f, 7.0f * px);
+        for (const EntityId member : group->members) {
+            const entt::entity other = world_.find(member);
+            if (other == entt::null || !registry.all_of<Position>(other)) {
+                continue;
+            }
+            DrawRing(drawnPosition(registry, other, alpha), radius, radius + line, 0.0f, 360.0f, 24,
+                     member == group->leader ? kGroupLeaderColor : kGroupColor);
+        }
+        if (const entt::entity base = world_.find(group->base); base != entt::null) {
+            DrawRectangleLinesEx(buildingRect(registry.get<Building>(base)), line, kGroupColor);
         }
         return;
     }
@@ -250,6 +276,17 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (danger.until > world_.tick()) {
                 DrawRing(cellCenter(danger.cell), kDangerRadius - line, kDangerRadius, 0.0f, 360.0f,
                          64, kDangerColor);
+            }
+        }
+    }
+    // Товарищи по группе — бирюзовыми линиями.
+    if (const auto* person = registry.try_get<Person>(entity)) {
+        if (const entt::entity group = world_.find(person->group); group != entt::null) {
+            for (const EntityId member : registry.get<Group>(group).members) {
+                const entt::entity other = world_.find(member);
+                if (other != entity && other != entt::null && registry.all_of<Position>(other)) {
+                    DrawLineEx(at, drawnPosition(registry, other, alpha), line, kGroupColor);
+                }
             }
         }
     }
@@ -342,7 +379,7 @@ void Inspector::drawPanel() {
         } else if (entity == entt::null) {
             ImGui::Text("Объекта #%llu нет", static_cast<unsigned long long>(selected_));
         } else {
-            if (registry.any_of<Position, Building, Horde>(entity)) {
+            if (registry.any_of<Position, Building, Horde, Group>(entity)) {
                 ImGui::Checkbox("Следить камерой", &follow_);
             }
             if (registry.all_of<Person>(entity)) {
@@ -357,6 +394,8 @@ void Inspector::drawPanel() {
                 drawCorpse(entity);
             } else if (registry.all_of<Horde>(entity)) {
                 drawHorde(entity);
+            } else if (registry.all_of<Group>(entity)) {
+                drawGroup(entity);
             } else if (registry.all_of<Building>(entity)) {
                 drawBuilding(entity);
             } else if (registry.all_of<Settlement>(entity)) {
@@ -477,6 +516,35 @@ void Inspector::drawPerson(entt::entity entity) {
                     supplies != nullptr ? supplies->count(ItemKind::Water) : 0);
     } else {
         ImGui::TextUnformatted("Дом: нет");
+    }
+    // Группа (этап 6.4).
+    if (const entt::entity group = world_.find(person.group); group != entt::null) {
+        const Group& info = registry.get<Group>(group);
+        ImGui::TextUnformatted("Группа:");
+        ImGui::SameLine();
+        if (idLink(person.group)) {
+            select(person.group);
+            return;
+        }
+        ImGui::SameLine();
+        if (info.leader == selected_) {
+            ImGui::Text("вожак, %zu человек", info.members.size());
+        } else {
+            ImGui::Text("%zu человек, вожак", info.members.size());
+            ImGui::SameLine();
+            if (idLink(info.leader)) {
+                select(info.leader);
+                return;
+            }
+        }
+        if (person.formerHome != kInvalidId) {
+            ImGui::TextUnformatted("Живёт на базе; прежний дом");
+            ImGui::SameLine();
+            if (idLink(person.formerHome)) {
+                select(person.formerHome);
+                return;
+            }
+        }
     }
     if (const auto* carry = registry.try_get<Inventory>(entity)) {
         char text[256];
@@ -937,6 +1005,73 @@ void Inspector::drawHorde(entt::entity entity) {
             clicked = horde.members[i];
         }
     }
+    if (clicked != kInvalidId) {
+        select(clicked);
+    }
+}
+
+void Inspector::drawGroup(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Group& group = registry.get<Group>(entity);
+    char duration[32];
+
+    ImGui::Text("Группа #%llu: %zu человек", static_cast<unsigned long long>(selected_),
+                group.members.size());
+    formatGameDuration(duration, sizeof(duration), world_.tick() - group.formed);
+    ImGui::Text("Вместе %s", duration);
+    ImGui::TextUnformatted("Вожак:");
+    ImGui::SameLine();
+    if (idLink(group.leader)) {
+        select(group.leader);
+        return;
+    }
+    if (const entt::entity base = world_.find(group.base); base != entt::null) {
+        ImGui::TextUnformatted("База:");
+        ImGui::SameLine();
+        if (idLink(group.base)) {
+            select(group.base);
+            return;
+        }
+        drawSupplies(registry, base);
+    } else {
+        ImGui::TextUnformatted("Базы нет");
+    }
+    // Участники: авторитет (лидерство и доверие остальных) и как к нему
+    // относятся остальные — средняя симпатия.
+    ImGui::SeparatorText("Участники");
+    ImGui::TextDisabled("авторитет; симпатия остальных (%%); занятие");
+    if (!ImGui::BeginTable("members", 4, ImGuiTableFlags_SizingFixedFit)) {
+        return;
+    }
+    EntityId clicked = kInvalidId;
+    for (const EntityId member : group.members) {
+        ImGui::TableNextColumn();
+        if (idLink(member)) {
+            clicked = member;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%.2f%s", authorityOf(world_, group, member),
+                    member == group.leader ? " вожак" : "");
+        ImGui::TableNextColumn();
+        float liking = 0.0f;
+        int others = 0;
+        for (const EntityId other : group.members) {
+            const entt::entity mate = world_.find(other);
+            const auto* relations =
+                mate != entt::null && other != member ? registry.try_get<Relations>(mate) : nullptr;
+            if (relations != nullptr) {
+                const Bond* bond = relations->find(member);
+                liking += bond != nullptr ? bond->affinity : 0.0f;
+                ++others;
+            }
+        }
+        ImGui::Text("%+.0f", others > 0 ? liking / static_cast<float>(others) * 100.0f : 0.0f);
+        ImGui::TableNextColumn();
+        const entt::entity person = world_.find(member);
+        const auto* mind = person != entt::null ? registry.try_get<Mind>(person) : nullptr;
+        ImGui::TextUnformatted(mind != nullptr ? actionName(mind->action) : "—");
+    }
+    ImGui::EndTable();
     if (clicked != kInvalidId) {
         select(clicked);
     }

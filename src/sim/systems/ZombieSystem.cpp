@@ -5,6 +5,7 @@
 #include "sim/Perception.h"
 #include "sim/Population.h"
 #include "sim/Places.h"
+#include "sim/Relations.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/systems/MovementSystem.h"
@@ -97,6 +98,10 @@ constexpr float kCrowdThreat = 0.1f;
 // Тот, кого преследуют, в опасности, даже если зомби пока далеко.
 constexpr float kHuntedThreat = 0.9f;
 constexpr float kHuntedRange = 80.0f;
+// Человек бьёт того, кто дорог (товарища по группе или близкого, этап 6.5), —
+// угроза слабее, чем если бьют самого.
+constexpr float kDefendThreat = 0.8f;
+constexpr float kDearCloseness = 0.2f;
 
 std::uint64_t seconds(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerSecond;
@@ -695,6 +700,21 @@ Threat threatOf(const World& world, entt::entity person) {
     }
     const EntityId self = registry.get<Id>(person).value;
     const std::uint64_t tick = world.tick();
+    const auto* own = registry.try_get<Person>(person);
+    const auto* relations = registry.try_get<Relations>(person);
+    // Дорог ли человек: товарищ по группе или близкий (этап 6.5).
+    const auto dear = [&](EntityId other) {
+        const entt::entity entity = world.find(other);
+        const auto* theirs = entity != entt::null ? registry.try_get<Person>(entity) : nullptr;
+        if (theirs == nullptr) {
+            return false;
+        }
+        if (own != nullptr && own->group != kInvalidId && theirs->group == own->group) {
+            return true;
+        }
+        const Bond* bond = relations != nullptr ? relations->find(other) : nullptr;
+        return bond != nullptr && !bond->hostile() && closeness(*bond) >= kDearCloseness;
+    };
     float nearest = 0.0f;
     float ax = 0.0f;
     float ay = 0.0f;
@@ -704,17 +724,31 @@ Threat threatOf(const World& world, entt::entity person) {
             continue;
         }
         const entt::entity entity = world.find(contact.id);
-        const Zombie* zombie = entity != entt::null ? registry.try_get<Zombie>(entity) : nullptr;
-        if (zombie == nullptr) {
+        if (entity == entt::null) {
             continue;
         }
+        const Zombie* zombie = registry.try_get<Zombie>(entity);
         const float d = distance(position->x, position->y, contact.x, contact.y);
-        float level = contact.seen ? 1.0f - d / kThreatSightRange : 0.0f;
-        if (contact.heard != SoundKind::None) {
-            level = std::max(level, 1.0f - d / kThreatHearRange);
-        }
-        if (zombie->state == ZombieState::Chase && zombie->target == self && d <= kHuntedRange) {
-            level = std::max(level, kHuntedThreat);
+        float level = 0.0f;
+        if (zombie != nullptr) {
+            level = contact.seen ? 1.0f - d / kThreatSightRange : 0.0f;
+            if (contact.heard != SoundKind::None) {
+                level = std::max(level, 1.0f - d / kThreatHearRange);
+            }
+            if (zombie->state == ZombieState::Chase && zombie->target == self && d <= kHuntedRange) {
+                level = std::max(level, kHuntedThreat);
+            }
+        } else if (const auto* combat = registry.try_get<Combat>(entity);
+                   combat != nullptr && combat->target != kInvalidId &&
+                   registry.all_of<Person>(entity)) {
+            // Человек, который бьёт его самого или того, кто ему дорог (этап 6.5).
+            if (combat->target == self) {
+                level = std::max(contact.seen ? 1.0f - d / kThreatSightRange : 0.0f,
+                                 d <= kHuntedRange ? kHuntedThreat : 0.0f);
+                threat.assailant = contact.id;
+            } else if (contact.seen && dear(combat->target)) {
+                level = kDefendThreat * (1.0f - d / kThreatSightRange);
+            }
         }
         if (level <= 0.0f) {
             continue;

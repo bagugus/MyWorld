@@ -21,6 +21,7 @@ constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
 constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
 constexpr Color kSocialColor = {226, 128, 196, 255};
 constexpr Color kFleeingColor = {255, 255, 255, 255};
+constexpr Color kAvengingColor = {190, 30, 40, 255}; // идёт мстить (этап 6.5)
 // Зомби: спокойные — болотные, идущие на шум — жёлто-зелёные, в погоне — красные.
 constexpr Color kZombieColor = {92, 128, 64, 255};
 constexpr Color kZombieAlertColor = {170, 190, 60, 255};
@@ -80,6 +81,9 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
     if (mind != nullptr && mind->action == Action::Flee) {
         return kFleeingColor;
     }
+    if (mind != nullptr && mind->action == Action::Avenge) {
+        return kAvengingColor;
+    }
     const auto* walker = registry.try_get<Walker>(entity);
     if (walker == nullptr || walker->moving()) {
         return kEntityColor;
@@ -95,8 +99,11 @@ Color entityColor(const entt::registry& registry, entt::entity entity) {
         return kEatingColor;
     case Action::Scavenge:
     case Action::Forage:
+    case Action::Steal:
         return kSearchingColor;
     case Action::Socialize:
+    case Action::Share:
+    case Action::Trade:
         return kSocialColor;
     default:
         return kRestingColor;

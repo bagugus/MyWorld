@@ -43,6 +43,7 @@ private:
     void drawPerson(entt::entity entity);
     void drawZombie(entt::entity entity);
     void drawHorde(entt::entity entity);
+    void drawGroup(entt::entity entity);
     void drawAnimal(entt::entity entity);
     void drawFlock(entt::entity entity);
     void drawCorpse(entt::entity entity);

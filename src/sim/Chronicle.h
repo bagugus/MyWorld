@@ -51,6 +51,19 @@ enum class ChronicleKind : std::uint8_t {
     Witnessed,     // видел, как object сделал с third a (MemoryKind) (этап 6.3)
     HeardOf,       // узнал от third, что object сделал с ним a (MemoryKind)
     Reconciled,    // помирился с object: перестал считать недругом
+    GroupFormed,   // собрал группу object и возглавил её (этап 6.4)
+    JoinedGroup,   // вступил в группу object (вожак — third); a = 1 — переехал на её базу
+    LeftGroup,     // ушёл из группы object (вожак — third)
+    Expelled,      // изгнал object из группы third
+    LedGroup,      // возглавил группу object вместо third: a = 0 — тот погиб, 1 — сместил его
+    GroupDisbanded, // группа распалась (subject — группа); object — кто остался
+    Shared,        // поделился с object: a — что (ItemKind) и вернул ли долг (+256), b — сколько (этап 6.5)
+    Traded,        // обменялся с object: a — что получил, b — что отдал (вид | число << 8)
+    Stole,         // обокрал дом object, хозяин — third; взял еды a, воды b
+    Deserted,      // сбежал из группы object с её запасами (a вещей); вожак — third
+    BetrayedBy,    // его предал object: обокрал (a вещей) или сбежал из группы
+    AssaultedBy,   // на него напал object
+    Avenged,       // отомстил object: a = 1 — убил, 0 — избил
     Count
 };
 

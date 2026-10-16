@@ -36,6 +36,16 @@ const char* deedVerb(std::int32_t kind) {
         return "бросил в беде";
     case MemoryKind::Robbed:
         return "обокрал";
+    case MemoryKind::Expelled:
+        return "изгнал из группы";
+    case MemoryKind::Helped:
+        return "помог";
+    case MemoryKind::Betrayed:
+        return "предал";
+    case MemoryKind::Assaulted:
+        return "напал на";
+    case MemoryKind::Killed:
+        return "убил";
     default:
         break;
     }
@@ -53,6 +63,14 @@ const char* heardVerb(std::int32_t kind) {
         return "узнал, что его бросил в беде";
     case MemoryKind::Robbed:
         return "узнал, что его обокрал";
+    case MemoryKind::Expelled:
+        return "узнал, что его изгнал";
+    case MemoryKind::Helped:
+        return "узнал, что ему помог";
+    case MemoryKind::Betrayed:
+        return "узнал, что его предал";
+    case MemoryKind::Assaulted:
+        return "узнал, что на него напал";
     default:
         break;
     }
@@ -110,7 +128,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.verb = "оправился";
         break;
     case ChronicleKind::Fled:
-        phrase.verb = event.a != 0 ? "проснулся и бежал от зомби" : "бежал от зомби";
+        if (event.b == 1) { // от человека (этап 6.5)
+            phrase.verb = event.a != 0 ? "проснулся и бежал от" : "бежал от";
+        } else {
+            phrase.verb = event.a != 0 ? "проснулся и бежал от зомби" : "бежал от зомби";
+        }
         phrase.withObject = event.object != kInvalidId;
         break;
     case ChronicleKind::HordeFormed:
@@ -251,6 +273,90 @@ Phrase phraseOf(const ChronicleEvent& event) {
     case ChronicleKind::Reconciled:
         phrase.verb = "помирился с";
         phrase.withObject = true;
+        break;
+    case ChronicleKind::GroupFormed:
+        phrase.verb = "собрал группу";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::JoinedGroup:
+        phrase.verb = "вступил в группу";
+        phrase.withObject = true;
+        if (event.a == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "и переехал на её базу");
+        }
+        break;
+    case ChronicleKind::LeftGroup:
+        phrase.verb = "ушёл из группы";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "— не поладил с вожаком";
+            phrase.withThird = true;
+        }
+        break;
+    case ChronicleKind::Expelled:
+        phrase.verb = "изгнал";
+        phrase.withObject = true;
+        phrase.middle = "из группы";
+        phrase.withThird = true;
+        break;
+    case ChronicleKind::LedGroup:
+        phrase.verb = "возглавил группу";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = event.a == 1   ? "— сместил"
+                            : event.a == 2 ? "— после того, как сбежал"
+                                           : "— после гибели";
+            phrase.withThird = true;
+        }
+        break;
+    case ChronicleKind::GroupDisbanded:
+        phrase.verb = event.object != kInvalidId ? "распалась, остался" : "распалась";
+        phrase.withObject = event.object != kInvalidId;
+        break;
+    case ChronicleKind::Shared:
+        phrase.verb = "поделился с";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s, %d%s",
+                      itemName(static_cast<ItemKind>(event.a & 0xFF)), event.b,
+                      (event.a & 256) != 0 ? "; вернул долг" : "");
+        break;
+    case ChronicleKind::Traded:
+        phrase.verb = "обменялся с";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— получил %s, %d; отдал %s, %d",
+                      itemName(static_cast<ItemKind>(event.a & 0xFF)), event.a >> 8,
+                      itemName(static_cast<ItemKind>(event.b & 0xFF)), event.b >> 8);
+        break;
+    case ChronicleKind::Stole:
+        phrase.verb = "обокрал дом";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "у";
+            phrase.withThird = true;
+            phrase.thirdSelf = "него";
+        }
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        break;
+    case ChronicleKind::Deserted:
+        phrase.verb = "сбежал из группы";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "с её запасами — вещей %d", event.a);
+        break;
+    case ChronicleKind::BetrayedBy:
+        phrase.verb = "его предал";
+        phrase.withObject = true;
+        if (event.a > 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— вещей %d", event.a);
+        }
+        break;
+    case ChronicleKind::AssaultedBy:
+        phrase.verb = "на него напал";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::Avenged:
+        phrase.verb = "отомстил";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%s", event.a == 1 ? "— убил" : "— избил");
         break;
     case ChronicleKind::Count:
         break;

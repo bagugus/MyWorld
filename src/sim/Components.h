@@ -61,6 +61,11 @@ struct Person {
     // Дома, в укрытии: выполняет действие у своей двери (этап 5.2). Зомби его
     // не видят, а сам он от зомби не выбегает. Ставит Utility AI.
     bool indoors = false;
+    // Группа (этап 6.4); kInvalidId — сам по себе. Вступивший переезжает на
+    // базу группы: home — база, formerHome — свой прежний дом, куда он
+    // вернётся, если уйдёт; kInvalidId — не переезжал.
+    EntityId group = kInvalidId;
+    EntityId formerHome = kInvalidId;
 };
 
 // Нужды человека (NeedsSystem). Голод, жажда, усталость, страх, одиночество —
@@ -150,6 +155,10 @@ enum class Action : std::uint8_t {
     Fight,     // драться с зомби или стрелять в него (этап 5.4)
     Hunt,      // охотиться: выследить, подстрелить, разделать (этап 5.4)
     Treat,     // перевязаться или принять лекарство (этап 5.6)
+    Share,     // отнести еду, воду или лекарство тому, кто в беде (этап 6.5)
+    Trade,     // обменять лишнее на нужное с тем, кому доверяет
+    Steal,     // обокрасть того, кто доверяет, или сбежать из группы с запасами
+    Avenge,    // отомстить: найти обидчика и напасть на него
     Count
 };
 
@@ -172,7 +181,9 @@ struct Mind {
     Action action = Action::Idle;
     ActionPhase phase = ActionPhase::Perform;
     float score = 0.0f;               // оценка действия, когда его выбрали
-    EntityId target = kInvalidId;     // здание действия (Eat, Drink, Scavenge), если есть
+    // Цель действия: здание (Eat, Drink, Scavenge, Steal), человек (Socialize,
+    // Share, Trade, Avenge), зомби или зверь (Fight, Hunt); kInvalidId — нет.
+    EntityId target = kInvalidId;
     Cell spot;                        // клетка, где выполняется действие
     std::uint64_t until = 0;          // тик конца выполнения
     std::uint64_t nextThink = 0;      // тик следующего пересмотра решения
@@ -248,6 +259,11 @@ enum class MemoryKind : std::uint8_t {
     Robbed,    // who обыскивал дом about, где живёт victim
     Bereaved,  // близкий who погиб; about — убийца, если есть
     Turned,    // близкий who встал зомби
+    Expelled,  // вожак who изгнал victim из группы about (этап 6.4)
+    Helped,    // who поделился с victim едой, водой, лекарством (этап 6.5)
+    Betrayed,  // who, которому victim доверял, обокрал его дом about или сбежал из группы
+    Assaulted, // who напал на victim
+    Killed,    // who убил victim (только чужие: сам убитый не помнит)
     Count
 };
 
@@ -282,6 +298,19 @@ struct Memories {
     }
     Memory* find(MemoryKind kind, EntityId who, EntityId victim = kInvalidId) {
         return const_cast<Memory*>(static_cast<const Memories*>(this)->find(kind, who, victim));
+    }
+};
+
+// Группа людей (этап 6.4, GroupSystem): держатся вместе, живут на общей базе и
+// делят её запасы. Как и орда, не существо: позиции нет, в индекс не попадает.
+struct Group {
+    EntityId leader = kInvalidId;
+    std::vector<EntityId> members; // по возрастанию id, вожак тоже здесь
+    EntityId base = kInvalidId;    // общий дом — жилое здание; kInvalidId — нет
+    std::uint64_t formed = 0;      // тик, когда собралась
+
+    bool has(EntityId id) const {
+        return std::binary_search(members.begin(), members.end(), id);
     }
 };
 

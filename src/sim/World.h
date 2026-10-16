@@ -17,6 +17,7 @@
 #include <entt/entt.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -62,6 +63,13 @@ public:
 
     // Продвигает мир ровно на один тик.
     void step();
+
+    // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
+    static constexpr int kStepPhases = 14;
+    static const char* stepPhaseName(int phase);
+    void setProfiling(bool enabled) { profiling_ = enabled; }
+    // Накопленные секунды на каждый шаг тика с включения замера.
+    double stepPhaseSeconds(int phase) const { return phaseSeconds_[phase]; }
 
     // Сущности создавать и удалять только здесь — так у каждой есть стабильный Id.
     entt::entity create();
@@ -126,6 +134,8 @@ public:
     std::uint64_t stateHash() const;
 
 private:
+    bool profiling_ = false;
+    std::array<double, kStepPhases> phaseSeconds_{};
     // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 

@@ -40,15 +40,19 @@ inline constexpr float kZombieRoamSpeed = 0.4f;
 inline constexpr float kHordeSpeed = 0.45f;
 inline constexpr float kInvestigateSpeed = 0.9f;
 
-// Угроза для человека — из того, что он сейчас замечает (Awareness).
+// Угроза для человека — из того, что он сейчас замечает (Awareness): зомби,
+// а с этапа 6.5 — и люди, которые бьют его самого или того, кто ему дорог
+// (товарища по группе, близкого).
 struct Threat {
     float level = 0.0f;           // 0..1
     float awayX = 0.0f;           // куда бежать: единичный вектор от угроз
     float awayY = 0.0f;
-    EntityId nearest = kInvalidId; // ближайший замеченный зомби
-    float nearestX = 0.0f;         // где он
+    EntityId nearest = kInvalidId; // ближайшая замеченная угроза: зомби или человек
+    float nearestX = 0.0f;         // где она
     float nearestY = 0.0f;
-    int count = 0;                 // сколько зомби замечает
+    int count = 0;                 // сколько угроз замечает
+    // Человек, который бьёт его самого (этап 6.5): от него и дома не спрятаться.
+    EntityId assailant = kInvalidId;
 };
 Threat threatOf(const World& world, entt::entity person);
 

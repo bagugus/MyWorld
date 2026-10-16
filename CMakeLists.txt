@@ -92,6 +92,8 @@ add_library(lw_sim STATIC
     src/sim/systems/AnimalSystem.h
     src/sim/systems/CombatSystem.cpp
     src/sim/systems/CombatSystem.h
+    src/sim/systems/GroupSystem.cpp
+    src/sim/systems/GroupSystem.h
     src/sim/systems/MemorySystem.cpp
     src/sim/systems/MemorySystem.h
     src/sim/systems/MovementSystem.cpp

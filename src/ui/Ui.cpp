@@ -168,6 +168,68 @@ void handleHotkeys(SimDriver& driver) {
     }
 }
 
+namespace {
+
+// Промотка времени на произвольный срок: сутки, часы, минуты игрового времени.
+void drawSkipControls(SimDriver& driver) {
+    static int days = 0;
+    static int hours = 1;
+    static int minutes = 0;
+
+    ImGui::Separator();
+    ImGui::TextUnformatted("Промотать вперёд (игровое время):");
+    if (driver.skipping()) {
+        const std::uint64_t left = driver.skipRemaining();
+        char overlay[64];
+        std::snprintf(overlay, sizeof(overlay), "осталось %llu ч %02llu мин",
+                      static_cast<unsigned long long>(left / kTicksPerGameHour),
+                      static_cast<unsigned long long>(left % kTicksPerGameHour / kTicksPerGameMinute));
+        ImGui::ProgressBar(driver.skipProgress(), {-1.0f, 0.0f}, overlay);
+        if (ImGui::Button("Остановить промотку")) {
+            driver.cancelSkip();
+        }
+        return;
+    }
+
+    ImGui::PushItemWidth(70.0f);
+    ImGui::InputInt("сут###skipDays", &days, 0);
+    ImGui::SameLine();
+    ImGui::InputInt("ч###skipHours", &hours, 0);
+    ImGui::SameLine();
+    ImGui::InputInt("мин###skipMinutes", &minutes, 0);
+    ImGui::PopItemWidth();
+    days = std::clamp(days, 0, 100000);
+    hours = std::clamp(hours, 0, 100000);
+    minutes = std::clamp(minutes, 0, 100000);
+
+    const std::uint64_t ticks = static_cast<std::uint64_t>(days) * kTicksPerGameDay +
+                                static_cast<std::uint64_t>(hours) * kTicksPerGameHour +
+                                static_cast<std::uint64_t>(minutes) * kTicksPerGameMinute;
+    ImGui::BeginDisabled(ticks == 0);
+    if (ImGui::Button("Промотать")) {
+        driver.requestSkip(ticks);
+    }
+    ImGui::EndDisabled();
+
+    struct Preset {
+        const char* label;
+        std::uint64_t ticks;
+    };
+    const Preset presets[] = {{"+1 ч", kTicksPerGameHour},
+                              {"+6 ч", 6 * kTicksPerGameHour},
+                              {"+1 сут", kTicksPerGameDay},
+                              {"+1 сезон", kGameDaysPerSeason * kTicksPerGameDay},
+                              {"+1 год", kTicksPerGameYear}};
+    for (const Preset& preset : presets) {
+        ImGui::SameLine();
+        if (ImGui::Button(preset.label)) {
+            driver.requestSkip(preset.ticks);
+        }
+    }
+}
+
+} // namespace
+
 void drawTimePanel(const World& world, const Environment& environment, SimDriver& driver) {
     ImGui::SetNextWindowPos({12.0f, 12.0f}, ImGuiCond_FirstUseEver);
     // Высота по содержимому: панель растёт вместе с индикаторами.
@@ -203,6 +265,8 @@ void drawTimePanel(const World& world, const Environment& environment, SimDriver
             driver.requestStep();
         }
         ImGui::EndDisabled();
+
+        drawSkipControls(driver);
 
         const CalendarTime& time = environment.time;
         const SunState& sun = environment.sun;
@@ -338,6 +402,19 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::Text("Дерутся: %zu, охотятся: %zu; тела: людей %zu, зомби %zu, туш %zu", fighting,
                     hunting, bodies[0], bodies[1], bodies[2]);
+        // Группы и социальные действия (этапы 6.4–6.5).
+        std::size_t inGroups = 0;
+        for (const auto [entity, group] : world.registry().view<const Group>().each()) {
+            inGroups += group.members.size();
+        }
+        std::size_t helping = 0;
+        std::size_t avenging = 0;
+        for (const auto [entity, mind] : world.registry().view<const Mind>().each()) {
+            helping += mind.action == Action::Share || mind.action == Action::Trade ? 1 : 0;
+            avenging += mind.action == Action::Avenge ? 1 : 0;
+        }
+        ImGui::Text("Групп: %zu (людей в них: %zu); делятся и меняются: %zu, мстят: %zu",
+                    world.registry().view<const Group>().size(), inGroups, helping, avenging);
         ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                     renderer.map().chunkCount());
 
