@@ -383,7 +383,9 @@ std::uint64_t World::stateHash() const {
                 const Memory& memory = memories->items[i];
                 hasher.add(static_cast<std::uint8_t>(memory.kind));
                 hasher.add(memory.who);
+                hasher.add(memory.victim);
                 hasher.add(memory.about);
+                hasher.add(memory.source);
                 hasher.add(memory.tick);
                 hasher.add(memory.strength);
             }

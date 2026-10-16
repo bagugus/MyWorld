@@ -106,10 +106,10 @@ public:
     // Летопись: значимые события по id участников.
     Chronicle& chronicle() { return chronicle_; }
     const Chronicle& chronicle() const { return chronicle_; }
-    // Записать событие летописи в текущем тике.
+    // Записать событие летописи в текущем тике; third — третий участник.
     void record(ChronicleKind kind, EntityId subject, EntityId object = kInvalidId,
-                std::int32_t a = 0, std::int32_t b = 0) {
-        chronicle_.add({tick_, kind, subject, object, a, b});
+                std::int32_t a = 0, std::int32_t b = 0, EntityId third = kInvalidId) {
+        chronicle_.add({tick_, kind, subject, object, a, b, third});
     }
     // Разовые звуки последних тиков: выстрелы, крики (см. sim/Sound.h).
     const std::vector<Sound>& sounds() const { return sounds_; }

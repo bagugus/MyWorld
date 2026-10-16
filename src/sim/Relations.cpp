@@ -83,10 +83,13 @@ float trustCeiling(const Bond& bond) {
 }
 
 void addDebt(Bond& bond, float amount) {
-    const float added = std::min(amount, 1.0f - bond.debt);
+    // Сначала добро гасит обиду, остаток — долг.
+    const float forgiven = std::min(amount, bond.grudge);
+    bond.grudge -= forgiven;
+    const float added = std::min(amount - forgiven, 1.0f - bond.debt);
     bond.debt += added;
-    bond.affinity = clampUnit(bond.affinity + kDebtAffinity * added);
-    bond.trust = clampUnit(bond.trust + kDebtTrust * added);
+    bond.affinity = clampUnit(bond.affinity + kDebtAffinity * (forgiven + added));
+    bond.trust = clampUnit(bond.trust + kDebtTrust * (forgiven + added));
 }
 
 void addGrudge(Bond& bond, float amount) {
@@ -147,6 +150,38 @@ std::uint8_t updateBondFlags(Bond& bond) {
         bond.flags &= static_cast<std::uint8_t>(~Bond::kFoe);
     }
     return raised;
+}
+
+void refreshBondFlags(World& world, EntityId self, Bond& bond) {
+    const bool wasFoe = bond.hostile();
+    switch (updateBondFlags(bond)) {
+    case Bond::kFriend:
+        world.record(ChronicleKind::Befriended, self, bond.other);
+        break;
+    case Bond::kFoe:
+        world.record(ChronicleKind::Disliked, self, bond.other);
+        break;
+    default:
+        break;
+    }
+    if (wasFoe && !bond.hostile()) {
+        world.record(ChronicleKind::Reconciled, self, bond.other);
+    }
+}
+
+Reputation reputationOf(const World& world, EntityId id) {
+    Reputation reputation;
+    float sum = 0.0f;
+    for (const auto [entity, person, relations] :
+         world.registry().view<const Person, const Relations>().each()) {
+        const Bond* bond = relations.find(id);
+        if (bond != nullptr && bond->familiarity >= kReputationFamiliarity) {
+            sum += bond->affinity;
+            ++reputation.known;
+        }
+    }
+    reputation.affinity = reputation.known > 0 ? sum / static_cast<float>(reputation.known) : 0.0f;
+    return reputation;
 }
 
 void introduceNeighbours(World& world) {

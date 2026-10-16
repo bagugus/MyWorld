@@ -14,12 +14,50 @@ namespace lw::ui {
 namespace {
 
 // Текст события: глагол перед объектом и подробности после него. Объект
-// (если есть) — ссылка между ними.
+// (если есть) — ссылка между ними; за ним — связка и третий участник (этап 6.3).
 struct Phrase {
     const char* verb = "";
     bool withObject = false;
+    const char* middle = "";
+    bool withThird = false;
+    // Третий участник — тот, чью биографию смотрят: вместо ссылки на него самого.
+    const char* thirdSelf = "его";
     char tail[64] = "";
 };
+
+// Поступок для «видел, как X …» и «узнал, что X …» (MemoryKind).
+const char* deedVerb(std::int32_t kind) {
+    switch (static_cast<MemoryKind>(kind)) {
+    case MemoryKind::Saved:
+        return "спас";
+    case MemoryKind::Defended:
+        return "заступился за";
+    case MemoryKind::Abandoned:
+        return "бросил в беде";
+    case MemoryKind::Robbed:
+        return "обокрал";
+    default:
+        break;
+    }
+    return "что-то сделал с";
+}
+
+// «Узнал, что его …» — о поступке с ним самим (MemoryKind).
+const char* heardVerb(std::int32_t kind) {
+    switch (static_cast<MemoryKind>(kind)) {
+    case MemoryKind::Saved:
+        return "узнал, что его спас";
+    case MemoryKind::Defended:
+        return "узнал, что за него заступился";
+    case MemoryKind::Abandoned:
+        return "узнал, что его бросил в беде";
+    case MemoryKind::Robbed:
+        return "узнал, что его обокрал";
+    default:
+        break;
+    }
+    return "узнал о поступке";
+}
 
 Phrase phraseOf(const ChronicleEvent& event) {
     Phrase phrase;
@@ -187,9 +225,31 @@ Phrase phraseOf(const ChronicleEvent& event) {
     case ChronicleKind::Mourned:
         phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
         phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "— рассказал";
+            phrase.withThird = true;
+            phrase.thirdSelf = "он";
+        }
         break;
     case ChronicleKind::SawTurned:
         phrase.verb = "узнал в зомби близкого";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::Witnessed:
+        phrase.verb = "видел, как";
+        phrase.withObject = true;
+        phrase.middle = deedVerb(event.a);
+        phrase.withThird = true;
+        break;
+    case ChronicleKind::HeardOf:
+        phrase.verb = heardVerb(event.a);
+        phrase.withObject = true;
+        phrase.middle = "— рассказал";
+        phrase.withThird = true;
+        phrase.thirdSelf = "он";
+        break;
+    case ChronicleKind::Reconciled:
+        phrase.verb = "помирился с";
         phrase.withObject = true;
         break;
     case ChronicleKind::Count:
@@ -219,6 +279,18 @@ EntityId drawChronicleEvent(const ChronicleEvent& event, EntityId self) {
         ImGui::SameLine();
         if (idLink(event.object)) {
             clicked = event.object;
+        }
+    }
+    if (phrase.middle[0] != '\0') {
+        ImGui::SameLine();
+        ImGui::TextUnformatted(phrase.middle);
+    }
+    if (phrase.withThird && event.third != kInvalidId) {
+        ImGui::SameLine();
+        if (event.third == self) {
+            ImGui::TextUnformatted(phrase.thirdSelf);
+        } else if (idLink(event.third)) {
+            clicked = event.third;
         }
     }
     if (phrase.tail[0] != '\0') {

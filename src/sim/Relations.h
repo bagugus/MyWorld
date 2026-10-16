@@ -56,8 +56,10 @@ float affinityGoal(const Bond& bond);
 float trustCeiling(const Bond& bond);
 
 // Стал обязан (долг растёт на amount) или затаил обиду (обида растёт на
-// amount): сразу сдвигаются симпатия и доверие. Отметки «друг» и «недруг» —
-// по updateBondFlags, её вызывает тот, кто пишет летопись.
+// amount): сразу сдвигаются симпатия и доверие. Добро от того, на кого держит
+// обиду, сначала гасит её, и только остаток становится долгом — так
+// мирятся (этап 6.3). Отметки «друг» и «недруг» — по updateBondFlags, её
+// вызывает тот, кто пишет летопись (refreshBondFlags).
 void addDebt(Bond& bond, float amount);
 void addGrudge(Bond& bond, float amount);
 
@@ -70,6 +72,21 @@ Bond* acquireBond(Relations& relations, EntityId other, float chemistry, std::ui
 // Поставить или снять отметки «друг» и «недруг» по порогам. Возвращает
 // отметку, которая только что поставлена (Bond::kFriend, Bond::kFoe), или 0.
 std::uint8_t updateBondFlags(Bond& bond);
+
+// То же, с летописью от лица self: подружился, невзлюбил, помирился (снял
+// отметку «недруг», этап 6.3).
+void refreshBondFlags(World& world, EntityId self, Bond& bond);
+
+// Репутация человека (этап 6.3) — как к нему относятся живые, кто его знает
+// (знакомство не меньше kReputationFamiliarity): средняя симпатия и сколько
+// их. Производная величина: в состояние мира не входит, решения от неё не
+// зависят — для инспектора и сводок.
+inline constexpr float kReputationFamiliarity = 0.2f;
+struct Reputation {
+    float affinity = 0.0f;
+    int known = 0;
+};
+Reputation reputationOf(const World& world, EntityId id);
 
 // Знакомства с начала мира у всех людей с Relations: соседи по дому знают
 // друг друга хорошо, а ещё каждый знает нескольких ближайших соседей по

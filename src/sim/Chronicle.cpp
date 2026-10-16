@@ -19,6 +19,7 @@ std::uint64_t mix(std::uint64_t accumulated, const ChronicleEvent& event) {
     hasher.add(event.object);
     hasher.add(event.a);
     hasher.add(event.b);
+    hasher.add(event.third);
     return hasher.value();
 }
 
@@ -32,6 +33,9 @@ void Chronicle::add(const ChronicleEvent& event) {
     }
     if (event.object != kInvalidId && event.object != event.subject) {
         byId_[event.object].push_back(index);
+    }
+    if (event.third != kInvalidId && event.third != event.subject && event.third != event.object) {
+        byId_[event.third].push_back(index);
     }
     ++counts_[static_cast<std::size_t>(event.kind)];
     hash_ = mix(hash_, event);
@@ -55,7 +59,8 @@ const char* chronicleKindName(ChronicleKind kind) {
                                       "turned", "feverish", "found weapon", "looted body",
                                       "treated", "befriended", "disliked", "saved by",
                                       "defended by", "abandoned by", "caught thief",
-                                      "mourned", "saw turned"};
+                                      "mourned", "saw turned", "witnessed", "heard of",
+                                      "reconciled"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(ChronicleKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "?";

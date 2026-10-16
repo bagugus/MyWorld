@@ -2,7 +2,7 @@
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
-// память, долг и обида.
+// память, долг и обида, чужие поступки и слухи.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -4088,6 +4088,280 @@ void testMourning() {
     CHECK(field.count(lw::ChronicleKind::SawTurned) == 1);
 }
 
+// --- Влияние событий на отношения (этап 6.3) -----------------------------------
+
+// Связь self → other с заданными знакомством, симпатией и доверием.
+lw::Bond* setBond(entt::registry& registry, entt::entity self, lw::EntityId other,
+                  float familiarity, float affinity, float trust, float chemistry = 0.0f) {
+    lw::Bond* bond = lw::acquireBond(registry.get<lw::Relations>(self), other, chemistry, 0);
+    if (bond != nullptr) {
+        bond->familiarity = familiarity;
+        bond->affinity = affinity;
+        bond->trust = trust;
+        lw::updateBondFlags(*bond);
+    }
+    return bond;
+}
+
+// Наблюдатель видит other: свежий контакт «видит».
+void letSee(Field& field, entt::entity observer, entt::entity other) {
+    entt::registry& registry = field.world.registry();
+    const lw::Position& at = registry.get<lw::Position>(other);
+    lw::Awareness& awareness = registry.get<lw::Awareness>(observer);
+    awareness.contacts[awareness.count++] = {field.id(other), at.x, at.y, field.world.tick(), true,
+                                             lw::SoundKind::None};
+}
+
+// Кто видел со стороны, как обворовывают дом друга, запоминает вора и
+// обижается за друга; чужая беда трогает слабо.
+void testWitnessedTheft() {
+    Field field(3);
+    if (!field.open || field.people.size() != 3) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity owner = field.people[0];
+    const entt::entity thief = field.people[1];
+    const entt::entity bystander = field.people[2];
+    const lw::EntityId home = registry.get<lw::Person>(owner).home;
+    CHECK(home != lw::kInvalidId);
+    if (home == lw::kInvalidId) {
+        return;
+    }
+    registry.get<lw::Person>(thief).home = lw::kInvalidId;
+    registry.get<lw::Person>(bystander).home = lw::kInvalidId;
+    registry.get<lw::Person>(owner).asleep = true; // хозяин спит и ничего не видит
+    field.place(thief, 0);
+    field.place(bystander, 8);
+    for (const entt::entity person : {owner, thief, bystander}) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Memories>(person) = {};
+        registry.get<lw::Awareness>(person) = {};
+        registry.get<lw::Traits>(person) = {};
+    }
+    setBond(registry, bystander, field.id(owner), 0.8f, 0.6f, 0.4f);
+    letSee(field, bystander, thief);
+    lw::witnessTheft(field.world, thief, home, 3);
+    CHECK(registry.get<lw::Memories>(owner).count == 0);
+    const lw::Memory* seen = registry.get<lw::Memories>(bystander).find(
+        lw::MemoryKind::Robbed, field.id(thief), field.id(owner));
+    CHECK(seen != nullptr && seen->source == lw::kInvalidId && seen->about == home);
+    CHECK(seen != nullptr && seen->strength > 0.4f && seen->strength < 0.6f);
+    const lw::Bond* grudge = registry.get<lw::Relations>(bystander).find(field.id(thief));
+    CHECK(grudge != nullptr && grudge->grudge > 0.1f && grudge->affinity < 0.0f);
+    CHECK(field.count(lw::ChronicleKind::Witnessed) == 1);
+
+    // Пострадал чужой: случай запомнился слабее, обида — почти никакая, в
+    // летопись не попал.
+    registry.get<lw::Relations>(bystander) = {};
+    registry.get<lw::Memories>(bystander) = {};
+    lw::witnessTheft(field.world, thief, home, 3);
+    const lw::Memory* stranger = registry.get<lw::Memories>(bystander).find(
+        lw::MemoryKind::Robbed, field.id(thief), field.id(owner));
+    CHECK(stranger != nullptr && seen != nullptr && stranger->strength < 0.4f);
+    const lw::Bond* cold = registry.get<lw::Relations>(bystander).find(field.id(thief));
+    CHECK(cold == nullptr || cold->grudge < 0.05f);
+    CHECK(field.count(lw::ChronicleKind::Witnessed) == 1);
+}
+
+// Слухи: рассказывают то, что слушателю важно и чего он не знает; слух
+// слабее увиденного и по доверию к рассказчику; дальше одного пересказа не
+// идёт; ограбленный узнаёт, кто его обокрал; недругу не верят.
+void testRumors() {
+    Field field(4);
+    if (!field.open || field.people.size() != 4) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity teller = field.people[0];
+    const entt::entity listener = field.people[1];
+    const entt::entity thief = field.people[2];
+    const entt::entity robbed = field.people[3];
+    for (const entt::entity person : field.people) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Memories>(person) = {};
+        registry.get<lw::Traits>(person) = {};
+    }
+    const lw::EntityId thiefId = field.id(thief);
+    // Вор обокрал рассказчика, а рассказчик видел, как тот обокрал и robbed.
+    lw::remember(registry.get<lw::Memories>(teller), lw::MemoryKind::Robbed, thiefId, 1, 0.6f,
+                 field.world.tick());
+    lw::remember(registry.get<lw::Memories>(teller),
+                 lw::Memory{lw::MemoryKind::Robbed, thiefId, field.id(robbed), 2, lw::kInvalidId,
+                            field.world.tick(), 0.4f});
+    setBond(registry, listener, field.id(teller), 0.8f, 0.6f, 0.6f);
+    setBond(registry, listener, thiefId, 0.3f, 0.0f, 0.0f);
+
+    // Слушатель знает вора: о краже у рассказчика.
+    const lw::Memory* rumor = lw::pickRumor(field.world, teller, listener);
+    CHECK(rumor != nullptr && rumor->victim == lw::kInvalidId && rumor->who == thiefId);
+    if (rumor == nullptr) {
+        return;
+    }
+    lw::hearRumor(field.world, listener, field.id(teller), *rumor);
+    const lw::Memory* heard = registry.get<lw::Memories>(listener).find(
+        lw::MemoryKind::Robbed, thiefId, field.id(teller));
+    CHECK(heard != nullptr && heard->source == field.id(teller));
+    CHECK(heard != nullptr && heard->strength < lw::kRetellStrength &&
+          heard->strength >= lw::kForgotten);
+    const lw::Bond* toThief = registry.get<lw::Relations>(listener).find(thiefId);
+    CHECK(toThief != nullptr && toThief->grudge > 0.0f && toThief->affinity < 0.0f);
+    // Второй раз то же не рассказывают; дальше слабый слух не идёт.
+    const lw::Memory* next = lw::pickRumor(field.world, teller, listener);
+    CHECK(next == nullptr || next->victim != lw::kInvalidId);
+    setBond(registry, robbed, field.id(listener), 0.8f, 0.6f, 0.6f);
+    setBond(registry, robbed, thiefId, 0.3f, 0.0f, 0.0f);
+    CHECK(lw::pickRumor(field.world, listener, robbed) == nullptr);
+
+    // Ограбленный узнаёт от рассказчика, кто его обокрал, — первым делом.
+    setBond(registry, robbed, field.id(teller), 0.5f, 0.3f, 0.3f);
+    rumor = lw::pickRumor(field.world, teller, robbed);
+    CHECK(rumor != nullptr && rumor->victim == field.id(robbed));
+    if (rumor != nullptr) {
+        lw::hearRumor(field.world, robbed, field.id(teller), *rumor);
+    }
+    const lw::Memory* own = registry.get<lw::Memories>(robbed).find(lw::MemoryKind::Robbed, thiefId);
+    CHECK(own != nullptr && own->source == field.id(teller));
+    CHECK(field.count(lw::ChronicleKind::HeardOf) == 1);
+    const lw::Bond* robbedToThief = registry.get<lw::Relations>(robbed).find(thiefId);
+    CHECK(robbedToThief != nullptr && robbedToThief->grudge > 0.08f);
+
+    // Недругу не верят.
+    registry.get<lw::Memories>(listener) = {};
+    registry.get<lw::Relations>(listener) = {};
+    setBond(registry, listener, field.id(teller), 0.8f, -0.6f, -0.3f);
+    setBond(registry, listener, thiefId, 0.3f, 0.0f, 0.0f);
+    rumor = lw::pickRumor(field.world, teller, listener);
+    CHECK(rumor != nullptr);
+    if (rumor != nullptr) {
+        lw::hearRumor(field.world, listener, field.id(teller), *rumor);
+    }
+    CHECK(registry.get<lw::Memories>(listener).count == 0);
+
+    // В разговоре слух переходит сам (SocialSystem).
+    registry.get<lw::Relations>(listener) = {};
+    setBond(registry, listener, field.id(teller), 0.8f, 0.6f, 0.6f, 0.6f);
+    setBond(registry, listener, thiefId, 0.3f, 0.0f, 0.0f);
+    field.freeze(teller, 10);
+    field.freeze(listener, 12);
+    field.dismiss(thief);
+    field.dismiss(robbed);
+    lw::Mind talk;
+    talk.action = lw::Action::Socialize;
+    talk.phase = lw::ActionPhase::Perform;
+    registry.emplace<lw::Mind>(teller, talk);
+    lw::updateRelations(field.world, 1.0f);
+    CHECK(registry.get<lw::Memories>(listener).find(lw::MemoryKind::Robbed, thiefId,
+                                                     field.id(teller)) != nullptr);
+}
+
+// Весть о гибели близкого: горе и запись «узнал о гибели», с рассказчиком.
+void testDeathRumor() {
+    Field field(3);
+    if (!field.open || field.people.size() != 3) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity teller = field.people[0];
+    const entt::entity listener = field.people[1];
+    const entt::entity lost = field.people[2];
+    for (const entt::entity person : field.people) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Memories>(person) = {};
+    }
+    registry.get<lw::Needs>(listener) = {};
+    setBond(registry, listener, field.id(lost), 0.9f, 0.8f, 0.6f);
+    setBond(registry, listener, field.id(teller), 0.6f, 0.4f, 0.4f);
+    lw::remember(registry.get<lw::Memories>(teller), lw::MemoryKind::Bereaved, field.id(lost),
+                 lw::kInvalidId, 0.8f, field.world.tick());
+    lw::die(field.world, lost, lw::DeathCause::Starvation, lw::kInvalidId);
+    const lw::Memory* rumor = lw::pickRumor(field.world, teller, listener);
+    CHECK(rumor != nullptr && rumor->kind == lw::MemoryKind::Bereaved);
+    if (rumor == nullptr) {
+        return;
+    }
+    lw::hearRumor(field.world, listener, field.id(teller), *rumor);
+    const lw::Memory* grief =
+        registry.get<lw::Memories>(listener).find(lw::MemoryKind::Bereaved, field.id(lost));
+    CHECK(grief != nullptr && grief->source == field.id(teller));
+    CHECK(registry.get<lw::Needs>(listener).loneliness > 0.1f);
+    const auto& events = field.world.chronicle().events();
+    CHECK(std::any_of(events.begin(), events.end(), [&](const lw::ChronicleEvent& e) {
+        return e.kind == lw::ChronicleKind::Mourned && e.a == 0 && e.third == field.id(teller) &&
+               e.object == field.id(lost);
+    }));
+    // Второй раз о том же не рассказывают.
+    CHECK(lw::pickRumor(field.world, teller, listener) == nullptr);
+}
+
+// Враг моего друга: в разговоре симпатия слушателя к третьему тянется к мнению
+// рассказчика, если рассказчик ему мил.
+void testOpinionsSpread() {
+    Field field(3);
+    if (!field.open || field.people.size() != 3) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity speaker = field.people[0];
+    const entt::entity listener = field.people[1];
+    const entt::entity foe = field.people[2];
+    for (const entt::entity person : field.people) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Memories>(person) = {};
+    }
+    field.freeze(speaker, 10);
+    field.freeze(listener, 12);
+    field.dismiss(foe);
+    lw::Mind talk;
+    talk.action = lw::Action::Socialize;
+    talk.phase = lw::ActionPhase::Perform;
+    registry.emplace<lw::Mind>(speaker, talk);
+    setBond(registry, speaker, field.id(listener), 0.9f, 0.8f, 0.6f, 0.8f);
+    setBond(registry, listener, field.id(speaker), 0.9f, 0.8f, 0.6f, 0.8f);
+    lw::Bond* hated = setBond(registry, speaker, field.id(foe), 0.8f, -0.8f, -0.5f, -0.8f);
+    lw::Bond* known = setBond(registry, listener, field.id(foe), 0.5f, 0.2f, 0.1f, 0.2f);
+    CHECK(hated != nullptr && hated->hostile() && known != nullptr);
+    if (known == nullptr) {
+        return;
+    }
+    lw::updateRelations(field.world, 60.0f);
+    CHECK(known->affinity < 0.0f);
+    for (int hour = 0; hour < 3; ++hour) {
+        lw::updateRelations(field.world, 60.0f);
+    }
+    CHECK(known->hostile());
+    CHECK(field.count(lw::ChronicleKind::Disliked) >= 1);
+}
+
+// Добро гасит обиду; недруг, сделавший добро, — уже не недруг: помирились.
+void testReconcile() {
+    lw::Bond bond;
+    bond.familiarity = 0.6f;
+    bond.grudge = 0.3f;
+    lw::addDebt(bond, 0.5f);
+    CHECK(bond.grudge == 0.0f && std::abs(bond.debt - 0.2f) < 1e-6f);
+
+    Field field(2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity victim = field.people[0];
+    const entt::entity rescuer = field.people[1];
+    registry.get<lw::Relations>(victim) = {};
+    registry.get<lw::Memories>(victim) = {};
+    registry.get<lw::Traits>(victim) = {};
+    lw::Bond* foe = setBond(registry, victim, field.id(rescuer), 0.6f, -0.35f, -0.3f);
+    CHECK(foe != nullptr && foe->hostile());
+    if (foe == nullptr) {
+        return;
+    }
+    foe->grudge = 0.4f;
+    lw::experience(field.world, victim, lw::MemoryKind::Saved, field.id(rescuer), lw::kInvalidId);
+    CHECK(foe->grudge == 0.0f && !foe->hostile());
+    CHECK(field.count(lw::ChronicleKind::Reconciled) == 1);
+}
+
 } // namespace
 
 int main() {
@@ -4177,6 +4451,11 @@ int main() {
     testAbandonedAndDefended();
     testTheftWitnessed();
     testMourning();
+    testWitnessedTheft();
+    testRumors();
+    testDeathRumor();
+    testOpinionsSpread();
+    testReconcile();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

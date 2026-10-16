@@ -11,6 +11,7 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Perception.h"
+#include "sim/Relations.h"
 #include "sim/Rng.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -228,6 +229,10 @@ void printMemories(const lw::World& world) {
     // инспекторе (living_world --select ID).
     lw::EntityId richest = lw::kInvalidId;
     std::size_t most = 0;
+    // Как узнал (этап 6.3): с ним самим, видел чужое, слышал.
+    std::size_t own = 0;
+    std::size_t witnessed = 0;
+    std::size_t heard = 0;
     for (const auto [entity, id, person, memory] :
          registry.view<const lw::Id, const lw::Person, const lw::Memories>().each()) {
         ++people;
@@ -238,7 +243,15 @@ void printMemories(const lw::World& world) {
             richest = id.value;
         }
         for (std::size_t i = 0; i < memory.count; ++i) {
-            ++byKind[static_cast<std::size_t>(memory.items[i].kind)];
+            const lw::Memory& item = memory.items[i];
+            ++byKind[static_cast<std::size_t>(item.kind)];
+            if (item.source != lw::kInvalidId) {
+                ++heard;
+            } else if (item.victim != lw::kInvalidId) {
+                ++witnessed;
+            } else {
+                ++own;
+            }
         }
         if (const auto* relations = registry.try_get<lw::Relations>(entity)) {
             for (std::size_t i = 0; i < relations->count; ++i) {
@@ -261,7 +274,8 @@ void printMemories(const lw::World& world) {
     for (std::size_t i = 0; i < kKinds; ++i) {
         std::printf("%s %s %zu", i == 0 ? "" : ",", kNames[i], byKind[i]);
     }
-    std::printf("\n  debts %zu (mean %.2f), grudges %zu (mean %.2f)", debts,
+    std::printf("\n  own %zu, witnessed %zu, heard %zu", own, witnessed, heard);
+    std::printf("; debts %zu (mean %.2f), grudges %zu (mean %.2f)", debts,
                 debts > 0 ? debt / static_cast<float>(debts) : 0.0f, grudges,
                 grudges > 0 ? grudge / static_cast<float>(grudges) : 0.0f);
     if (richest != lw::kInvalidId) {
@@ -269,6 +283,31 @@ void printMemories(const lw::World& world) {
                     most);
     }
     std::printf("\n");
+    // Репутация (этап 6.3): кого знают многие и любят меньше и больше всех.
+    lw::EntityId worst = lw::kInvalidId;
+    lw::EntityId best = lw::kInvalidId;
+    lw::Reputation worstReputation;
+    lw::Reputation bestReputation;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const lw::Reputation reputation = lw::reputationOf(world, id.value);
+        if (reputation.known < 3) {
+            continue;
+        }
+        if (worst == lw::kInvalidId || reputation.affinity < worstReputation.affinity) {
+            worst = id.value;
+            worstReputation = reputation;
+        }
+        if (best == lw::kInvalidId || reputation.affinity > bestReputation.affinity) {
+            best = id.value;
+            bestReputation = reputation;
+        }
+    }
+    if (worst != lw::kInvalidId) {
+        std::printf("  reputation (known by 3+): worst #%llu %+.2f (%d), best #%llu %+.2f (%d)\n",
+                    static_cast<unsigned long long>(worst), worstReputation.affinity,
+                    worstReputation.known, static_cast<unsigned long long>(best),
+                    bestReputation.affinity, bestReputation.known);
+    }
 }
 
 // Восприятие: сколько контактов у существ и как они замечены.

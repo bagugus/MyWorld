@@ -686,6 +686,13 @@ bool Inspector::drawRelations(entt::entity entity) {
     if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
         return true;
     }
+    // Как к нему относятся другие (этап 6.3).
+    if (const Reputation reputation = reputationOf(world_, selected_); reputation.known > 0) {
+        ImGui::Text("Репутация: симпатия %+.0f у %d знакомых", reputation.affinity * 100.0f,
+                    reputation.known);
+    } else {
+        ImGui::TextDisabled("Репутация: его почти никто не знает");
+    }
     if (relations->count == 0) {
         ImGui::TextDisabled("никого не знает");
         return true;
@@ -773,7 +780,8 @@ bool Inspector::drawMemories(entt::entity entity) {
     }
     std::stable_sort(items.begin(), items.end(),
                      [](const Memory* a, const Memory* b) { return a->tick > b->tick; });
-    ImGui::TextDisabled("кто, что сделал, при чём; сила (%%)");
+    ImGui::TextDisabled("кто, что сделал (→ с кем, если не с ним), при чём; сила (%%); "
+                        "когда, от кого слышал");
     if (!ImGui::BeginTable("memories", 5, ImGuiTableFlags_SizingFixedFit)) {
         return true;
     }
@@ -788,6 +796,15 @@ bool Inspector::drawMemories(entt::entity entity) {
         }
         ImGui::TableNextColumn();
         ImGui::TextUnformatted(memoryKindName(memory->kind));
+        // Чужой поступок (этап 6.3) — с кем.
+        if (memory->victim != kInvalidId) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("→");
+            ImGui::SameLine();
+            if (idLink(memory->victim)) {
+                clicked = memory->victim;
+            }
+        }
         ImGui::TableNextColumn();
         if (memory->about != kInvalidId && idLink(memory->about)) {
             clicked = memory->about;
@@ -795,8 +812,16 @@ bool Inspector::drawMemories(entt::entity entity) {
         ImGui::TableNextColumn();
         ImGui::Text("%3.0f", memory->strength * 100.0f);
         ImGui::TableNextColumn();
-        formatGameDuration(ago, sizeof(ago), tick - memory->tick);
+        formatGameDuration(ago, sizeof(ago), tick > memory->tick ? tick - memory->tick : 0);
         ImGui::TextDisabled("%s назад", ago);
+        if (memory->source != kInvalidId) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("слух от");
+            ImGui::SameLine();
+            if (idLink(memory->source)) {
+                clicked = memory->source;
+            }
+        }
         ImGui::PopID();
     }
     ImGui::EndTable();
