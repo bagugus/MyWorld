@@ -7,10 +7,12 @@
 //   lw_headless --seed 42 --zombies 0                    мир без зомби
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 //   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
+//   lw_headless --seed 42 --ticks 1440000 --social        и список социальных событий (этап 6)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Perception.h"
+#include "sim/Relations.h"
 #include "sim/Rng.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -116,7 +118,8 @@ void printPeople(const lw::World& world) {
                 asleep);
     constexpr const char* kActions[] = {"idle",   "sleep",     "eat",    "drink",   "scavenge",
                                         "forage", "socialize", "wander", "go home", "flee",
-                                        "fight",  "hunt",      "treat"};
+                                        "fight",  "hunt",      "treat",  "share",   "trade",
+                                        "steal",  "avenge"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -165,6 +168,181 @@ void printPeople(const lw::World& world) {
                     mean.hunger / n, mean.thirst / n, mean.fatigue / n, mean.fear / n,
                     mean.loneliness / n, mean.health / n, worstHealth);
     }
+}
+
+// Отношения (этап 6.2): сколько знакомых, друзей и недругов у живых.
+void printRelations(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t people = 0;
+    std::size_t bonds = 0;
+    std::size_t friends = 0;
+    std::size_t mutual = 0;
+    std::size_t foes = 0;
+    std::size_t lonely = 0;
+    std::size_t gone = 0;
+    float familiarity = 0.0f;
+    for (const auto [entity, id, person, relations] :
+         registry.view<const lw::Id, const lw::Person, const lw::Relations>().each()) {
+        ++people;
+        bonds += relations.count;
+        bool hasFriend = false;
+        for (std::size_t i = 0; i < relations.count; ++i) {
+            const lw::Bond& bond = relations.bonds[i];
+            familiarity += bond.familiarity;
+            const entt::entity other = world.find(bond.other);
+            const bool alive = other != entt::null && registry.all_of<lw::Person>(other);
+            gone += alive ? 0 : 1;
+            foes += bond.hostile() ? 1 : 0;
+            if (bond.friendly()) {
+                ++friends;
+                hasFriend = hasFriend || alive;
+                const auto* theirs = alive ? registry.try_get<lw::Relations>(other) : nullptr;
+                const lw::Bond* back = theirs != nullptr ? theirs->find(id.value) : nullptr;
+                // Пара считается один раз — у меньшего id.
+                mutual += back != nullptr && back->friendly() && id.value < bond.other ? 1 : 0;
+            }
+        }
+        lonely += hasFriend ? 0 : 1;
+    }
+    if (people == 0) {
+        return;
+    }
+    std::printf("relations: %.1f bonds per person (mean familiarity %.2f), friends %zu "
+                "(mutual pairs %zu), foes %zu, bonds with the dead %zu; no living friend %zu "
+                "of %zu\n",
+                static_cast<double>(bonds) / static_cast<double>(people),
+                bonds > 0 ? familiarity / static_cast<float>(bonds) : 0.0f, friends, mutual, foes,
+                gone, lonely, people);
+}
+
+// Память (этап 6.1), долг и обида (этап 6.2) у живых.
+void printMemories(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr auto kKinds = static_cast<std::size_t>(lw::MemoryKind::Count);
+    std::size_t byKind[kKinds] = {};
+    std::size_t people = 0;
+    std::size_t remembering = 0;
+    std::size_t memories = 0;
+    std::size_t debts = 0;
+    std::size_t grudges = 0;
+    float debt = 0.0f;
+    float grudge = 0.0f;
+    // Кто помнит больше всех (при равных — меньший id): его удобно открыть в
+    // инспекторе (living_world --select ID).
+    lw::EntityId richest = lw::kInvalidId;
+    std::size_t most = 0;
+    // Как узнал (этап 6.3): с ним самим, видел чужое, слышал.
+    std::size_t own = 0;
+    std::size_t witnessed = 0;
+    std::size_t heard = 0;
+    for (const auto [entity, id, person, memory] :
+         registry.view<const lw::Id, const lw::Person, const lw::Memories>().each()) {
+        ++people;
+        memories += memory.count;
+        remembering += memory.count > 0 ? 1 : 0;
+        if (memory.count > most || (memory.count == most && most > 0 && id.value < richest)) {
+            most = memory.count;
+            richest = id.value;
+        }
+        for (std::size_t i = 0; i < memory.count; ++i) {
+            const lw::Memory& item = memory.items[i];
+            ++byKind[static_cast<std::size_t>(item.kind)];
+            if (item.source != lw::kInvalidId) {
+                ++heard;
+            } else if (item.victim != lw::kInvalidId) {
+                ++witnessed;
+            } else {
+                ++own;
+            }
+        }
+        if (const auto* relations = registry.try_get<lw::Relations>(entity)) {
+            for (std::size_t i = 0; i < relations->count; ++i) {
+                const lw::Bond& bond = relations->bonds[i];
+                debts += bond.debt > 0.0f ? 1 : 0;
+                grudges += bond.grudge > 0.0f ? 1 : 0;
+                debt += bond.debt;
+                grudge += bond.grudge;
+            }
+        }
+    }
+    if (people == 0) {
+        return;
+    }
+    constexpr const char* kNames[] = {"saved",    "defended", "abandoned", "robbed",
+                                      "bereaved", "turned",   "expelled",  "helped",
+                                      "betrayed", "assaulted", "killed"};
+    static_assert(std::size(kNames) == kKinds);
+    std::printf("memories: %zu (%zu of %zu people remember something):", memories, remembering,
+                people);
+    for (std::size_t i = 0; i < kKinds; ++i) {
+        std::printf("%s %s %zu", i == 0 ? "" : ",", kNames[i], byKind[i]);
+    }
+    std::printf("\n  own %zu, witnessed %zu, heard %zu", own, witnessed, heard);
+    std::printf("; debts %zu (mean %.2f), grudges %zu (mean %.2f)", debts,
+                debts > 0 ? debt / static_cast<float>(debts) : 0.0f, grudges,
+                grudges > 0 ? grudge / static_cast<float>(grudges) : 0.0f);
+    if (richest != lw::kInvalidId) {
+        std::printf("; remembers most: #%llu (%zu)", static_cast<unsigned long long>(richest),
+                    most);
+    }
+    std::printf("\n");
+    // Репутация (этап 6.3): кого знают многие и любят меньше и больше всех.
+    lw::EntityId worst = lw::kInvalidId;
+    lw::EntityId best = lw::kInvalidId;
+    lw::Reputation worstReputation;
+    lw::Reputation bestReputation;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const lw::Reputation reputation = lw::reputationOf(world, id.value);
+        if (reputation.known < 3) {
+            continue;
+        }
+        if (worst == lw::kInvalidId || reputation.affinity < worstReputation.affinity) {
+            worst = id.value;
+            worstReputation = reputation;
+        }
+        if (best == lw::kInvalidId || reputation.affinity > bestReputation.affinity) {
+            best = id.value;
+            bestReputation = reputation;
+        }
+    }
+    if (worst != lw::kInvalidId) {
+        std::printf("  reputation (known by 3+): worst #%llu %+.2f (%d), best #%llu %+.2f (%d)\n",
+                    static_cast<unsigned long long>(worst), worstReputation.affinity,
+                    worstReputation.known, static_cast<unsigned long long>(best),
+                    bestReputation.affinity, bestReputation.known);
+    }
+}
+
+// Группы (этап 6.4): сколько, каких размеров, сколько людей в группах,
+// самая большая (её удобно открыть в окне: living_world --select ID).
+void printGroups(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::vector<std::size_t> sizes;
+    std::size_t members = 0;
+    std::size_t moved = 0;
+    lw::EntityId largest = lw::kInvalidId;
+    std::size_t most = 0;
+    for (const auto [entity, id, group] : registry.view<const lw::Id, const lw::Group>().each()) {
+        sizes.push_back(group.members.size());
+        members += group.members.size();
+        if (group.members.size() > most || (group.members.size() == most && id.value < largest)) {
+            most = group.members.size();
+            largest = id.value;
+        }
+    }
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        moved += person.formerHome != lw::kInvalidId ? 1 : 0;
+    }
+    if (sizes.empty()) {
+        std::printf("groups 0\n");
+        return;
+    }
+    std::sort(sizes.begin(), sizes.end());
+    std::printf("groups %zu (%zu people, %zu moved to a base), sizes:", sizes.size(), members, moved);
+    for (const std::size_t size : sizes) {
+        std::printf(" %zu", size);
+    }
+    std::printf("; largest #%llu\n", static_cast<unsigned long long>(largest));
 }
 
 // Восприятие: сколько контактов у существ и как они замечены.
@@ -314,6 +492,67 @@ void printCombat(const lw::World& world) {
     std::printf("  people died:");
     for (std::size_t i = 0; i < std::size(kCauses); ++i) {
         std::printf(" %s %zu%s", kCauses[i], causes[i], i + 1 < std::size(kCauses) ? "," : "\n");
+    }
+}
+
+// Социальные события этапа 6 по порядку — из них читаются истории: спасения,
+// предательства, месть, группы, убийства людьми.
+void printSocialLog(const lw::World& world) {
+    using K = lw::ChronicleKind;
+    const entt::registry& registry = world.registry();
+    const auto isPerson = [&](lw::EntityId id) {
+        // Убийца — человек: живой человек или тело человека (обратившийся
+        // помнит черты, но он зомби).
+        const entt::entity entity = world.find(id);
+        if (entity == entt::null || registry.all_of<lw::Zombie>(entity)) {
+            return false;
+        }
+        const auto* corpse = registry.try_get<lw::Corpse>(entity);
+        return corpse != nullptr ? corpse->kind == lw::CorpseKind::Human
+                                 : registry.all_of<lw::Person>(entity);
+    };
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        switch (event.kind) {
+        case K::SavedBy:
+        case K::DefendedBy:
+        case K::AbandonedBy:
+        case K::HeardOf:
+        case K::Reconciled:
+        case K::GroupFormed:
+        case K::LeftGroup:
+        case K::Expelled:
+        case K::LedGroup:
+        case K::GroupDisbanded:
+        case K::Shared:
+        case K::Traded:
+        case K::Stole:
+        case K::Deserted:
+        case K::BetrayedBy:
+        case K::AssaultedBy:
+        case K::Avenged:
+            break;
+        case K::Witnessed:
+            if (event.a != static_cast<std::int32_t>(lw::MemoryKind::Killed)) {
+                continue;
+            }
+            break;
+        case K::Died:
+            if (event.object == lw::kInvalidId || !isPerson(event.object)) {
+                continue;
+            }
+            break;
+        default:
+            continue;
+        }
+        const lw::CalendarTime time = lw::calendarAt(event.tick);
+        std::printf("  day %2d %02d:%02d %-15s #%llu -> #%llu a=%d b=%d", time.day, time.hour,
+                    time.minute, lw::chronicleKindName(event.kind),
+                    static_cast<unsigned long long>(event.subject),
+                    static_cast<unsigned long long>(event.object), event.a, event.b);
+        if (event.third != lw::kInvalidId) {
+            std::printf(" third=#%llu", static_cast<unsigned long long>(event.third));
+        }
+        std::printf("\n");
     }
 }
 
@@ -612,6 +851,8 @@ int main(int argc, char** argv) {
     int paths = 0;
     bool compare = false;
     bool daily = false;
+    bool social = false;
+    bool profile = false;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -628,6 +869,10 @@ int main(int argc, char** argv) {
             compare = true;
         } else if (std::strcmp(argv[i], "--daily") == 0) {
             daily = true;
+        } else if (std::strcmp(argv[i], "--social") == 0) {
+            social = true;
+        } else if (std::strcmp(argv[i], "--profile") == 0) {
+            profile = true;
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
@@ -638,7 +883,8 @@ int main(int argc, char** argv) {
             config.flocks = std::atoi(argv[++i]);
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
-                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily]\n");
+                        "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
+                        "[--social] [--profile]\n");
             return 2;
         }
     }
@@ -656,6 +902,7 @@ int main(int argc, char** argv) {
         benchmarkPaths(world, paths, compare);
     }
 
+    world.setProfiling(profile);
     const auto start = std::chrono::steady_clock::now();
     if (daily) {
         printDailyHeader();
@@ -677,14 +924,29 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printRelations(world);
+    printMemories(world);
+    printGroups(world);
     printPerception(world);
     printZombies(world);
     printAnimals(world);
     printCombat(world);
     printChronicle(world);
+    if (social) {
+        std::printf("social events:\n");
+        printSocialLog(world);
+    }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());
+    }
+    if (profile && elapsed.count() > 0.0) {
+        std::printf("profile (share of tick time):\n");
+        for (int phase = 0; phase < lw::World::kStepPhases; ++phase) {
+            const double seconds = world.stepPhaseSeconds(phase);
+            std::printf("  %-13s %7.3f s  %5.1f %%\n", lw::World::stepPhaseName(phase), seconds,
+                        100.0 * seconds / elapsed.count());
+        }
     }
     return 0;
 }

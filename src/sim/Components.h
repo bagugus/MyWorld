@@ -61,6 +61,11 @@ struct Person {
     // Дома, в укрытии: выполняет действие у своей двери (этап 5.2). Зомби его
     // не видят, а сам он от зомби не выбегает. Ставит Utility AI.
     bool indoors = false;
+    // Группа (этап 6.4); kInvalidId — сам по себе. Вступивший переезжает на
+    // базу группы: home — база, formerHome — свой прежний дом, куда он
+    // вернётся, если уйдёт; kInvalidId — не переезжал.
+    EntityId group = kInvalidId;
+    EntityId formerHome = kInvalidId;
 };
 
 // Нужды человека (NeedsSystem). Голод, жажда, усталость, страх, одиночество —
@@ -150,6 +155,10 @@ enum class Action : std::uint8_t {
     Fight,     // драться с зомби или стрелять в него (этап 5.4)
     Hunt,      // охотиться: выследить, подстрелить, разделать (этап 5.4)
     Treat,     // перевязаться или принять лекарство (этап 5.6)
+    Share,     // отнести еду, воду или лекарство тому, кто в беде (этап 6.5)
+    Trade,     // обменять лишнее на нужное с тем, кому доверяет
+    Steal,     // обокрасть того, кто доверяет, или сбежать из группы с запасами
+    Avenge,    // отомстить: найти обидчика и напасть на него
     Count
 };
 
@@ -172,7 +181,9 @@ struct Mind {
     Action action = Action::Idle;
     ActionPhase phase = ActionPhase::Perform;
     float score = 0.0f;               // оценка действия, когда его выбрали
-    EntityId target = kInvalidId;     // здание действия (Eat, Drink, Scavenge), если есть
+    // Цель действия: здание (Eat, Drink, Scavenge, Steal), человек (Socialize,
+    // Share, Trade, Avenge), зомби или зверь (Fight, Hunt); kInvalidId — нет.
+    EntityId target = kInvalidId;
     Cell spot;                        // клетка, где выполняется действие
     std::uint64_t until = 0;          // тик конца выполнения
     std::uint64_t nextThink = 0;      // тик следующего пересмотра решения
@@ -188,6 +199,119 @@ struct Mind {
     // Где замечал зомби: туда не ходят, оттуда отходят. Новое место вытесняет
     // то, что забудется раньше всех.
     Danger dangers[kDangerMemory] = {};
+};
+
+// Связь человека с другим человеком — его взгляд, не общий: у другого своя
+// связь в ответ, и она может быть другой (этап 6.2). Правила — sim/Relations.h.
+struct Bond {
+    // Отметки для летописи: событие пишется, когда отметка ставится, а снимается
+    // она с запасом — так колебание у порога не засоряет журнал.
+    static constexpr std::uint8_t kFriend = 1; // считает другом
+    static constexpr std::uint8_t kFoe = 2;    // невзлюбил
+
+    EntityId other = kInvalidId;
+    float familiarity = 0.0f; // знакомство 0..1: сколько времени провели рядом
+    float affinity = 0.0f;    // симпатия −1..1
+    float trust = 0.0f;       // доверие −1..1
+    // К чему тянется симпатия, когда они вместе: совместимость характеров,
+    // у соседей по дому — с надбавкой. Считается при знакомстве.
+    float chemistry = 0.0f;
+    std::uint64_t met = 0;    // тик знакомства
+    std::uint64_t seen = 0;   // тик, когда последний раз были вместе
+    std::uint8_t flags = 0;
+    // Долг 0..1: чем обязан другому — спас, заступился (этап 6.2).
+    float debt = 0.0f;
+    // Обида 0..1: что другой ему сделал — обокрал, бросил в беде (этап 6.2).
+    float grudge = 0.0f;
+
+    bool friendly() const { return (flags & kFriend) != 0; }
+    bool hostile() const { return (flags & kFoe) != 0; }
+};
+
+// Кого человек знает. Связи остаются и после смерти другого — память о нём.
+// Мест мало: новое знакомство вытесняет самое слабое, если оно почти забыто.
+struct Relations {
+    static constexpr std::size_t kMaxBonds = 16;
+
+    Bond bonds[kMaxBonds] = {};
+    std::uint8_t count = 0;
+
+    const Bond* find(EntityId id) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (bonds[i].other == id) {
+                return &bonds[i];
+            }
+        }
+        return nullptr;
+    }
+    Bond* find(EntityId id) {
+        return const_cast<Bond*>(static_cast<const Relations*>(this)->find(id));
+    }
+};
+
+// Что человек помнит о других (этап 6.1). victim — с кем это сделали:
+// kInvalidId — с ним самим (этап 6.3: можно помнить и чужие поступки).
+// Значения попадают в хеш и сохранения: новые добавлять только в конец (перед Count).
+enum class MemoryKind : std::uint8_t {
+    Saved,     // who убил зомби about, который напал на victim
+    Defended,  // who дрался с зомби about, который напал на victim
+    Abandoned, // who убежал, когда на victim напал зомби about
+    Robbed,    // who обыскивал дом about, где живёт victim
+    Bereaved,  // близкий who погиб; about — убийца, если есть
+    Turned,    // близкий who встал зомби
+    Expelled,  // вожак who изгнал victim из группы about (этап 6.4)
+    Helped,    // who поделился с victim едой, водой, лекарством (этап 6.5)
+    Betrayed,  // who, которому victim доверял, обокрал его дом about или сбежал из группы
+    Assaulted, // who напал на victim
+    Killed,    // who убил victim (только чужие: сам убитый не помнит)
+    Count
+};
+
+// Воспоминание: что случилось, с кем и когда, видел ли сам. Сила угасает со
+// временем; слабое забывается (sim/Memory.h).
+struct Memory {
+    MemoryKind kind = MemoryKind::Saved;
+    EntityId who = kInvalidId;    // о ком воспоминание: кто это сделал
+    EntityId victim = kInvalidId; // с кем; kInvalidId — с самим помнящим (этап 6.3)
+    EntityId about = kInvalidId;  // при чём: зомби, здание, убийца
+    EntityId source = kInvalidId; // кто рассказал; kInvalidId — видел сам (этап 6.3)
+    std::uint64_t tick = 0;       // когда случилось (повторилось — последний раз)
+    float strength = 0.0f;        // 0..1
+};
+
+// Память человека о значимых событиях с участием других. Мест мало: новое
+// воспоминание вытесняет самое слабое, если оно слабее нового.
+struct Memories {
+    static constexpr std::size_t kMaxMemories = 16;
+
+    Memory items[kMaxMemories] = {};
+    std::uint8_t count = 0;
+
+    // Воспоминание о том, что who сделал с victim (kInvalidId — с самим помнящим).
+    const Memory* find(MemoryKind kind, EntityId who, EntityId victim = kInvalidId) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (items[i].kind == kind && items[i].who == who && items[i].victim == victim) {
+                return &items[i];
+            }
+        }
+        return nullptr;
+    }
+    Memory* find(MemoryKind kind, EntityId who, EntityId victim = kInvalidId) {
+        return const_cast<Memory*>(static_cast<const Memories*>(this)->find(kind, who, victim));
+    }
+};
+
+// Группа людей (этап 6.4, GroupSystem): держатся вместе, живут на общей базе и
+// делят её запасы. Как и орда, не существо: позиции нет, в индекс не попадает.
+struct Group {
+    EntityId leader = kInvalidId;
+    std::vector<EntityId> members; // по возрастанию id, вожак тоже здесь
+    EntityId base = kInvalidId;    // общий дом — жилое здание; kInvalidId — нет
+    std::uint64_t formed = 0;      // тик, когда собралась
+
+    bool has(EntityId id) const {
+        return std::binary_search(members.begin(), members.end(), id);
+    }
 };
 
 // Органы чувств существа (PerceptionSystem). Есть у всех, кто воспринимает

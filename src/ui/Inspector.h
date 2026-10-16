@@ -43,6 +43,7 @@ private:
     void drawPerson(entt::entity entity);
     void drawZombie(entt::entity entity);
     void drawHorde(entt::entity entity);
+    void drawGroup(entt::entity entity);
     void drawAnimal(entt::entity entity);
     void drawFlock(entt::entity entity);
     void drawCorpse(entt::entity entity);
@@ -51,6 +52,10 @@ private:
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по
     // ссылке и выбор сменился.
     bool drawPerception(entt::entity entity);
+    // Кого человек знает и как к нему относится. false — щёлкнули по ссылке.
+    bool drawRelations(entt::entity entity);
+    // Что человек помнит о других. false — щёлкнули по ссылке.
+    bool drawMemories(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.

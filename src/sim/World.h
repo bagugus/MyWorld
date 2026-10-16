@@ -17,6 +17,7 @@
 #include <entt/entt.hpp>
 
 #include <cstddef>
+#include <array>
 #include <cstdint>
 #include <unordered_map>
 #include <vector>
@@ -63,6 +64,13 @@ public:
     // Продвигает мир ровно на один тик.
     void step();
 
+    // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
+    static constexpr int kStepPhases = 14;
+    static const char* stepPhaseName(int phase);
+    void setProfiling(bool enabled) { profiling_ = enabled; }
+    // Накопленные секунды на каждый шаг тика с включения замера.
+    double stepPhaseSeconds(int phase) const { return phaseSeconds_[phase]; }
+
     // Сущности создавать и удалять только здесь — так у каждой есть стабильный Id.
     entt::entity create();
     void destroy(entt::entity entity);
@@ -106,10 +114,10 @@ public:
     // Летопись: значимые события по id участников.
     Chronicle& chronicle() { return chronicle_; }
     const Chronicle& chronicle() const { return chronicle_; }
-    // Записать событие летописи в текущем тике.
+    // Записать событие летописи в текущем тике; third — третий участник.
     void record(ChronicleKind kind, EntityId subject, EntityId object = kInvalidId,
-                std::int32_t a = 0, std::int32_t b = 0) {
-        chronicle_.add({tick_, kind, subject, object, a, b});
+                std::int32_t a = 0, std::int32_t b = 0, EntityId third = kInvalidId) {
+        chronicle_.add({tick_, kind, subject, object, a, b, third});
     }
     // Разовые звуки последних тиков: выстрелы, крики (см. sim/Sound.h).
     const std::vector<Sound>& sounds() const { return sounds_; }
@@ -126,6 +134,8 @@ public:
     std::uint64_t stateHash() const;
 
 private:
+    bool profiling_ = false;
+    std::array<double, kStepPhases> phaseSeconds_{};
     // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 

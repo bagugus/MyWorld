@@ -1,6 +1,7 @@
 #include "sim/Population.h"
 
 #include "sim/Components.h"
+#include "sim/Relations.h"
 #include "sim/Traits.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
@@ -326,8 +327,11 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Weapon>(entity, startWeapon(gear));
         registry.emplace<Combat>(entity);
         registry.emplace<Wounds>(entity);
+        registry.emplace<Relations>(entity);
+        registry.emplace<Memories>(entity);
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
+    introduceNeighbours(world);
 }
 
 void spawnZombies(World& world, int count) {

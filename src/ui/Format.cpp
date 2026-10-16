@@ -33,7 +33,8 @@ const char* actionName(Action action) {
     constexpr const char* kNames[] = {"отдыхает", "спит",      "ест",    "пьёт",
                                       "ищет припасы", "собирает в лесу", "общается",
                                       "гуляет",   "уходит домой", "убегает", "дерётся",
-                                      "охотится", "перевязывается"};
+                                      "охотится", "перевязывается", "делится", "меняется",
+                                      "крадёт",   "мстит"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
     const auto index = static_cast<std::size_t>(action);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -86,6 +87,16 @@ const char* deathCauseName(DeathCause cause) {
 const char* corpseKindName(CorpseKind kind) {
     constexpr const char* kNames[] = {"человек", "зомби", "животное"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(CorpseKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* memoryKindName(MemoryKind kind) {
+    constexpr const char* kNames[] = {"спас от зомби",   "заступился",    "бросил в беде",
+                                      "обокрал дом",     "погиб",         "встал зомби",
+                                      "изгнал из группы", "помог",  "предал",
+                                      "напал",        "убил"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(MemoryKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
 }

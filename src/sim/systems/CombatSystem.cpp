@@ -1,6 +1,7 @@
 #include "sim/systems/CombatSystem.h"
 
 #include "sim/Death.h"
+#include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Weapons.h"
 #include "sim/World.h"
@@ -184,6 +185,13 @@ void updateCombat(World& world) {
                 world.record(ChronicleKind::Bitten, combat.target, id.value);
             }
             world.emitSound(at.x, at.y, kScreamLoudness, SoundKind::Scream, combat.target);
+            // Человек ударил человека (этап 6.5): нападение, заступничество или
+            // самооборона.
+            if (registry.all_of<Person>(entity) && !registry.all_of<Zombie>(entity)) {
+                witnessAssault(world, entity, target);
+            }
+            // Кто из близких рядом убежал, кто заступился (этап 6.1).
+            witnessAttack(world, target, id.value);
         } else if (auto* animal = registry.try_get<Animal>(target)) {
             animal->hurtAt = tick;
             animal->hurtBy = id.value;
@@ -195,9 +203,14 @@ void updateCombat(World& world) {
                 if (registry.all_of<Zombie>(target)) {
                     world.record(ChronicleKind::KilledZombie, id.value, combat.target,
                                  static_cast<std::int32_t>(weapon->kind));
+                    // Спас того, на кого зомби нападал (этап 6.1).
+                    witnessRescue(world, id.value, target);
                 } else if (const auto* animal = registry.try_get<Animal>(target)) {
                     world.record(ChronicleKind::Hunted, id.value, combat.target,
                                  static_cast<std::int32_t>(animal->kind));
+                } else if (person) {
+                    // Убил человека: спас другого, защищался или убил (этап 6.5).
+                    witnessKilling(world, entity, target);
                 }
             }
             deaths.push_back({target, DeathCause::Wounds, id.value});

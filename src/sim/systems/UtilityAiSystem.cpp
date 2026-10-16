@@ -2,10 +2,13 @@
 
 #include "sim/Calendar.h"
 #include "sim/Items.h"
+#include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Weapons.h"
 #include "sim/World.h"
+#include "sim/Relations.h"
+#include "sim/systems/GroupSystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -96,6 +99,9 @@ constexpr float kSocialScale = 800.0f;
 constexpr float kWaterSearch = 2000.0f;
 constexpr float kForageSearch = 1500.0f;
 constexpr float kCompanySearch = 500.0f;
+// К знакомым с симпатией не ниже kVisitAffinity идут дальше (этап 6.2).
+constexpr float kFriendSearch = 1500.0f;
+constexpr float kVisitAffinity = 0.2f;
 constexpr float kGatheringSearch = 2000.0f;
 // Дальше этого от дома ночью ложатся спать на месте.
 constexpr float kSleepHomeRange = 1500.0f;
@@ -106,6 +112,12 @@ constexpr float kScavengeWeight = 0.9f;
 constexpr float kScavengeWaterWeight = 0.5f; // за водой проще к реке
 constexpr float kForageWeight = 0.8f;
 constexpr float kSocializeWeight = 0.6f;
+// Теплота к человеку — множитель оценки общения: 1 + kFriendWarmth × симпатия ×
+// знакомство (незнакомец — 1, близкий друг — до 1,6), не ниже kMinWarmth.
+constexpr float kFriendWarmth = 0.6f;
+constexpr float kMinWarmth = 0.3f;
+// К товарищу по группе тянет ещё на столько (этап 6.4).
+constexpr float kGroupWarmth = 0.3f;
 constexpr float kIdleScore = 0.08f;
 constexpr float kIdleHomeBonus = 0.06f; // дома отдыхать приятнее
 constexpr float kIdleFatigue = 0.15f;   // уставший охотнее присядет
@@ -163,6 +175,11 @@ constexpr float kResolveBravery = 0.6f;
 constexpr float kResolveAggression = 0.3f;
 constexpr float kCrowdPenalty = 0.5f;
 constexpr float kFightWounded = 0.6f; // при нуле здоровья решимости меньше на столько
+// Зомби напал на товарища по группе или близкого (этап 6.4) — драться охотнее:
+// оценка × (1 + kDefendBonus × верность), верность — kGroupLoyalty у товарища
+// плюс близость, не больше 1.
+constexpr float kDefendBonus = 0.8f;
+constexpr float kGroupLoyalty = 0.5f;
 // Бой держится, пока угроза есть; затянулся без неё — кончился.
 constexpr int kFightMinutes = 2;
 
@@ -176,8 +193,99 @@ constexpr int kButcherMinutes = 10;   // разделать тушу
 constexpr float kStalkPace = 0.8f;    // крадётся: тише шаги
 constexpr float kTrackRegoal = 12.0f; // зверь ушёл от цели пути дальше — идти за ним заново
 
+// --- Социальные действия (этап 6.5) --------------------------------------
+// Совесть: жильё знакомых (не недругов) и товарищей не обыскивают, порядочный
+// (альтруизм не ниже kHonestAltruism) не трогает и жильё незнакомцев;
+// отчаявшийся (голод не ниже kDesperate) — любое.
+constexpr float kHonestAltruism = 0.6f;
+constexpr float kDesperate = 0.9f;
+// Поделиться с тем, кто голоден или хочет пить (не меньше kNeedyLevel), ранен
+// или плох, а у него нет ни при себе, ни дома, — если он дорог: близкий (не
+// меньше kCloseEnough), товарищ по группе или тот, кому должен (долг не меньше
+// kOweEnough). Оценка — kShareWeight × нужда × щедрость × near(d, kShareScale),
+// щедрость — kGenerosityBase + альтруизм и долг, близость, товарищ, минус жадность.
+constexpr float kShareWeight = 0.8f;
+constexpr float kShareRange = 1000.0f;
+constexpr float kShareScale = 600.0f;
+constexpr float kNeedyLevel = 0.5f;
+constexpr float kOweEnough = 0.1f;
+constexpr float kGenerosityBase = 0.2f;
+constexpr int kShareMinutes = 5;
+// Отдал тому, кому был должен, — долг меньше на столько.
+constexpr float kRepaid = 0.3f;
+// Встреча с человеком: ближе kMeetRange — отдать или меняться; на руки — не
+// дальше kHandRange; ушёл от места встречи дальше max(kFollowRegoal, 10 %
+// расстояния) — путь заново.
+constexpr float kMeetRange = 4.0f;
+constexpr float kHandRange = 12.0f;
+constexpr float kFollowRegoal = 8.0f;
+// Обмен — с тем, кого знает (знакомство не меньше kTradeFamiliarity) и кому
+// доверяет (не меньше kTradeTrust), до kTradeRange. Оценка — kTradeWeight ×
+// нужда × (0,6 + 0,4 × доверие) × near(d, kTradeScale): сделка с тем, у кого
+// нужное точно есть, не хуже обыска наугад. Честная сделка —
+// шаг навстречу: доверие и симпатия обоих растут.
+constexpr float kTradeWeight = 1.3f;
+constexpr float kTradeScale = 1000.0f;
+constexpr float kTradeRange = 800.0f;
+constexpr float kTradeFamiliarity = 0.3f;
+constexpr float kTradeTrust = 0.1f;
+constexpr int kTradeMinutes = 10;
+constexpr float kTradeTrustGain = 0.05f;
+constexpr float kTradeAffinityGain = 0.03f;
+// Хозяин дома меняется и домашними запасами, оставив домашним столько еды и
+// воды; бинтов и лекарств хочет про запас — меньше стольких.
+constexpr int kTradeHomeKeep = 4;
+constexpr int kTradeWantBandages = 3;
+constexpr int kTradeWantMedicine = 2;
+// Предательство — обокрасть дом того, кто доверяет (kBetrayTrust), пока его
+// нет или он спит. Оценка — kStealWeight × желание × (0,5 + подлость) × near(d),
+// подлость — жадность − 0,5 × альтруизм − kStealConscience − kStealLoyalty ×
+// знакомство × симпатия (к кому нет тёплых чувств, того не жалко, как бы тот
+// ни доверял). Желание — голод, если еды нет, иначе kGreedTemptation × жадность.
+constexpr float kStealWeight = 0.9f;
+constexpr float kStealConscience = 0.1f;
+constexpr float kStealLoyalty = 0.6f;
+constexpr float kGreedTemptation = 0.35f;
+constexpr int kStealMinFood = 3;
+constexpr int kStealMinutes = 15;
+// Сбежать из группы с её запасами: вожак не мил (симпатия ниже
+// kDesertAffinity), на базе есть что взять; верность товарищам — kGroupFaith.
+constexpr float kDesertAffinity = 0.1f;
+constexpr int kDesertMinFood = 4;
+constexpr float kDesertTemptation = 0.6f;
+constexpr float kGroupFaith = 0.3f;
+// Месть — обидчику, к которому обида не меньше kAvengeGrudge, живому и не
+// дальше kAvengeRange. Оценка — kAvengeWeight × ярость × нрав ×
+// (1 − 0,5 × альтруизм) × смелость × near(d, kAvengeScale); ярость — обида /
+// kAvengeRage, не больше 1 (на пороге — уже заметна), нрав — 0,2 +
+// 0,8 × агрессия, смелость — от смелости и того, чьё оружие сильнее.
+constexpr float kAvengeWeight = 1.0f;
+constexpr float kAvengeGrudge = 0.35f;
+constexpr float kAvengeRage = 0.7f;
+constexpr float kAvengeRange = 1500.0f;
+constexpr float kAvengeScale = 1000.0f;
+constexpr float kAvengeMinHealth = 0.6f;   // раненый не мстит
+constexpr float kAvengeQuitHealth = 0.35f; // сам изранен — бросает
+constexpr int kAvengeMinutes = 120;        // сколько искать
+constexpr float kAvengePace = 1.2f;        // идёт быстрым шагом
+// Избил (здоровье обидчика не выше kBeatenHealth) — отомстил, если не хотел
+// убить; хотел (обида × (0,5 + агрессия) не меньше kMurderous) — бьёт до смерти.
+constexpr float kBeatenHealth = 0.5f;
+constexpr float kMurderous = 0.9f;
+// Отомстив, обида уходит: избил — остаётся kRelief, убил — ничего. Не вышло
+// (убежал, не нашёл) — остаётся kFrustration: остывает понемногу.
+constexpr float kRelief = 0.4f;
+constexpr float kFrustration = 0.85f;
+// Обидчик убегает дальше этого — догонять бесполезно, метры.
+constexpr float kAvengeLostRange = 30.0f;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
+}
+
+// Хочет ли мститель убить обидчика: обида × (0,5 + агрессия) не меньше kMurderous.
+bool murderous(float grudge, float aggression) {
+    return grudge * (0.5f + aggression) >= kMurderous;
 }
 
 float clamp01(float value) {
@@ -251,6 +359,10 @@ struct Context {
     Weapon weapon{};
     // Кровотечение (этап 5.6: перевязка).
     float bleeding = 0.0f;
+    // Кого знает (этап 6.2); nullptr — никого.
+    const Relations* relations = nullptr;
+    // Группа (этап 6.4); kInvalidId — сам по себе.
+    EntityId group = kInvalidId;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -284,6 +396,8 @@ Context makeContext(const World& world, entt::entity entity) {
     if (const auto* wounds = registry.try_get<Wounds>(entity)) {
         ctx.bleeding = wounds->bleeding;
     }
+    ctx.relations = registry.try_get<Relations>(entity);
+    ctx.group = person.group;
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -521,6 +635,40 @@ Option evalForage(const Context& ctx) {
     return {need * nearness(d, kForageScale), *spot, kInvalidId};
 }
 
+// Товарищ ли other по группе (этап 6.4).
+bool groupMate(const Context& ctx, EntityId other) {
+    if (ctx.group == kInvalidId) {
+        return false;
+    }
+    const entt::entity entity = ctx.world.find(other);
+    const auto* person = entity != entt::null ? ctx.world.registry().try_get<Person>(entity) : nullptr;
+    return person != nullptr && person->group == ctx.group;
+}
+
+// Насколько тянет к человеку: незнакомец — 1, друг — больше, неприятный —
+// меньше; недруг — 0, к нему не идут. К товарищу по группе — ещё теплее.
+float warmth(const Context& ctx, EntityId other) {
+    const float mate = groupMate(ctx, other) ? kGroupWarmth : 0.0f;
+    const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(other) : nullptr;
+    if (bond == nullptr) {
+        return 1.0f + mate;
+    }
+    if (bond->hostile()) {
+        return 0.0f;
+    }
+    return std::max(kMinWarmth, 1.0f + kFriendWarmth * bond->affinity * bond->familiarity) + mate;
+}
+
+// Насколько человек верен other — для заступничества: товарищ по группе и
+// близость, 0..1.
+float loyaltyTo(const Context& ctx, EntityId other) {
+    const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(other) : nullptr;
+    const float close = bond != nullptr && !bond->hostile() ? closeness(*bond) : 0.0f;
+    return std::min(1.0f, close + (groupMate(ctx, other) ? kGroupLoyalty : 0.0f));
+}
+
+// К людям: к другу или приятелю (их ищут дальше), к ближайшему, кто не спит,
+// а никого рядом — на площадь своего поселения. Недругов обходят.
 Option evalSocialize(const Context& ctx) {
     if (ctx.night) {
         return {};
@@ -533,15 +681,38 @@ Option evalSocialize(const Context& ctx) {
     }
     const World& world = ctx.world;
     const entt::registry& registry = world.registry();
-    // К ближайшему, кто не спит; никого рядом — на площадь своего поселения.
+    const auto awake = [&registry](entt::entity entity) {
+        const Person* person = registry.try_get<Person>(entity);
+        return person != nullptr && !person->asleep;
+    };
+    Option best;
+    if (ctx.relations != nullptr) {
+        for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+            const Bond& bond = ctx.relations->bonds[i];
+            const entt::entity other = world.find(bond.other);
+            if (bond.affinity < kVisitAffinity || other == entt::null || !awake(other)) {
+                continue;
+            }
+            const Position& at = registry.get<Position>(other);
+            const float d = distance(ctx.x, ctx.y, at.x, at.y);
+            if (d <= kFriendSearch) {
+                best = better(best, {need * warmth(ctx, bond.other) * nearness(d, kSocialScale),
+                                     Map::cellAt(at.x, at.y), bond.other});
+            }
+        }
+    }
     const auto other = world.spatial().nearest(
         ctx.x, ctx.y, kCompanySearch, [&](const SpatialHit& hit) {
-            const Person* person = registry.try_get<Person>(hit.entity);
-            return hit.id != ctx.id && person != nullptr && !person->asleep;
+            return hit.id != ctx.id && awake(hit.entity) && warmth(ctx, hit.id) > 0.0f;
         });
     if (other) {
         const float d = std::sqrt(other->distanceSq);
-        return {need * nearness(d, kSocialScale), Map::cellAt(other->x, other->y), kInvalidId};
+        best = better(best, {need * warmth(ctx, other->id) * nearness(d, kSocialScale),
+                             Map::cellAt(other->x, other->y), other->id});
+    }
+    // Площадь — если идти не к кому: пустая площадь рядом не лучше друга вдали.
+    if (best.score > 0.0f) {
+        return best;
     }
     if (const auto* settlement = world.places().settlement(ctx.settlement)) {
         const float d = distance(ctx.x, ctx.y, settlement->x, settlement->y);
@@ -568,9 +739,10 @@ Option evalGoHome(const Context& ctx) {
     return {score, ctx.homeDoor, ctx.homeId};
 }
 
-// Куда бежать, выберется при выполнении. Дома не бегут, а прячутся.
+// Куда бежать, выберется при выполнении. Дома не бегут, а прячутся — разве
+// что бьёт человек: от него за дверью не укрыться (этап 6.5).
 Option evalFlee(const Context& ctx) {
-    if (ctx.person.indoors) {
+    if (ctx.person.indoors && ctx.threat.assailant == kInvalidId) {
         return {};
     }
     const float timidity = kFleeBase - kFleeBravery * ctx.traits.bravery;
@@ -585,11 +757,12 @@ Option evalFlee(const Context& ctx) {
     return {};
 }
 
-// Драться с ближайшим зомби: с оружием, смело и против одного — охотнее.
-// Дома не дерутся, а прячутся.
+// Драться с ближайшим зомби (или человеком, который бьёт его или того, кто
+// дорог, — этап 6.5): с оружием, смело и против одного — охотнее. Дома от
+// зомби не дерутся, а прячутся.
 Option evalFight(const Context& ctx) {
-    if (ctx.person.indoors || ctx.threat.nearest == kInvalidId ||
-        ctx.threat.level < kFleeMinThreat) {
+    if ((ctx.person.indoors && ctx.threat.assailant == kInvalidId) ||
+        ctx.threat.nearest == kInvalidId || ctx.threat.level < kFleeMinThreat) {
         return {};
     }
     const Traits& traits = ctx.traits;
@@ -597,8 +770,24 @@ Option evalFight(const Context& ctx) {
                           kResolveAggression * traits.aggression;
     const float healthy = 1.0f - kFightWounded * (1.0f - ctx.needs.health);
     const float crowd = 1.0f + kCrowdPenalty * static_cast<float>(ctx.threat.count - 1);
-    const float score = ctx.threat.level * (kFightBase + weaponPower(ctx.weapon)) * resolve *
-                        healthy / crowd;
+    float score = ctx.threat.level * (kFightBase + weaponPower(ctx.weapon)) * resolve *
+                  healthy / crowd;
+    // Зомби напал на своего — заступиться (этап 6.4).
+    const entt::registry& registry = ctx.world.registry();
+    if (const entt::entity foe = ctx.world.find(ctx.threat.nearest); foe != entt::null) {
+        EntityId victim = kInvalidId;
+        if (const auto* zombie = registry.try_get<Zombie>(foe); zombie != nullptr &&
+            zombie->state == ZombieState::Chase) {
+            victim = zombie->target;
+        }
+        if (const auto* combat = registry.try_get<Combat>(foe);
+            victim == kInvalidId && combat != nullptr) {
+            victim = combat->target;
+        }
+        if (victim != kInvalidId && victim != ctx.id) {
+            score *= 1.0f + kDefendBonus * loyaltyTo(ctx, victim);
+        }
+    }
     return {score, ctx.cell, ctx.threat.nearest};
 }
 
@@ -642,6 +831,453 @@ Option evalTreat(const Context& ctx) {
     return {};
 }
 
+// --- Социальные действия (этап 6.5) ------------------------------------------
+
+// Живой человек с таким id; entt::null — нет.
+entt::entity personAt(const World& world, EntityId id) {
+    const entt::entity entity = world.find(id);
+    return entity != entt::null && world.registry().all_of<Person>(entity) ? entity
+                                                                           : entt::entity{entt::null};
+}
+
+// Запасы в доме человека; nullptr — дома нет.
+const Inventory* homeStock(const World& world, entt::entity person) {
+    const entt::entity home = world.find(world.registry().get<Person>(person).home);
+    return home != entt::null ? world.registry().try_get<Inventory>(home) : nullptr;
+}
+
+// Подарок: что дать, сколько и насколько это нужно получателю (0..1).
+// ItemKind::Food — еда вообще: при передаче сначала мясо (портится).
+struct Gift {
+    ItemKind kind = ItemKind::Count;
+    int count = 0;
+    float need = 0.0f;
+    bool fromHome = false; // своего при себе нет — взять из домашних запасов (стоит у двери)
+};
+
+// Сколько вида kind человек (ctx) может отдать из того, что несёт, не обделив себя.
+int spareCarried(const Context& ctx, ItemKind kind) {
+    switch (kind) {
+    case ItemKind::Food:
+        return ctx.carry.food() - (ctx.needs.hunger > 0.6f ? 1 : 0);
+    case ItemKind::Water:
+        return ctx.carry.count(ItemKind::Water) - (ctx.needs.thirst > 0.6f ? 1 : 0);
+    case ItemKind::Bandage:
+        return ctx.carry.count(ItemKind::Bandage) - (ctx.bleeding > kTreatBleeding ? 1 : 0);
+    case ItemKind::Medicine:
+        return ctx.carry.count(ItemKind::Medicine) - (ctx.needs.health < kMedicineBelow ? 1 : 0);
+    default:
+        break;
+    }
+    return 0;
+}
+
+// Сколько еды или воды можно взять из дома, оставив себе две порции; только у двери.
+int spareAtHome(const Context& ctx, ItemKind kind) {
+    if (!ctx.atHome || ctx.homeSupplies == nullptr) {
+        return 0;
+    }
+    if (kind == ItemKind::Food) {
+        return ctx.homeSupplies->food() - 2;
+    }
+    return kind == ItemKind::Water ? ctx.homeSupplies->count(ItemKind::Water) - 2 : 0;
+}
+
+// Что ctx может дать receiver: самое нужное тому из того, что у него есть.
+Gift giftFor(const Context& ctx, entt::entity receiver) {
+    const entt::registry& registry = ctx.world.registry();
+    const Needs* needs = registry.try_get<Needs>(receiver);
+    const Inventory* carry = registry.try_get<Inventory>(receiver);
+    if (needs == nullptr || carry == nullptr) {
+        return {};
+    }
+    const Inventory* stock = homeStock(ctx.world, receiver);
+    const auto* wounds = registry.try_get<Wounds>(receiver);
+    Gift best;
+    const auto consider = [&](ItemKind kind, int wanted, float need) {
+        if (need <= best.need) {
+            return;
+        }
+        const int carried = spareCarried(ctx, kind);
+        const int stored = carried > 0 ? 0 : spareAtHome(ctx, kind);
+        const int count = std::min(wanted, std::max(carried, stored));
+        if (count > 0) {
+            best = {kind, count, need, carried <= 0};
+        }
+    };
+    if (needs->hunger >= kNeedyLevel && carry->food() == 0 && (stock == nullptr || stock->food() == 0)) {
+        consider(ItemKind::Food, 2, urge(needs->hunger, kNeedyLevel));
+    }
+    if (needs->thirst >= kNeedyLevel && carry->count(ItemKind::Water) == 0 &&
+        (stock == nullptr || stock->count(ItemKind::Water) == 0)) {
+        consider(ItemKind::Water, 2, urge(needs->thirst, kNeedyLevel));
+    }
+    if (wounds != nullptr && wounds->bleeding > kTreatBleeding && carry->count(ItemKind::Bandage) == 0) {
+        consider(ItemKind::Bandage, 1, std::min(1.0f, 0.45f + 2.0f * wounds->bleeding));
+    }
+    if (needs->health < kMedicineBelow && carry->count(ItemKind::Medicine) == 0) {
+        consider(ItemKind::Medicine, 1, 0.6f * (1.0f - needs->health));
+    }
+    return best;
+}
+
+// Поделиться с тем, кто дорог и в беде: отнести ему еду, воду, бинт, лекарство.
+Option evalShare(const Context& ctx) {
+    if (ctx.relations == nullptr || ctx.night) {
+        return {};
+    }
+    const entt::registry& registry = ctx.world.registry();
+    const Traits& traits = ctx.traits;
+    const float kindness = kGenerosityBase + 0.6f * traits.altruism - 0.3f * traits.greed;
+    Option best;
+    for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+        const Bond& bond = ctx.relations->bonds[i];
+        if (bond.hostile()) {
+            continue;
+        }
+        const bool mate = groupMate(ctx, bond.other);
+        const float close = closeness(bond);
+        if (!mate && close < kCloseEnough && bond.debt < kOweEnough) {
+            continue;
+        }
+        const entt::entity other = personAt(ctx.world, bond.other);
+        if (other == entt::null) {
+            continue;
+        }
+        const Position& at = registry.get<Position>(other);
+        const float d = distance(ctx.x, ctx.y, at.x, at.y);
+        if (d > kShareRange) {
+            continue;
+        }
+        const Gift gift = giftFor(ctx, other);
+        if (gift.count == 0) {
+            continue;
+        }
+        const float generosity = std::clamp(
+            kindness + bond.debt + 0.5f * close + (mate ? kGroupFaith : 0.0f), 0.0f, 1.2f);
+        best = better(best, {kShareWeight * gift.need * generosity * nearness(d, kShareScale),
+                             Map::cellAt(at.x, at.y), bond.other});
+    }
+    return best;
+}
+
+// Ценность предмета в порциях еды — для обмена.
+float itemValue(ItemKind kind) {
+    switch (kind) {
+    case ItemKind::Food:
+        return 1.0f;
+    case ItemKind::Water:
+    case ItemKind::Meat:
+        return 0.8f;
+    case ItemKind::Bandage:
+        return 1.5f;
+    case ItemKind::Medicine:
+        return 3.0f;
+    case ItemKind::PistolAmmo:
+        return 0.25f;
+    case ItemKind::ShotgunShells:
+        return 0.35f;
+    case ItemKind::RifleAmmo:
+        return 0.4f;
+    case ItemKind::Knife:
+        return 2.0f;
+    case ItemKind::Axe:
+        return 3.0f;
+    case ItemKind::Pistol:
+        return 8.0f;
+    case ItemKind::Shotgun:
+        return 10.0f;
+    case ItemKind::Rifle:
+        return 12.0f;
+    case ItemKind::Count:
+        break;
+    }
+    return 0.0f;
+}
+
+// Есть ли у человека ружьё под эти патроны — в руках или в инвентаре.
+bool ownsGunFor(const Weapon& weapon, const Inventory& carry, ItemKind ammo) {
+    for (const WeaponKind kind : {WeaponKind::Pistol, WeaponKind::Shotgun, WeaponKind::Rifle}) {
+        if (ammoFor(kind) == ammo && (weapon.kind == kind || carry.count(itemOf(kind)) > 0)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Домашние запасы, из которых человек меняется: только когда он дома, у своей
+// двери; иначе nullptr — меняется тем, что при себе.
+const Inventory* tradeHome(const World& world, entt::entity person) {
+    return world.registry().get<Person>(person).indoors ? homeStock(world, person) : nullptr;
+}
+
+// Сколько вида kind человек отдаст в обмен — сверх того, что оставит себе. home
+// — домашние запасы (tradeHome): из дома отдаёт, оставив домашним kTradeHomeKeep
+// еды и воды.
+int spareFor(const entt::registry& registry, entt::entity person, ItemKind kind,
+             const Inventory* home = nullptr) {
+    const Inventory& carry = registry.get<Inventory>(person);
+    const Weapon& weapon = registry.get<Weapon>(person);
+    const int count = carry.count(kind) + (home != nullptr ? home->count(kind) : 0);
+    switch (kind) {
+    case ItemKind::Food:
+    case ItemKind::Meat:
+    case ItemKind::Water:
+        return count - (home != nullptr ? kTradeHomeKeep : 2);
+    case ItemKind::Bandage:
+    case ItemKind::Medicine:
+        return count - 1;
+    case ItemKind::PistolAmmo:
+    case ItemKind::ShotgunShells:
+    case ItemKind::RifleAmmo:
+        return ownsGunFor(weapon, carry, kind) ? 0 : count;
+    default:
+        return count; // оружие в инвентаре — лишнее: в руках другое
+    }
+}
+
+// Нужен ли человеку предмет kind: того, что нужно, мало или нет (бинтов и
+// лекарств хочется про запас — меньше kTradeWantBandages и kTradeWantMedicine),
+// оружие — сильнее своего. home — домашние запасы (tradeHome): считаются вместе
+// с тем, что при себе.
+bool welcomes(const entt::registry& registry, entt::entity person, ItemKind kind,
+              const Inventory* home = nullptr) {
+    const Inventory& carry = registry.get<Inventory>(person);
+    const Weapon& weapon = registry.get<Weapon>(person);
+    const auto total = [&](ItemKind item) {
+        return carry.count(item) + (home != nullptr ? home->count(item) : 0);
+    };
+    switch (kind) {
+    case ItemKind::Food:
+    case ItemKind::Meat:
+        return carry.food() + (home != nullptr ? home->food() : 0) < 2;
+    case ItemKind::Water:
+        return total(ItemKind::Water) < 2;
+    case ItemKind::Bandage:
+        return total(kind) < kTradeWantBandages;
+    case ItemKind::Medicine:
+        return total(kind) < kTradeWantMedicine;
+    case ItemKind::PistolAmmo:
+    case ItemKind::ShotgunShells:
+    case ItemKind::RifleAmmo:
+        return ownsGunFor(weapon, carry, kind) && weapon.ammo + carry.count(kind) < 15;
+    default:
+        break;
+    }
+    const WeaponKind offered = weaponOf(kind);
+    if (offered == WeaponKind::Fists) {
+        return false;
+    }
+    const ItemKind ammo = ammoFor(offered);
+    const int rounds = ammo != ItemKind::Count ? carry.count(ammo) : 0;
+    return weaponPower(Weapon{offered, static_cast<std::uint16_t>(rounds)}) > weaponPower(weapon);
+}
+
+// Чего человеку не хватает больше всего: вид, сколько и как сильно (0..1).
+// ItemKind::Food — еда вообще (припасы или мясо).
+struct Want {
+    ItemKind kind = ItemKind::Count;
+    int count = 0;
+    float need = 0.0f;
+};
+
+Want wantOf(const Context& ctx) {
+    Want want;
+    const auto consider = [&](ItemKind kind, int count, float need) {
+        if (need > want.need) {
+            want = {kind, count, need};
+        }
+    };
+    const bool homeFood = ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0;
+    const bool homeWater = ctx.homeSupplies != nullptr && ctx.homeSupplies->count(ItemKind::Water) > 0;
+    if (ctx.carry.food() == 0 && !homeFood) {
+        consider(ItemKind::Food, 2, urge(ctx.needs.hunger, needStart(ctx)));
+    }
+    if (ctx.carry.count(ItemKind::Water) == 0 && !homeWater) {
+        consider(ItemKind::Water, 2, urge(ctx.needs.thirst, needStart(ctx)));
+    }
+    if (ctx.needs.health < kMedicineBelow && ctx.carry.count(ItemKind::Medicine) == 0) {
+        consider(ItemKind::Medicine, 1, 0.6f * (1.0f - ctx.needs.health));
+    }
+    if (ctx.bleeding > kTreatBleeding && ctx.carry.count(ItemKind::Bandage) == 0) {
+        consider(ItemKind::Bandage, 1, std::min(1.0f, 0.45f + 2.0f * ctx.bleeding));
+    }
+    if (const ItemKind ammo = ammoFor(ctx.weapon.kind);
+        ammo != ItemKind::Count && ctx.weapon.ammo + ctx.carry.count(ammo) < 3) {
+        consider(ammo, 8, 0.3f);
+    }
+    return want;
+}
+
+// Что other даст на нужду want: еду — сначала припасы, потом мясо. Count — нечего.
+ItemKind provides(const World& world, entt::entity other, ItemKind want) {
+    const entt::registry& registry = world.registry();
+    const Inventory* home = tradeHome(world, other);
+    if (want == ItemKind::Food) {
+        return spareFor(registry, other, ItemKind::Food, home) > 0   ? ItemKind::Food
+               : spareFor(registry, other, ItemKind::Meat, home) > 0 ? ItemKind::Meat
+                                                                    : ItemKind::Count;
+    }
+    return spareFor(registry, other, want, home) > 0 ? want : ItemKind::Count;
+}
+
+// Что предложить other за want: из своего лишнего — самое ценное, что тому
+// нужно. Count — нечего.
+ItemKind offerFor(const World& world, entt::entity self, entt::entity other, ItemKind want) {
+    const entt::registry& registry = world.registry();
+    const Inventory* home = tradeHome(world, other);
+    ItemKind best = ItemKind::Count;
+    for (std::size_t i = 0; i < kItemKinds; ++i) {
+        const auto kind = static_cast<ItemKind>(i);
+        const bool same = kind == want || (want == ItemKind::Food && kind == ItemKind::Meat);
+        if (same || spareFor(registry, self, kind) <= 0 || !welcomes(registry, other, kind, home)) {
+            continue;
+        }
+        if (best == ItemKind::Count || itemValue(kind) > itemValue(best)) {
+            best = kind;
+        }
+    }
+    return best;
+}
+
+// Обменять лишнее на нужное с тем, кому доверяет.
+Option evalTrade(const Context& ctx) {
+    if (ctx.relations == nullptr || ctx.night) {
+        return {};
+    }
+    const Want want = wantOf(ctx);
+    if (want.need <= 0.0f) {
+        return {};
+    }
+    const entt::registry& registry = ctx.world.registry();
+    Option best;
+    for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+        const Bond& bond = ctx.relations->bonds[i];
+        if (bond.hostile() || bond.familiarity < kTradeFamiliarity || bond.trust < kTradeTrust) {
+            continue;
+        }
+        const entt::entity other = personAt(ctx.world, bond.other);
+        if (other == entt::null || registry.get<Person>(other).asleep) {
+            continue;
+        }
+        const Position& at = registry.get<Position>(other);
+        const float d = distance(ctx.x, ctx.y, at.x, at.y);
+        if (d > kTradeRange || provides(ctx.world, other, want.kind) == ItemKind::Count ||
+            offerFor(ctx.world, ctx.entity, other, want.kind) == ItemKind::Count) {
+            continue;
+        }
+        best = better(best, {kTradeWeight * want.need * (0.6f + 0.4f * bond.trust) *
+                                 nearness(d, kTradeScale),
+                             Map::cellAt(at.x, at.y), bond.other});
+    }
+    return best;
+}
+
+// Предательство: обокрасть дом того, кто доверяет, пока его нет или он спит;
+// или сбежать из группы, прихватив запасы базы, если вожак не мил.
+Option evalSteal(const Context& ctx) {
+    if (ctx.relations == nullptr) {
+        return {};
+    }
+    const Traits& traits = ctx.traits;
+    const float wickedness = traits.greed - 0.5f * traits.altruism - kStealConscience;
+    if (wickedness <= 0.0f) {
+        return {};
+    }
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    const bool fed = ctx.carry.food() > 0 || (ctx.homeSupplies != nullptr && ctx.homeSupplies->food() > 0);
+    const float desire =
+        std::max(fed ? 0.0f : urge(ctx.needs.hunger, needStart(ctx)), kGreedTemptation * traits.greed);
+    Option best;
+    for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+        const Bond& bond = ctx.relations->bonds[i];
+        const entt::entity other = personAt(world, bond.other);
+        if (other == entt::null || groupMate(ctx, bond.other)) {
+            continue; // своих по группе — только сбежав (ниже)
+        }
+        const auto* theirs = registry.try_get<Relations>(other);
+        const Bond* back = theirs != nullptr ? theirs->find(ctx.id) : nullptr;
+        if (back == nullptr || back->trust < kBetrayTrust) {
+            continue;
+        }
+        const Person& owner = registry.get<Person>(other);
+        const entt::entity home = world.find(owner.home);
+        if (home == entt::null || owner.home == ctx.homeId || (owner.indoors && !owner.asleep)) {
+            continue; // хозяин дома и не спит
+        }
+        const auto* stock = registry.try_get<Inventory>(home);
+        const float wicked =
+            wickedness - kStealLoyalty * bond.familiarity * std::max(0.0f, bond.affinity);
+        if (stock == nullptr || stock->food() < kStealMinFood || wicked <= 0.0f) {
+            continue;
+        }
+        const Cell door = registry.get<Building>(home).door;
+        const float d = distance(ctx.x, ctx.y, cellX(door), cellY(door));
+        best = better(best,
+                      {kStealWeight * desire * (0.5f + wicked) * nearness(d, kNearScale), door, owner.home});
+    }
+    // Сбежать из группы с запасами базы.
+    if (const entt::entity band = world.find(ctx.group);
+        band != entt::null && ctx.homeSupplies != nullptr &&
+        ctx.homeSupplies->food() >= kDesertMinFood) {
+        const EntityId leader = registry.get<Group>(band).leader;
+        const Bond* toLeader = ctx.relations->find(leader);
+        const float liking = toLeader != nullptr ? toLeader->affinity : 0.0f;
+        const float wicked = wickedness - kGroupFaith - std::max(0.0f, liking);
+        if (leader != ctx.id && liking < kDesertAffinity && wicked > 0.0f) {
+            best = better(best, {kStealWeight * kDesertTemptation * traits.greed * wicked *
+                                     nearness(ctx.homeDistance, kNearScale),
+                                 ctx.homeDoor, ctx.homeId});
+        }
+    }
+    return best;
+}
+
+// Месть: обидчик жив и недалеко, обида сильна, нрав горячий, а сам не трус и
+// не ранен.
+Option evalAvenge(const Context& ctx) {
+    if (ctx.relations == nullptr || ctx.needs.health < kAvengeMinHealth) {
+        return {};
+    }
+    const entt::registry& registry = ctx.world.registry();
+    const Traits& traits = ctx.traits;
+    const float temper = (0.2f + 0.8f * traits.aggression) * (1.0f - 0.5f * traits.altruism);
+    Option best;
+    for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+        const Bond& bond = ctx.relations->bonds[i];
+        if (bond.grudge < kAvengeGrudge) {
+            continue;
+        }
+        const entt::entity other = personAt(ctx.world, bond.other);
+        if (other == entt::null) {
+            continue;
+        }
+        const Position& at = registry.get<Position>(other);
+        const float d = distance(ctx.x, ctx.y, at.x, at.y);
+        if (d > kAvengeRange) {
+            continue;
+        }
+        // Уже избит, а убивать не хочет — отомщено: после расправы обида
+        // (× kRelief) может остаться выше порога, но второй раз не бьют.
+        if (const auto* needs = registry.try_get<Needs>(other);
+            needs != nullptr && needs->health <= kBeatenHealth &&
+            !murderous(bond.grudge, traits.aggression)) {
+            continue;
+        }
+        const auto* theirs = registry.try_get<Weapon>(other);
+        const float courage = std::clamp(
+            (0.5f + traits.bravery) * (0.4f + weaponPower(ctx.weapon)) /
+                (0.4f + (theirs != nullptr ? weaponPower(*theirs) : 0.15f)),
+            0.3f, 1.5f);
+        const float rage = std::min(1.0f, bond.grudge / kAvengeRage);
+        best = better(best, {kAvengeWeight * rage * temper * courage *
+                                 nearness(d, kAvengeScale),
+                             Map::cellAt(at.x, at.y), bond.other});
+    }
+    return best;
+}
+
 // Бегом, а не шагом: угроза настоящая.
 bool mustRun(const Context& ctx) {
     return ctx.threat.level >= kFleeMinThreat;
@@ -675,6 +1311,14 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalHunt(ctx);
     case Action::Treat:
         return evalTreat(ctx);
+    case Action::Share:
+        return evalShare(ctx);
+    case Action::Trade:
+        return evalTrade(ctx);
+    case Action::Steal:
+        return evalSteal(ctx);
+    case Action::Avenge:
+        return evalAvenge(ctx);
     case Action::Count:
         break;
     }
@@ -747,6 +1391,30 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
     if (own == nullptr) {
         return std::nullopt;
     }
+    // Совесть (этап 6.5): чьё это жильё. Жильцы — по дому, затем по id.
+    std::vector<std::pair<EntityId, EntityId>> residents;
+    for (const auto [entity, id, person] : registry.view<const Id, const Person>().each()) {
+        if (person.home != kInvalidId && id.value != ctx.id) {
+            residents.emplace_back(person.home, id.value);
+        }
+    }
+    std::sort(residents.begin(), residents.end());
+    const bool desperate = ctx.needs.hunger >= kDesperate;
+    const bool honest = ctx.traits.altruism >= kHonestAltruism;
+    const auto allowed = [&](EntityId building) {
+        if (desperate) {
+            return true;
+        }
+        auto it = std::lower_bound(residents.begin(), residents.end(),
+                                   std::pair<EntityId, EntityId>{building, 0});
+        for (; it != residents.end() && it->first == building; ++it) {
+            const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(it->second) : nullptr;
+            if (honest || groupMate(ctx, it->second) || (bond != nullptr && !bond->hostile())) {
+                return false; // живут знакомые или свои; порядочный не тронет никого
+            }
+        }
+        return true;
+    };
     std::vector<const Places::SettlementPlace*> order{own};
     for (const EntityId neighbour : own->neighbours) {
         order.push_back(places.settlement(neighbour));
@@ -756,7 +1424,7 @@ std::optional<Places::BuildingPlace> pickScavengeTarget(const Context& ctx, cons
         candidates.clear();
         for (const Places::BuildingPlace& building : settlement->buildings) {
             if (building.id != ctx.homeId && !remembered(mind, building.id) &&
-                !risky(ctx, building.door)) {
+                !risky(ctx, building.door) && allowed(building.id)) {
                 candidates.push_back(&building);
             }
         }
@@ -844,8 +1512,17 @@ public:
             updateHunt();
             return;
         }
+        if (mind_.action == Action::Avenge) {
+            updateAvenge();
+            return;
+        }
         const Walker& walker = registry_.get<Walker>(entity_);
         if (mind_.phase == ActionPhase::Travel) {
+            // К человеку (поделиться, обменяться): он может уйти — идти за ним.
+            if ((mind_.action == Action::Share || mind_.action == Action::Trade) &&
+                (tick_ + id_) % kPerceptionIntervalTicks == 0 && follow()) {
+                return;
+            }
             if (!walker.moving()) {
                 arrive();
             } else if (tick_ >= mind_.nextThink) {
@@ -908,10 +1585,10 @@ private:
     // важнее текущего с обычной надбавкой. Надбавка сна здесь не действует —
     // угроза будит.
     bool react() {
-        if (person_.indoors) {
-            return false; // дома прячется
-        }
         const Context ctx = makeContext(world_, entity_);
+        if (person_.indoors && ctx.threat.assailant == kInvalidId) {
+            return false; // дома прячется: бьёт не человек
+        }
         const Option flee = evalFlee(ctx);
         const Option fight = evalFight(ctx);
         const bool brave = fight.score > flee.score;
@@ -950,8 +1627,7 @@ private:
         EntityId target = combat.target;
         const Contact* contact = target != kInvalidId ? awareness.find(target) : nullptr;
         const entt::entity foe = world_.find(target);
-        if (contact == nullptr || !isFresh(*contact, tick_) || foe == entt::null ||
-            !registry_.all_of<Zombie>(foe)) {
+        if (contact == nullptr || !isFresh(*contact, tick_) || !isFoe(foe)) {
             target = ctx.threat.nearest;
             contact = awareness.find(target);
         }
@@ -1071,6 +1747,144 @@ private:
         fail();
     }
 
+    // С кем драться: зомби или человек, который бьёт людей (этап 6.5).
+    bool isFoe(entt::entity entity) const {
+        if (entity == entt::null) {
+            return false;
+        }
+        if (registry_.all_of<Zombie>(entity)) {
+            return true;
+        }
+        const auto* combat = registry_.try_get<Combat>(entity);
+        return combat != nullptr && registry_.all_of<Person>(entity) &&
+               personAt(world_, combat->target) != entt::null;
+    }
+
+    // Идти к человеку (поделиться, обменяться): дошёл — выполнять, он ушёл от
+    // места встречи — путь заново. true — решение сменилось.
+    bool follow() {
+        const entt::entity other = personAt(world_, mind_.target);
+        if (other == entt::null) {
+            fail();
+            return true;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(other);
+        const float d = distance(self.x, self.y, at.x, at.y);
+        if (d <= kMeetRange) {
+            stopWalking();
+            mind_.spot = cellOf(self);
+            perform();
+            return true;
+        }
+        if (distance(cellX(mind_.spot), cellY(mind_.spot), at.x, at.y) >
+            std::max(kFollowRegoal, 0.1f * d)) {
+            mind_.spot = Map::cellAt(at.x, at.y);
+            if (!startWalk(world_, entity_, mind_.spot)) {
+                fail();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Месть (этап 6.5): идти к обидчику и, догнав, бить (стрелять). Избил, а
+    // убивать не хотел, или убил — отомстил. Не нашёл за отведённое время, сам
+    // изранен, обидчик убежал — бросить.
+    void updateAvenge() {
+        Combat& combat = registry_.get<Combat>(entity_);
+        Walker& walker = registry_.get<Walker>(entity_);
+        const bool look = (tick_ + id_) % kPerceptionIntervalTicks == 0;
+        if (!look && walker.moving()) {
+            return;
+        }
+        const entt::entity foe = world_.find(mind_.target);
+        if (foe == entt::null || !registry_.all_of<Person>(foe)) {
+            const auto* corpse = foe != entt::null ? registry_.try_get<Corpse>(foe) : nullptr;
+            if (corpse != nullptr && corpse->killer == id_) {
+                avenged(true);
+            } else {
+                giveUpAvenge(); // погиб не от его руки или встал зомби
+            }
+            return;
+        }
+        if (tick_ >= mind_.until || needs_.health < kAvengeQuitHealth) {
+            giveUpAvenge();
+            return;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(foe);
+        const float d = distance(self.x, self.y, at.x, at.y);
+        const Mind* theirs = registry_.try_get<Mind>(foe);
+        if (d > kAvengeRange * 1.5f ||
+            (theirs != nullptr && theirs->action == Action::Flee && d > kAvengeLostRange)) {
+            giveUpAvenge();
+            return;
+        }
+        if (const auto* needs = registry_.try_get<Needs>(foe);
+            needs != nullptr && needs->health <= kBeatenHealth && !murderous()) {
+            avenged(false);
+            return;
+        }
+        const AttackSpec& spec = attackSpec(registry_.get<Weapon>(entity_));
+        const Contact* contact = registry_.get<Awareness>(entity_).find(mind_.target);
+        const bool seen = contact != nullptr && isFresh(*contact, tick_) && contact->seen;
+        // Вплотную бьют и того, кого не видно: дома от мстителя не спрятаться.
+        // Стрелять в того, кто заперся, нельзя — уйти ни с чем.
+        if (spec.ranged && !seen && d <= kMeetRange) {
+            giveUpAvenge();
+            return;
+        }
+        if (spec.ranged ? seen && d <= spec.reach : d <= spec.reach) {
+            stopWalking();
+            combat.target = mind_.target;
+            person_.indoors = false;
+            return;
+        }
+        combat.target = kInvalidId;
+        if (!walker.moving() ||
+            distance(cellX(mind_.spot), cellY(mind_.spot), at.x, at.y) > std::max(kFollowRegoal, 0.1f * d)) {
+            mind_.spot = Map::cellAt(at.x, at.y);
+            walker.pace = kAvengePace;
+            if (!startWalkDirect(world_, entity_, mind_.spot)) {
+                giveUpAvenge();
+            }
+        }
+    }
+
+    // Хочет ли убить того, кому мстит.
+    bool murderous() const {
+        const auto* relations = registry_.try_get<Relations>(entity_);
+        const Bond* bond = relations != nullptr ? relations->find(mind_.target) : nullptr;
+        const Traits* traits = registry_.try_get<Traits>(entity_);
+        const float aggression = traits != nullptr ? traits->aggression : 0.5f;
+        return bond != nullptr && lw::murderous(bond->grudge, aggression);
+    }
+
+    // Отомстил: обида уходит (избил — остаётся kRelief, убил — ничего).
+    void avenged(bool killed) {
+        world_.record(ChronicleKind::Avenged, id_, mind_.target, killed ? 1 : 0);
+        if (auto* relations = registry_.try_get<Relations>(entity_)) {
+            if (Bond* bond = relations->find(mind_.target)) {
+                bond->grudge = killed ? 0.0f : bond->grudge * kRelief;
+            }
+        }
+        registry_.get<Combat>(entity_).target = kInvalidId;
+        finish();
+        think();
+    }
+
+    // Не вышло: обида понемногу остывает, иначе мстил бы раз за разом.
+    void giveUpAvenge() {
+        if (auto* relations = registry_.try_get<Relations>(entity_)) {
+            if (Bond* bond = relations->find(mind_.target)) {
+                bond->grudge *= kFrustration;
+            }
+        }
+        registry_.get<Combat>(entity_).target = kInvalidId;
+        fail();
+    }
+
     // Куда бежать: домой, если он в той стороне, иначе прочь от зомби (или от
     // места, где его видел) или чуть в сторону. Возвращает клетку, куда уже пошёл.
     std::optional<Cell> startFlee(const Context& ctx) {
@@ -1180,14 +1994,40 @@ private:
                 return false;
             }
             option.spot = *door;
-        } else if (action == Action::Fight) {
-            option.spot = ctx.cell; // подойти к зомби — по ходу боя (updateFight)
+        } else if (action == Action::Fight || action == Action::Avenge) {
+            if (action == Action::Fight) {
+                option.spot = ctx.cell; // подойти к зомби — по ходу боя (updateFight)
+            }
             // В руки — лучшее, что есть: ружьё без патронов хуже топора.
             equipBest(registry_.get<Weapon>(entity_), registry_.get<Inventory>(entity_));
+        } else if (action == Action::Share) {
+            // Своего при себе нет — взять из домашних запасов: стоит у двери.
+            const entt::entity other = personAt(world_, option.target);
+            const Gift gift = other != entt::null ? giftFor(ctx, other) : Gift{};
+            if (gift.count == 0) {
+                return false;
+            }
+            if (gift.fromHome) {
+                Inventory& carry = registry_.get<Inventory>(entity_);
+                Inventory& stock = registry_.get<Inventory>(world_.find(ctx.homeId));
+                for (int i = 0; i < gift.count; ++i) {
+                    const ItemKind kind = gift.kind != ItemKind::Food ? gift.kind
+                                          : stock.count(ItemKind::Meat) > 0 ? ItemKind::Meat
+                                                                             : ItemKind::Food;
+                    if (roomFor(carry, kind) > 0 && stock.take(kind, 1) == 1) {
+                        carry.add(kind, 1);
+                    }
+                }
+            }
         }
 
         bool here = option.spot == ctx.cell;
         bool walking = false;
+        if (action == Action::Avenge) {
+            here = false; // идти за обидчиком — по ходу (updateAvenge)
+            walking = true;
+            stopWalking();
+        }
         if (action == Action::Flee) {
             const auto spot = startFlee(ctx);
             if (!spot) {
@@ -1199,8 +2039,10 @@ private:
             walking = true;
             if (mustRun(ctx)) {
                 if (mind_.fledAt == 0 || tick_ >= mind_.fledAt + minutes(kFleeEpisodeMinutes)) {
+                    // b = 1 — бежал от человека (этап 6.5).
                     world_.record(ChronicleKind::Fled, id_, ctx.threat.nearest,
-                                  person_.asleep ? 1 : 0);
+                                  person_.asleep ? 1 : 0,
+                                  personAt(world_, ctx.threat.nearest) != entt::null ? 1 : 0);
                 }
                 mind_.fledAt = tick_;
             }
@@ -1219,6 +2061,7 @@ private:
         }
         registry_.get<Walker>(entity_).pace = action == Action::Flee && mustRun(ctx) ? kRunPace
                                               : action == Action::Hunt              ? kStalkPace
+                                              : action == Action::Avenge            ? kAvengePace
                                                                                     : 1.0f;
         registry_.get<Combat>(entity_).target =
             action == Action::Fight ? option.target : kInvalidId;
@@ -1237,6 +2080,8 @@ private:
                 tick_ + minutes(action == Action::Flee ? kFleeThinkMinutes : kThinkMinutes);
             if (action == Action::Hunt) {
                 mind_.until = tick_ + minutes(kHuntMinutes); // сколько выслеживать
+            } else if (action == Action::Avenge) {
+                mind_.until = tick_ + minutes(kAvengeMinutes); // сколько искать обидчика
             }
         }
         return true;
@@ -1351,6 +2196,18 @@ private:
         case Action::Treat:
             duration = kTreatMinutes;
             break;
+        case Action::Share:
+            duration = kShareMinutes;
+            break;
+        case Action::Trade:
+            duration = kTradeMinutes;
+            break;
+        case Action::Steal:
+            duration = kStealMinutes;
+            break;
+        case Action::Avenge:
+            duration = kFightMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -1402,11 +2259,26 @@ private:
         case Action::Scavenge:
             remember(mind_, mind_.target);
             if (stock != nullptr) {
-                takeLoot(*stock, carry);
+                takeLoot(*stock, carry, false);
             } else {
                 world_.record(ChronicleKind::Scavenged, id_, mind_.target);
                 countSearch(false);
             }
+            break;
+        case Action::Steal:
+            if (stock != nullptr) {
+                const int taken = takeLoot(*stock, carry, true);
+                // Обокрал свою базу — сбежал из группы (этап 6.5).
+                if (mind_.target == person_.home && person_.group != kInvalidId) {
+                    desertGroup(world_, entity_, taken);
+                }
+            }
+            break;
+        case Action::Share:
+            handOver(carry);
+            break;
+        case Action::Trade:
+            trade(carry);
             break;
         case Action::Forage:
             forage(carry);
@@ -1446,22 +2318,38 @@ private:
 
     // Найденное в здании или на теле: еду и воду — сколько позволяют жадность и
     // запасливость (что-то съесть и выпить сразу), затем снаряжение (takeGear).
-    // Что не унести, остаётся на месте.
-    void takeLoot(Inventory& stock, Inventory& carry) {
+    // Вор (steal, этап 6.5) берёт всё, что унесёт. Что не унести, остаётся на
+    // месте. Возвращает, сколько вещей взято.
+    int takeLoot(Inventory& stock, Inventory& carry, bool steal) {
         const Traits* traits = registry_.try_get<Traits>(entity_);
         const float greed = traits != nullptr ? traits->greed : 0.5f;
         const float prudence = traits != nullptr ? traits->prudence : 0.5f;
-        const int wantFood = 1 + static_cast<int>(std::lround(2.0f * greed + 2.0f * prudence));
-        const int wantWater = 1 + static_cast<int>(std::lround(greed + prudence));
+        const int wantFood =
+            steal ? kCarryFoodMax : 1 + static_cast<int>(std::lround(2.0f * greed + 2.0f * prudence));
+        const int wantWater =
+            steal ? kCarryWaterMax : 1 + static_cast<int>(std::lround(greed + prudence));
+        const Inventory before = stock;
         // Мясо — первым: оно портится.
         int meat = stock.take(ItemKind::Meat, wantFood);
         int food = stock.take(ItemKind::Food, wantFood - meat);
         int water = stock.take(ItemKind::Water, wantWater);
         const entt::entity source = world_.find(mind_.target);
         const bool body = source != entt::null && registry_.all_of<Corpse>(source);
-        world_.record(body ? ChronicleKind::LootedBody : ChronicleKind::Scavenged, id_,
-                      mind_.target, meat + food, water);
-        countSearch(meat + food > 0);
+        if (steal) {
+            // Хозяин — живой жилец с меньшим id; своя база — без хозяина (сбежал).
+            EntityId owner = kInvalidId;
+            for (const auto [entity, id, person] : registry_.view<const Id, const Person>().each()) {
+                if (person.home == mind_.target && entity != entity_ &&
+                    (owner == kInvalidId || id.value < owner)) {
+                    owner = id.value;
+                }
+            }
+            world_.record(ChronicleKind::Stole, id_, mind_.target, meat + food, water, owner);
+        } else {
+            world_.record(body ? ChronicleKind::LootedBody : ChronicleKind::Scavenged, id_,
+                          mind_.target, meat + food, water);
+            countSearch(meat + food > 0);
+        }
         if (meat + food > 0 && needs_.hunger > kSnackThreshold) {
             --(meat > 0 ? meat : food);
             needs_.hunger = clamp01(needs_.hunger - kMeal);
@@ -1479,6 +2367,124 @@ private:
         keep(ItemKind::Food, food, kCarryFoodMax - carry.food());
         keep(ItemKind::Water, water, kCarryWaterMax - carry.count(ItemKind::Water));
         takeGear(stock, carry, body ? source : entt::entity{entt::null});
+        int taken = 0;
+        for (std::size_t i = 0; i < kItemKinds; ++i) {
+            taken += std::max(0, static_cast<int>(before.items[i]) - stock.items[i]);
+        }
+        // Хозяева, которые это видели, запомнят вора (этап 6.1).
+        if (!body) {
+            witnessTheft(world_, entity_, mind_.target, taken);
+        }
+        return taken;
+    }
+
+    // Отдать тому, кому нёс (этап 6.5): если он рядом и ему всё ещё нужно.
+    // Получивший обязан; отдавший тому, кому был должен, — вернул долг.
+    void handOver(Inventory& carry) {
+        const entt::entity other = personAt(world_, mind_.target);
+        if (other == entt::null) {
+            return;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(other);
+        if (distance(self.x, self.y, at.x, at.y) > kHandRange) {
+            return; // разминулись
+        }
+        const Gift gift = giftFor(makeContext(world_, entity_), other);
+        if (gift.count == 0 || gift.fromHome) {
+            return; // уже не нужно или отдать нечего
+        }
+        Inventory& theirs = registry_.get<Inventory>(other);
+        int given = 0;
+        for (int i = 0; i < gift.count; ++i) {
+            const ItemKind kind = gift.kind != ItemKind::Food ? gift.kind
+                                  : carry.count(ItemKind::Meat) > 0 ? ItemKind::Meat
+                                                                     : ItemKind::Food;
+            if (roomFor(theirs, kind) < 1 || carry.take(kind, 1) != 1) {
+                break;
+            }
+            theirs.add(kind, 1);
+            ++given;
+        }
+        if (given == 0) {
+            return;
+        }
+        bool repaid = false;
+        if (auto* relations = registry_.try_get<Relations>(entity_)) {
+            if (Bond* bond = relations->find(mind_.target); bond != nullptr && bond->debt > 0.0f) {
+                bond->debt = std::max(0.0f, bond->debt - kRepaid);
+                repaid = true;
+            }
+        }
+        world_.record(ChronicleKind::Shared, id_, mind_.target,
+                      static_cast<std::int32_t>(gift.kind) + (repaid ? 256 : 0), given);
+        experience(world_, other, MemoryKind::Helped, id_, kInvalidId, given);
+        witnessDeed(world_, MemoryKind::Helped, entity_, mind_.target, kInvalidId);
+    }
+
+    // Обменяться с тем, к кому шёл (этап 6.5): своё лишнее — на то, чего не
+    // хватает, по ценности; сделка — шаг навстречу для обоих.
+    void trade(Inventory& carry) {
+        const entt::entity other = personAt(world_, mind_.target);
+        if (other == entt::null || registry_.get<Person>(other).asleep) {
+            return;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(other);
+        if (distance(self.x, self.y, at.x, at.y) > kHandRange) {
+            return;
+        }
+        const Want want = wantOf(makeContext(world_, entity_));
+        const ItemKind get = want.need > 0.0f ? provides(world_, other, want.kind) : ItemKind::Count;
+        const ItemKind give = get != ItemKind::Count ? offerFor(world_, entity_, other, want.kind)
+                                                     : ItemKind::Count;
+        if (give == ItemKind::Count) {
+            return;
+        }
+        // Хозяин дома меняется и домашними запасами: отдаёт сначала то, что при
+        // себе, потом из дома, полученное кладёт домой.
+        Inventory& theirs = registry_.get<Inventory>(other);
+        const Person& host = registry_.get<Person>(other);
+        const entt::entity house = host.indoors ? world_.find(host.home) : entt::null;
+        Inventory* theirHome = house != entt::null ? registry_.try_get<Inventory>(house) : nullptr;
+        Inventory& theirPlace = theirHome != nullptr ? *theirHome : theirs;
+        int getCount =
+            std::min({want.count, spareFor(registry_, other, get, theirHome), roomFor(carry, get)});
+        int giveCount = static_cast<int>(
+            std::ceil(static_cast<float>(getCount) * itemValue(get) / itemValue(give)));
+        const int spare = spareFor(registry_, entity_, give);
+        if (giveCount > spare) {
+            giveCount = spare;
+            getCount = std::min(getCount, static_cast<int>(static_cast<float>(giveCount) *
+                                                           itemValue(give) / itemValue(get)));
+        }
+        if (getCount < 1 || giveCount < 1 ||
+            (theirHome == nullptr && roomFor(theirs, give) < giveCount)) {
+            return;
+        }
+        const int handed = theirs.take(get, getCount);
+        carry.add(get, handed);
+        if (theirHome != nullptr) {
+            carry.add(get, theirHome->take(get, getCount - handed));
+        }
+        theirPlace.add(give, carry.take(give, giveCount));
+        equipBest(registry_.get<Weapon>(entity_), carry);
+        equipBest(registry_.get<Weapon>(other), theirs);
+        // Честная сделка — шаг навстречу.
+        const auto warm = [&](entt::entity who, EntityId whom) {
+            auto* relations = registry_.try_get<Relations>(who);
+            Bond* bond = relations != nullptr ? relations->find(whom) : nullptr;
+            if (bond != nullptr) {
+                bond->trust = std::min(1.0f, bond->trust + kTradeTrustGain);
+                bond->affinity = std::min(1.0f, bond->affinity + kTradeAffinityGain);
+                refreshBondFlags(world_, registry_.get<Id>(who).value, *bond);
+            }
+        };
+        warm(entity_, mind_.target);
+        warm(other, id_);
+        world_.record(ChronicleKind::Traded, id_, mind_.target,
+                      static_cast<std::int32_t>(get) | (getCount << 8),
+                      static_cast<std::int32_t>(give) | (giveCount << 8));
     }
 
     // Снаряжение: оружие сильнее того, что в руках, патроны к своему оружию,

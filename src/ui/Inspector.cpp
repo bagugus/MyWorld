@@ -4,11 +4,13 @@
 #include "sim/Components.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
+#include "sim/Relations.h"
 #include "sim/TimeScale.h"
 #include "sim/Items.h"
 #include "sim/Weapons.h"
 #include "sim/World.h"
 #include "sim/systems/AnimalSystem.h"
+#include "sim/systems/GroupSystem.h"
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/ZombieSystem.h"
@@ -46,6 +48,12 @@ constexpr Color kHordeColor = {214, 96, 80, 200};
 // Опасные места, которые помнит человек.
 constexpr Color kDangerColor = {230, 70, 60, 110};
 constexpr Color kLeaderColor = {255, 170, 120, 255};
+// Отношения: линии к друзьям и недругам.
+constexpr Color kFriendColor = {255, 150, 220, 170};
+constexpr Color kFoeColor = {200, 50, 50, 170};
+// Группа (этап 6.4): участники, вожак и база.
+constexpr Color kGroupColor = {110, 230, 220, 200};
+constexpr Color kGroupLeaderColor = {190, 255, 250, 255};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -152,6 +160,12 @@ void Inspector::updateCamera(CameraController& camera, float alpha) {
             const Vector2 at = drawnPosition(registry, leader, alpha);
             camera.lookAt(at.x, at.y, camera.zoom());
         }
+    } else if (const auto* group = registry.try_get<Group>(entity)) {
+        if (const entt::entity leader = world_.find(group->leader);
+            leader != entt::null && registry.all_of<Position>(leader)) {
+            const Vector2 at = drawnPosition(registry, leader, alpha);
+            camera.lookAt(at.x, at.y, camera.zoom());
+        }
     }
 }
 
@@ -194,6 +208,22 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (leader && horde->travelling) {
                 DrawLineEx(at, cellCenter(horde->goal), line, kTargetColor);
             }
+        }
+        return;
+    }
+    if (const auto* group = registry.try_get<Group>(entity)) {
+        // Кольцо у каждого участника, у вожака — ярче; база — рамкой.
+        const float radius = std::max(1.2f, 7.0f * px);
+        for (const EntityId member : group->members) {
+            const entt::entity other = world_.find(member);
+            if (other == entt::null || !registry.all_of<Position>(other)) {
+                continue;
+            }
+            DrawRing(drawnPosition(registry, other, alpha), radius, radius + line, 0.0f, 360.0f, 24,
+                     member == group->leader ? kGroupLeaderColor : kGroupColor);
+        }
+        if (const entt::entity base = world_.find(group->base); base != entt::null) {
+            DrawRectangleLinesEx(buildingRect(registry.get<Building>(base)), line, kGroupColor);
         }
         return;
     }
@@ -246,6 +276,29 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (danger.until > world_.tick()) {
                 DrawRing(cellCenter(danger.cell), kDangerRadius - line, kDangerRadius, 0.0f, 360.0f,
                          64, kDangerColor);
+            }
+        }
+    }
+    // Товарищи по группе — бирюзовыми линиями.
+    if (const auto* person = registry.try_get<Person>(entity)) {
+        if (const entt::entity group = world_.find(person->group); group != entt::null) {
+            for (const EntityId member : registry.get<Group>(group).members) {
+                const entt::entity other = world_.find(member);
+                if (other != entity && other != entt::null && registry.all_of<Position>(other)) {
+                    DrawLineEx(at, drawnPosition(registry, other, alpha), line, kGroupColor);
+                }
+            }
+        }
+    }
+    // Друзья и недруги, которые живы, — линиями.
+    if (const auto* relations = registry.try_get<Relations>(entity)) {
+        for (std::size_t i = 0; i < relations->count; ++i) {
+            const Bond& bond = relations->bonds[i];
+            const entt::entity other = world_.find(bond.other);
+            if ((bond.friendly() || bond.hostile()) && other != entt::null &&
+                registry.all_of<Person>(other)) {
+                DrawLineEx(at, drawnPosition(registry, other, alpha), line,
+                           bond.hostile() ? kFoeColor : kFriendColor);
             }
         }
     }
@@ -326,7 +379,7 @@ void Inspector::drawPanel() {
         } else if (entity == entt::null) {
             ImGui::Text("Объекта #%llu нет", static_cast<unsigned long long>(selected_));
         } else {
-            if (registry.any_of<Position, Building, Horde>(entity)) {
+            if (registry.any_of<Position, Building, Horde, Group>(entity)) {
                 ImGui::Checkbox("Следить камерой", &follow_);
             }
             if (registry.all_of<Person>(entity)) {
@@ -341,6 +394,8 @@ void Inspector::drawPanel() {
                 drawCorpse(entity);
             } else if (registry.all_of<Horde>(entity)) {
                 drawHorde(entity);
+            } else if (registry.all_of<Group>(entity)) {
+                drawGroup(entity);
             } else if (registry.all_of<Building>(entity)) {
                 drawBuilding(entity);
             } else if (registry.all_of<Settlement>(entity)) {
@@ -462,6 +517,35 @@ void Inspector::drawPerson(entt::entity entity) {
     } else {
         ImGui::TextUnformatted("Дом: нет");
     }
+    // Группа (этап 6.4).
+    if (const entt::entity group = world_.find(person.group); group != entt::null) {
+        const Group& info = registry.get<Group>(group);
+        ImGui::TextUnformatted("Группа:");
+        ImGui::SameLine();
+        if (idLink(person.group)) {
+            select(person.group);
+            return;
+        }
+        ImGui::SameLine();
+        if (info.leader == selected_) {
+            ImGui::Text("вожак, %zu человек", info.members.size());
+        } else {
+            ImGui::Text("%zu человек, вожак", info.members.size());
+            ImGui::SameLine();
+            if (idLink(info.leader)) {
+                select(info.leader);
+                return;
+            }
+        }
+        if (person.formerHome != kInvalidId) {
+            ImGui::TextUnformatted("Живёт на базе; прежний дом");
+            ImGui::SameLine();
+            if (idLink(person.formerHome)) {
+                select(person.formerHome);
+                return;
+            }
+        }
+    }
     if (const auto* carry = registry.try_get<Inventory>(entity)) {
         char text[256];
         formatInventory(text, sizeof(text), *carry);
@@ -529,6 +613,10 @@ void Inspector::drawPerson(entt::entity entity) {
             }
             ImGui::EndTable();
         }
+    }
+
+    if (!drawRelations(entity) || !drawMemories(entity)) {
+        return;
     }
 
     if (registry.all_of<Mind, Needs>(entity) && ImGui::CollapsingHeader("Оценки действий")) {
@@ -655,6 +743,163 @@ bool Inspector::drawPerception(entt::entity entity) {
     return true;
 }
 
+bool Inspector::drawRelations(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* relations = registry.try_get<Relations>(entity);
+    if (relations == nullptr) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Отношения: %d###relations", relations->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    // Как к нему относятся другие (этап 6.3).
+    if (const Reputation reputation = reputationOf(world_, selected_); reputation.known > 0) {
+        ImGui::Text("Репутация: симпатия %+.0f у %d знакомых", reputation.affinity * 100.0f,
+                    reputation.known);
+    } else {
+        ImGui::TextDisabled("Репутация: его почти никто не знает");
+    }
+    if (relations->count == 0) {
+        ImGui::TextDisabled("никого не знает");
+        return true;
+    }
+    // Сначала самые крепкие связи.
+    std::vector<const Bond*> bonds;
+    for (std::size_t i = 0; i < relations->count; ++i) {
+        bonds.push_back(&relations->bonds[i]);
+    }
+    std::stable_sort(bonds.begin(), bonds.end(), [](const Bond* a, const Bond* b) {
+        return bondStrength(*a) > bondStrength(*b);
+    });
+    ImGui::TextDisabled("знакомство, симпатия, доверие (%%); совместимость; долг, обида");
+    if (!ImGui::BeginTable("relations", 6, ImGuiTableFlags_SizingFixedFit)) {
+        return true;
+    }
+    const std::uint64_t tick = world_.tick();
+    EntityId clicked = kInvalidId;
+    char ago[32];
+    for (const Bond* bond : bonds) {
+        ImGui::TableNextColumn();
+        if (idLink(bond->other)) {
+            clicked = bond->other;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%3.0f %+4.0f %+4.0f", bond->familiarity * 100.0f, bond->affinity * 100.0f,
+                    bond->trust * 100.0f);
+        ImGui::TableNextColumn();
+        ImGui::Text("%+.2f", bond->chemistry);
+        ImGui::TableNextColumn();
+        if (bond->debt > 0.0f && bond->grudge > 0.0f) {
+            ImGui::Text("долг %.0f, обида %.0f", bond->debt * 100.0f, bond->grudge * 100.0f);
+        } else if (bond->debt > 0.0f) {
+            ImGui::TextColored({0.55f, 0.85f, 0.55f, 1.0f}, "долг %.0f", bond->debt * 100.0f);
+        } else if (bond->grudge > 0.0f) {
+            ImGui::TextColored({1.0f, 0.6f, 0.4f, 1.0f}, "обида %.0f", bond->grudge * 100.0f);
+        }
+        ImGui::TableNextColumn();
+        const entt::entity other = world_.find(bond->other);
+        if (other == entt::null || registry.all_of<Corpse>(other)) {
+            ImGui::TextDisabled("погиб");
+        } else if (registry.all_of<Zombie>(other)) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "стал зомби");
+        } else if (bond->friendly()) {
+            ImGui::TextColored({1.0f, 0.6f, 0.86f, 1.0f}, "друг");
+        } else if (bond->hostile()) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "недруг");
+        } else {
+            ImGui::TextDisabled("знакомый");
+        }
+        ImGui::TableNextColumn();
+        if (tick - bond->seen <= kTicksPerGameMinute) { // вместе в последнюю минуту
+            ImGui::TextUnformatted("рядом");
+        } else {
+            formatGameDuration(ago, sizeof(ago), tick - bond->seen);
+            ImGui::TextDisabled("%s назад", ago);
+        }
+    }
+    ImGui::EndTable();
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
+}
+
+bool Inspector::drawMemories(entt::entity entity) {
+    const auto* memories = world_.registry().try_get<Memories>(entity);
+    if (memories == nullptr) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Память: %d###memories", memories->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    if (memories->count == 0) {
+        ImGui::TextDisabled("ничего значимого");
+        return true;
+    }
+    // Сначала свежие.
+    std::vector<const Memory*> items;
+    for (std::size_t i = 0; i < memories->count; ++i) {
+        items.push_back(&memories->items[i]);
+    }
+    std::stable_sort(items.begin(), items.end(),
+                     [](const Memory* a, const Memory* b) { return a->tick > b->tick; });
+    ImGui::TextDisabled("кто, что сделал (→ с кем, если не с ним), при чём; сила (%%); "
+                        "когда, от кого слышал");
+    if (!ImGui::BeginTable("memories", 5, ImGuiTableFlags_SizingFixedFit)) {
+        return true;
+    }
+    const std::uint64_t tick = world_.tick();
+    EntityId clicked = kInvalidId;
+    char ago[32];
+    for (const Memory* memory : items) {
+        ImGui::PushID(memory);
+        ImGui::TableNextColumn();
+        if (idLink(memory->who)) {
+            clicked = memory->who;
+        }
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(memoryKindName(memory->kind));
+        // Чужой поступок (этап 6.3) — с кем.
+        if (memory->victim != kInvalidId) {
+            ImGui::SameLine();
+            ImGui::TextUnformatted("→");
+            ImGui::SameLine();
+            if (idLink(memory->victim)) {
+                clicked = memory->victim;
+            }
+        }
+        ImGui::TableNextColumn();
+        if (memory->about != kInvalidId && idLink(memory->about)) {
+            clicked = memory->about;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%3.0f", memory->strength * 100.0f);
+        ImGui::TableNextColumn();
+        formatGameDuration(ago, sizeof(ago), tick > memory->tick ? tick - memory->tick : 0);
+        ImGui::TextDisabled("%s назад", ago);
+        if (memory->source != kInvalidId) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("слух от");
+            ImGui::SameLine();
+            if (idLink(memory->source)) {
+                clicked = memory->source;
+            }
+        }
+        ImGui::PopID();
+    }
+    ImGui::EndTable();
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
+}
+
 void Inspector::drawZombie(entt::entity entity) {
     const entt::registry& registry = world_.registry();
     const std::uint64_t tick = world_.tick();
@@ -760,6 +1005,73 @@ void Inspector::drawHorde(entt::entity entity) {
             clicked = horde.members[i];
         }
     }
+    if (clicked != kInvalidId) {
+        select(clicked);
+    }
+}
+
+void Inspector::drawGroup(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Group& group = registry.get<Group>(entity);
+    char duration[32];
+
+    ImGui::Text("Группа #%llu: %zu человек", static_cast<unsigned long long>(selected_),
+                group.members.size());
+    formatGameDuration(duration, sizeof(duration), world_.tick() - group.formed);
+    ImGui::Text("Вместе %s", duration);
+    ImGui::TextUnformatted("Вожак:");
+    ImGui::SameLine();
+    if (idLink(group.leader)) {
+        select(group.leader);
+        return;
+    }
+    if (const entt::entity base = world_.find(group.base); base != entt::null) {
+        ImGui::TextUnformatted("База:");
+        ImGui::SameLine();
+        if (idLink(group.base)) {
+            select(group.base);
+            return;
+        }
+        drawSupplies(registry, base);
+    } else {
+        ImGui::TextUnformatted("Базы нет");
+    }
+    // Участники: авторитет (лидерство и доверие остальных) и как к нему
+    // относятся остальные — средняя симпатия.
+    ImGui::SeparatorText("Участники");
+    ImGui::TextDisabled("авторитет; симпатия остальных (%%); занятие");
+    if (!ImGui::BeginTable("members", 4, ImGuiTableFlags_SizingFixedFit)) {
+        return;
+    }
+    EntityId clicked = kInvalidId;
+    for (const EntityId member : group.members) {
+        ImGui::TableNextColumn();
+        if (idLink(member)) {
+            clicked = member;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%.2f%s", authorityOf(world_, group, member),
+                    member == group.leader ? " вожак" : "");
+        ImGui::TableNextColumn();
+        float liking = 0.0f;
+        int others = 0;
+        for (const EntityId other : group.members) {
+            const entt::entity mate = world_.find(other);
+            const auto* relations =
+                mate != entt::null && other != member ? registry.try_get<Relations>(mate) : nullptr;
+            if (relations != nullptr) {
+                const Bond* bond = relations->find(member);
+                liking += bond != nullptr ? bond->affinity : 0.0f;
+                ++others;
+            }
+        }
+        ImGui::Text("%+.0f", others > 0 ? liking / static_cast<float>(others) * 100.0f : 0.0f);
+        ImGui::TableNextColumn();
+        const entt::entity person = world_.find(member);
+        const auto* mind = person != entt::null ? registry.try_get<Mind>(person) : nullptr;
+        ImGui::TextUnformatted(mind != nullptr ? actionName(mind->action) : "—");
+    }
+    ImGui::EndTable();
     if (clicked != kInvalidId) {
         select(clicked);
     }

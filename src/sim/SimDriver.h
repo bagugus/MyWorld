@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 namespace lw {
 
 class World;
@@ -22,6 +24,16 @@ public:
 
     // Выполнить один тик на паузе.
     void requestStep() { stepRequested_ = true; }
+
+    // Промотка: прогнать мир вперёд на ticks тиков как можно быстрее.
+    // Идёт порциями по кадрам (окно не зависает), на паузе тоже; повторный
+    // вызов добавляет к оставшемуся. Результат тот же, что и при обычном ходе.
+    void requestSkip(std::uint64_t ticks);
+    void cancelSkip();
+    bool skipping() const { return skipRemaining_ > 0; }
+    std::uint64_t skipRemaining() const { return skipRemaining_; }
+    // Доля выполненной промотки, 0..1.
+    float skipProgress() const;
 
     // Сколько реального времени за кадр можно потратить на симуляцию.
     // Если тики не укладываются, отставание отбрасывается: мир идёт медленнее
@@ -49,6 +61,10 @@ private:
     bool stepRequested_ = false;
     double accumulator_ = 0.0;
     double frameBudgetMs_ = 12.0;
+    // На промотку кадр может тратить больше: смотреть всё равно не на что.
+    double skipBudgetMs_ = 60.0;
+    std::uint64_t skipRemaining_ = 0;
+    std::uint64_t skipTotal_ = 0;
 
     int ticksLastFrame_ = 0;
     bool behind_ = false;

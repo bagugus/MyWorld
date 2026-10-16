@@ -47,12 +47,16 @@ add_library(lw_sim STATIC
     src/sim/Items.h
     src/sim/Map.cpp
     src/sim/Map.h
+    src/sim/Memory.cpp
+    src/sim/Memory.h
     src/sim/Perception.cpp
     src/sim/Perception.h
     src/sim/Places.cpp
     src/sim/Places.h
     src/sim/Population.cpp
     src/sim/Population.h
+    src/sim/Relations.cpp
+    src/sim/Relations.h
     src/sim/Resources.cpp
     src/sim/Resources.h
     src/sim/Rng.cpp
@@ -88,6 +92,10 @@ add_library(lw_sim STATIC
     src/sim/systems/AnimalSystem.h
     src/sim/systems/CombatSystem.cpp
     src/sim/systems/CombatSystem.h
+    src/sim/systems/GroupSystem.cpp
+    src/sim/systems/GroupSystem.h
+    src/sim/systems/MemorySystem.cpp
+    src/sim/systems/MemorySystem.h
     src/sim/systems/MovementSystem.cpp
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp
@@ -96,6 +104,8 @@ add_library(lw_sim STATIC
     src/sim/systems/PerceptionSystem.h
     src/sim/systems/ResourceSystem.cpp
     src/sim/systems/ResourceSystem.h
+    src/sim/systems/SocialSystem.cpp
+    src/sim/systems/SocialSystem.h
     src/sim/systems/UtilityAiSystem.cpp
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp

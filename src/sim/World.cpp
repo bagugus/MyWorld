@@ -7,15 +7,19 @@
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
+#include "sim/systems/GroupSystem.h"
+#include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
 #include <algorithm>
+#include <chrono>
 #include <utility>
 
 namespace lw {
@@ -72,24 +76,69 @@ void World::generate() {
     resources_.build(places_);
 }
 
+namespace {
+
+constexpr const char* kPhaseNames[World::kStepPhases] = {
+    "weather", "resources", "needs", "relations", "memories", "groups", "bodies",
+    "perception", "zombies", "animals", "utility ai", "combat", "movement", "spatial sync"};
+
+} // namespace
+
+const char* World::stepPhaseName(int phase) {
+    return kPhaseNames[phase];
+}
+
 void World::step() {
+    using Clock = std::chrono::steady_clock;
+    int phase = 0;
+    Clock::time_point mark = profiling_ ? Clock::now() : Clock::time_point{};
+    // Засекает конец очередного шага тика (только при включённом замере).
+    const auto lap = [&] {
+        if (profiling_) {
+            const Clock::time_point now = Clock::now();
+            phaseSeconds_[phase] += std::chrono::duration<double>(now - mark).count();
+            mark = now;
+        }
+        ++phase;
+    };
+
     updateWeather(*this);
+    lap();
     updateResources(*this);
+    lap();
     tickNeeds(*this);
+    lap();
+    // Отношения — по тому, кто был рядом и чем занят на начало тика.
+    tickRelations(*this);
+    lap();
+    // Память — угасание и находки (тела близких, близкие среди зомби).
+    tickMemories(*this);
+    lap();
+    // Группы — раз в час, по отношениям: кто вступил, ушёл, кто вожак.
+    tickGroups(*this);
+    lap();
     // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
     updateBodies(*this);
+    lap();
     // До решений и движения: восприятие видит мир на начало тика.
     updatePerception(*this);
+    lap();
     // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
     updateZombies(*this);
+    lap();
     updateAnimals(*this);
+    lap();
     updateUtilityAi(*this);
+    lap();
     // Удары и выстрелы — по целям, которые выставили решения; погибшие
     // становятся телами до движения.
     updateCombat(*this);
+    lap();
     updateMovement(*this, kTickDt);
+    lap();
     // Последним: между тиками индекс совпадает с позициями всех сущностей.
     spatial_.sync(registry_);
+    lap();
     ++tick_;
 }
 
@@ -203,6 +252,18 @@ std::uint64_t World::stateHash() const {
             hasher.add(person->home);
             hasher.add(static_cast<std::uint8_t>(person->asleep));
             hasher.add(static_cast<std::uint8_t>(person->indoors));
+            hasher.add(person->group);
+            hasher.add(person->formerHome);
+        }
+        if (const auto* group = registry_.try_get<Group>(entity)) {
+            hasher.add(std::uint64_t{27});
+            hasher.add(group->leader);
+            hasher.add(static_cast<std::uint64_t>(group->members.size()));
+            for (const EntityId member : group->members) {
+                hasher.add(member);
+            }
+            hasher.add(group->base);
+            hasher.add(group->formed);
         }
         if (const auto* needs = registry_.try_get<Needs>(entity)) {
             hasher.add(std::uint64_t{9});
@@ -352,6 +413,37 @@ std::uint64_t World::stateHash() const {
             hasher.add(wounds->infection);
             hasher.add(wounds->hurtAt);
             hasher.add(wounds->hurtBy);
+        }
+        if (const auto* relations = registry_.try_get<Relations>(entity)) {
+            hasher.add(std::uint64_t{25});
+            hasher.add(relations->count);
+            for (std::size_t i = 0; i < relations->count; ++i) {
+                const Bond& bond = relations->bonds[i];
+                hasher.add(bond.other);
+                hasher.add(bond.familiarity);
+                hasher.add(bond.affinity);
+                hasher.add(bond.trust);
+                hasher.add(bond.chemistry);
+                hasher.add(bond.met);
+                hasher.add(bond.seen);
+                hasher.add(bond.flags);
+                hasher.add(bond.debt);
+                hasher.add(bond.grudge);
+            }
+        }
+        if (const auto* memories = registry_.try_get<Memories>(entity)) {
+            hasher.add(std::uint64_t{26});
+            hasher.add(memories->count);
+            for (std::size_t i = 0; i < memories->count; ++i) {
+                const Memory& memory = memories->items[i];
+                hasher.add(static_cast<std::uint8_t>(memory.kind));
+                hasher.add(memory.who);
+                hasher.add(memory.victim);
+                hasher.add(memory.about);
+                hasher.add(memory.source);
+                hasher.add(memory.tick);
+                hasher.add(memory.strength);
+            }
         }
         if (const auto* corpse = registry_.try_get<Corpse>(entity)) {
             hasher.add(std::uint64_t{23});
