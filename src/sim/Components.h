@@ -191,7 +191,7 @@ struct Mind {
 };
 
 // Связь человека с другим человеком — его взгляд, не общий: у другого своя
-// связь в ответ, и она может быть другой (этап 6.1). Правила — sim/Relations.h.
+// связь в ответ, и она может быть другой (этап 6.2). Правила — sim/Relations.h.
 struct Bond {
     // Отметки для летописи: событие пишется, когда отметка ставится, а снимается
     // она с запасом — так колебание у порога не засоряет журнал.
@@ -208,6 +208,10 @@ struct Bond {
     std::uint64_t met = 0;    // тик знакомства
     std::uint64_t seen = 0;   // тик, когда последний раз были вместе
     std::uint8_t flags = 0;
+    // Долг 0..1: чем обязан другому — спас, заступился (этап 6.2).
+    float debt = 0.0f;
+    // Обида 0..1: что другой ему сделал — обокрал, бросил в беде (этап 6.2).
+    float grudge = 0.0f;
 
     bool friendly() const { return (flags & kFriend) != 0; }
     bool hostile() const { return (flags & kFoe) != 0; }
@@ -231,6 +235,49 @@ struct Relations {
     }
     Bond* find(EntityId id) {
         return const_cast<Bond*>(static_cast<const Relations*>(this)->find(id));
+    }
+};
+
+// Что человек помнит о других (этап 6.1). Значения попадают в хеш и
+// сохранения: новые добавлять только в конец (перед Count).
+enum class MemoryKind : std::uint8_t {
+    Saved,     // who убил зомби about, который на него напал
+    Defended,  // who дрался с зомби about, который на него напал
+    Abandoned, // who убежал, когда на него напал зомби about
+    Robbed,    // who обыскивал его дом about у него на глазах
+    Bereaved,  // близкий who погиб; about — убийца, если есть
+    Turned,    // близкий who встал зомби
+    Count
+};
+
+// Воспоминание: что случилось, с кем и когда. Сила угасает со временем;
+// слабое забывается (sim/Memory.h).
+struct Memory {
+    MemoryKind kind = MemoryKind::Saved;
+    EntityId who = kInvalidId;   // о ком воспоминание
+    EntityId about = kInvalidId; // при чём: зомби, здание, убийца
+    std::uint64_t tick = 0;      // когда случилось (повторилось — последний раз)
+    float strength = 0.0f;       // 0..1
+};
+
+// Память человека о значимых событиях с участием других. Мест мало: новое
+// воспоминание вытесняет самое слабое, если оно слабее нового.
+struct Memories {
+    static constexpr std::size_t kMaxMemories = 12;
+
+    Memory items[kMaxMemories] = {};
+    std::uint8_t count = 0;
+
+    const Memory* find(MemoryKind kind, EntityId who) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (items[i].kind == kind && items[i].who == who) {
+                return &items[i];
+            }
+        }
+        return nullptr;
+    }
+    Memory* find(MemoryKind kind, EntityId who) {
+        return const_cast<Memory*>(static_cast<const Memories*>(this)->find(kind, who));
     }
 };
 

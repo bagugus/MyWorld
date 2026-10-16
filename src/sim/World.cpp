@@ -7,6 +7,7 @@
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
+#include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
@@ -79,6 +80,8 @@ void World::step() {
     tickNeeds(*this);
     // Отношения — по тому, кто был рядом и чем занят на начало тика.
     tickRelations(*this);
+    // Память — угасание и находки (тела близких, близкие среди зомби).
+    tickMemories(*this);
     // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
     updateBodies(*this);
     // До решений и движения: восприятие видит мир на начало тика.
@@ -369,6 +372,20 @@ std::uint64_t World::stateHash() const {
                 hasher.add(bond.met);
                 hasher.add(bond.seen);
                 hasher.add(bond.flags);
+                hasher.add(bond.debt);
+                hasher.add(bond.grudge);
+            }
+        }
+        if (const auto* memories = registry_.try_get<Memories>(entity)) {
+            hasher.add(std::uint64_t{26});
+            hasher.add(memories->count);
+            for (std::size_t i = 0; i < memories->count; ++i) {
+                const Memory& memory = memories->items[i];
+                hasher.add(static_cast<std::uint8_t>(memory.kind));
+                hasher.add(memory.who);
+                hasher.add(memory.about);
+                hasher.add(memory.tick);
+                hasher.add(memory.strength);
             }
         }
         if (const auto* corpse = registry_.try_get<Corpse>(entity)) {

@@ -90,6 +90,14 @@ const char* corpseKindName(CorpseKind kind) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* memoryKindName(MemoryKind kind) {
+    constexpr const char* kNames[] = {"спас от зомби",   "заступился",    "бросил в беде",
+                                      "обокрал дом",     "погиб",         "встал зомби"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(MemoryKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
 const char* itemName(ItemKind kind) {
     constexpr const char* kNames[] = {"еда",      "вода",       "мясо",     "бинты",
                                       "лекарства", "патроны к пистолету", "патроны к дробовику",

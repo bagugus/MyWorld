@@ -164,6 +164,34 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.verb = "невзлюбил";
         phrase.withObject = true;
         break;
+    case ChronicleKind::SavedBy:
+        phrase.verb = "обязан жизнью";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— тот убил напавшего зомби");
+        break;
+    case ChronicleKind::DefendedBy:
+        phrase.verb = "благодарен";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— заступился в схватке с зомби");
+        break;
+    case ChronicleKind::AbandonedBy:
+        phrase.verb = "не простит";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— убежал, бросив его зомби");
+        break;
+    case ChronicleKind::CaughtThief:
+        phrase.verb = "застал за обыском своего дома";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— взято вещей: %d", event.a);
+        break;
+    case ChronicleKind::Mourned:
+        phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::SawTurned:
+        phrase.verb = "узнал в зомби близкого";
+        phrase.withObject = true;
+        break;
     case ChronicleKind::Count:
         break;
     }

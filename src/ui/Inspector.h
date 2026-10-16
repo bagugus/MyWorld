@@ -53,6 +53,8 @@ private:
     bool drawPerception(entt::entity entity);
     // Кого человек знает и как к нему относится. false — щёлкнули по ссылке.
     bool drawRelations(entt::entity entity);
+    // Что человек помнит о других. false — щёлкнули по ссылке.
+    bool drawMemories(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.

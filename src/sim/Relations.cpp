@@ -22,6 +22,13 @@ constexpr float kKindness = 0.4f;   // × (альтруизм other − 0,5)
 constexpr float kHarshness = 0.5f;  // × (агрессия other − 0,5) × (1 − агрессия self)
 constexpr float kWarmth = 0.3f;     // × (общительность self − 0,5)
 
+// Долг и обида: насколько сдвигают симпатию (и цель, к которой она тянется) и
+// доверие. Обида весит больше: плохое помнится сильнее хорошего.
+constexpr float kDebtAffinity = 0.5f;
+constexpr float kDebtTrust = 0.5f;
+constexpr float kGrudgeAffinity = 0.8f;
+constexpr float kGrudgeTrust = 1.0f;
+
 // Знакомые с начала мира: соседи по дому — хорошо, по поселению — немного.
 constexpr float kHousemateFamiliarity = 0.7f;
 constexpr float kHousemateAffinity = 0.8f;  // доля совместимости
@@ -60,7 +67,33 @@ float chemistry(EntityId self, const Traits& mine, EntityId other, const Traits&
 }
 
 float bondStrength(const Bond& bond) {
-    return bond.familiarity + 0.5f * std::abs(bond.affinity);
+    return bond.familiarity + 0.5f * std::abs(bond.affinity) + bond.debt + bond.grudge;
+}
+
+float closeness(const Bond& bond) {
+    return std::clamp(bond.familiarity * (0.5f + 0.5f * bond.affinity), 0.0f, 1.0f);
+}
+
+float affinityGoal(const Bond& bond) {
+    return clampUnit(bond.chemistry + kDebtAffinity * bond.debt - kGrudgeAffinity * bond.grudge);
+}
+
+float trustCeiling(const Bond& bond) {
+    return std::max(0.0f, bond.affinity) * bond.familiarity * (1.0f - bond.grudge);
+}
+
+void addDebt(Bond& bond, float amount) {
+    const float added = std::min(amount, 1.0f - bond.debt);
+    bond.debt += added;
+    bond.affinity = clampUnit(bond.affinity + kDebtAffinity * added);
+    bond.trust = clampUnit(bond.trust + kDebtTrust * added);
+}
+
+void addGrudge(Bond& bond, float amount) {
+    const float added = std::min(amount, 1.0f - bond.grudge);
+    bond.grudge += added;
+    bond.affinity = clampUnit(bond.affinity - kGrudgeAffinity * added);
+    bond.trust = clampUnit(bond.trust - kGrudgeTrust * added);
 }
 
 Bond* acquireBond(Relations& relations, EntityId other, float chemistry, std::uint64_t tick,

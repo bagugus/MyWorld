@@ -547,7 +547,7 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
-    if (!drawRelations(entity)) {
+    if (!drawRelations(entity) || !drawMemories(entity)) {
         return;
     }
 
@@ -698,8 +698,8 @@ bool Inspector::drawRelations(entt::entity entity) {
     std::stable_sort(bonds.begin(), bonds.end(), [](const Bond* a, const Bond* b) {
         return bondStrength(*a) > bondStrength(*b);
     });
-    ImGui::TextDisabled("знакомство, симпатия, доверие (%%); совместимость");
-    if (!ImGui::BeginTable("relations", 5, ImGuiTableFlags_SizingFixedFit)) {
+    ImGui::TextDisabled("знакомство, симпатия, доверие (%%); совместимость; долг, обида");
+    if (!ImGui::BeginTable("relations", 6, ImGuiTableFlags_SizingFixedFit)) {
         return true;
     }
     const std::uint64_t tick = world_.tick();
@@ -715,6 +715,14 @@ bool Inspector::drawRelations(entt::entity entity) {
                     bond->trust * 100.0f);
         ImGui::TableNextColumn();
         ImGui::Text("%+.2f", bond->chemistry);
+        ImGui::TableNextColumn();
+        if (bond->debt > 0.0f && bond->grudge > 0.0f) {
+            ImGui::Text("долг %.0f, обида %.0f", bond->debt * 100.0f, bond->grudge * 100.0f);
+        } else if (bond->debt > 0.0f) {
+            ImGui::TextColored({0.55f, 0.85f, 0.55f, 1.0f}, "долг %.0f", bond->debt * 100.0f);
+        } else if (bond->grudge > 0.0f) {
+            ImGui::TextColored({1.0f, 0.6f, 0.4f, 1.0f}, "обида %.0f", bond->grudge * 100.0f);
+        }
         ImGui::TableNextColumn();
         const entt::entity other = world_.find(bond->other);
         if (other == entt::null || registry.all_of<Corpse>(other)) {
@@ -735,6 +743,61 @@ bool Inspector::drawRelations(entt::entity entity) {
             formatGameDuration(ago, sizeof(ago), tick - bond->seen);
             ImGui::TextDisabled("%s назад", ago);
         }
+    }
+    ImGui::EndTable();
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
+}
+
+bool Inspector::drawMemories(entt::entity entity) {
+    const auto* memories = world_.registry().try_get<Memories>(entity);
+    if (memories == nullptr) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Память: %d###memories", memories->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    if (memories->count == 0) {
+        ImGui::TextDisabled("ничего значимого");
+        return true;
+    }
+    // Сначала свежие.
+    std::vector<const Memory*> items;
+    for (std::size_t i = 0; i < memories->count; ++i) {
+        items.push_back(&memories->items[i]);
+    }
+    std::stable_sort(items.begin(), items.end(),
+                     [](const Memory* a, const Memory* b) { return a->tick > b->tick; });
+    ImGui::TextDisabled("кто, что сделал, при чём; сила (%%)");
+    if (!ImGui::BeginTable("memories", 5, ImGuiTableFlags_SizingFixedFit)) {
+        return true;
+    }
+    const std::uint64_t tick = world_.tick();
+    EntityId clicked = kInvalidId;
+    char ago[32];
+    for (const Memory* memory : items) {
+        ImGui::PushID(memory);
+        ImGui::TableNextColumn();
+        if (idLink(memory->who)) {
+            clicked = memory->who;
+        }
+        ImGui::TableNextColumn();
+        ImGui::TextUnformatted(memoryKindName(memory->kind));
+        ImGui::TableNextColumn();
+        if (memory->about != kInvalidId && idLink(memory->about)) {
+            clicked = memory->about;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%3.0f", memory->strength * 100.0f);
+        ImGui::TableNextColumn();
+        formatGameDuration(ago, sizeof(ago), tick - memory->tick);
+        ImGui::TextDisabled("%s назад", ago);
+        ImGui::PopID();
     }
     ImGui::EndTable();
     if (clicked != kInvalidId) {

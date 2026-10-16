@@ -27,6 +27,13 @@ constexpr float kNearShare = 0.2f;
 // kForgetHours.
 constexpr std::uint64_t kForgetAfterTicks = 2 * kTicksPerGameDay;
 constexpr float kForgetHours = 60.0f * 24.0f;
+// Долг и обида угасают сами, постоянная времени — часы. Обида у
+// агрессивного держится дольше, у доброго проходит быстрее: множитель
+// (0,5 + агрессия) × (1,5 − альтруизм), от 0,25 до 2,25.
+constexpr float kDebtHours = 30.0f * 24.0f;
+constexpr float kGrudgeHours = 20.0f * 24.0f;
+// Меньше этого — угасли совсем.
+constexpr float kFeelingGone = 0.01f;
 
 bool talking(const Mind& mind) {
     return mind.action == Action::Socialize && mind.phase == ActionPhase::Perform;
@@ -52,10 +59,22 @@ void updateRelations(World& world, float minutes) {
     std::vector<Companion> company;
     auto view = registry.view<const Id, const Person, Relations, const Position, const Walker>();
     for (const auto [entity, id, person, relations, position, walker] : view.each()) {
+        const Traits* own = registry.try_get<Traits>(entity);
+        const Traits& mine = own != nullptr ? *own : kAverage;
+        const float grudgeHours =
+            kGrudgeHours * (0.5f + mine.aggression) * (1.5f - mine.altruism);
         for (std::size_t i = 0; i < relations.count; ++i) {
             Bond& bond = relations.bonds[i];
             if (tick > bond.seen + kForgetAfterTicks) {
                 bond.familiarity = std::max(0.0f, bond.familiarity - hours / kForgetHours);
+            }
+            if (bond.debt > 0.0f) {
+                bond.debt -= bond.debt * std::min(1.0f, hours / kDebtHours);
+                bond.debt = bond.debt < kFeelingGone ? 0.0f : bond.debt;
+            }
+            if (bond.grudge > 0.0f) {
+                bond.grudge -= bond.grudge * std::min(1.0f, hours / grudgeHours);
+                bond.grudge = bond.grudge < kFeelingGone ? 0.0f : bond.grudge;
             }
         }
         if (person.asleep || walker.moving()) {
@@ -85,8 +104,6 @@ void updateRelations(World& world, float minutes) {
                           });
         const Mind* mind = registry.try_get<Mind>(entity);
         const bool speaking = mind != nullptr && talking(*mind);
-        const Traits* own = registry.try_get<Traits>(entity);
-        const Traits& mine = own != nullptr ? *own : kAverage;
         for (std::size_t k = 0; k < count; ++k) {
             const Companion& companion = company[k];
             const Mind* theirMind = registry.try_get<Mind>(companion.entity);
@@ -102,9 +119,10 @@ void updateRelations(World& world, float minutes) {
             }
             const float pace = hours * intensity;
             bond->familiarity = approach(bond->familiarity, 1.0f, pace / kFamiliarityHours);
-            bond->affinity = approach(bond->affinity, bond->chemistry, pace / kAffinityHours);
-            // Доверие от одного общения только растёт; подорвать его могут поступки.
-            const float trusted = std::max(0.0f, bond->affinity) * bond->familiarity;
+            bond->affinity = approach(bond->affinity, affinityGoal(*bond), pace / kAffinityHours);
+            // Доверие от одного общения только растёт; подрывают его поступки
+            // (обида — сразу и пока не угаснет).
+            const float trusted = trustCeiling(*bond);
             if (trusted > bond->trust) {
                 bond->trust = approach(bond->trust, trusted, pace / kTrustHours);
             }

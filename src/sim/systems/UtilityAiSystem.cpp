@@ -2,6 +2,7 @@
 
 #include "sim/Calendar.h"
 #include "sim/Items.h"
+#include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Weapons.h"
@@ -96,7 +97,7 @@ constexpr float kSocialScale = 800.0f;
 constexpr float kWaterSearch = 2000.0f;
 constexpr float kForageSearch = 1500.0f;
 constexpr float kCompanySearch = 500.0f;
-// К знакомым с симпатией не ниже kVisitAffinity идут дальше (этап 6.1).
+// К знакомым с симпатией не ниже kVisitAffinity идут дальше (этап 6.2).
 constexpr float kFriendSearch = 1500.0f;
 constexpr float kVisitAffinity = 0.2f;
 constexpr float kGatheringSearch = 2000.0f;
@@ -258,7 +259,7 @@ struct Context {
     Weapon weapon{};
     // Кровотечение (этап 5.6: перевязка).
     float bleeding = 0.0f;
-    // Кого знает (этап 6.1); nullptr — никого.
+    // Кого знает (этап 6.2); nullptr — никого.
     const Relations* relations = nullptr;
 };
 
@@ -1501,6 +1502,7 @@ private:
         const float prudence = traits != nullptr ? traits->prudence : 0.5f;
         const int wantFood = 1 + static_cast<int>(std::lround(2.0f * greed + 2.0f * prudence));
         const int wantWater = 1 + static_cast<int>(std::lround(greed + prudence));
+        const Inventory before = stock;
         // Мясо — первым: оно портится.
         int meat = stock.take(ItemKind::Meat, wantFood);
         int food = stock.take(ItemKind::Food, wantFood - meat);
@@ -1527,6 +1529,14 @@ private:
         keep(ItemKind::Food, food, kCarryFoodMax - carry.food());
         keep(ItemKind::Water, water, kCarryWaterMax - carry.count(ItemKind::Water));
         takeGear(stock, carry, body ? source : entt::entity{entt::null});
+        // Хозяева, которые это видели, запомнят вора (этап 6.1).
+        if (!body) {
+            int taken = 0;
+            for (std::size_t i = 0; i < kItemKinds; ++i) {
+                taken += std::max(0, static_cast<int>(before.items[i]) - stock.items[i]);
+            }
+            witnessTheft(world_, entity_, mind_.target, taken);
+        }
     }
 
     // Снаряжение: оружие сильнее того, что в руках, патроны к своему оружию,

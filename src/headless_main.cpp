@@ -167,7 +167,7 @@ void printPeople(const lw::World& world) {
     }
 }
 
-// Отношения (этап 6.1): сколько знакомых, друзей и недругов у живых.
+// Отношения (этап 6.2): сколько знакомых, друзей и недругов у живых.
 void printRelations(const lw::World& world) {
     const entt::registry& registry = world.registry();
     std::size_t people = 0;
@@ -210,6 +210,65 @@ void printRelations(const lw::World& world) {
                 static_cast<double>(bonds) / static_cast<double>(people),
                 bonds > 0 ? familiarity / static_cast<float>(bonds) : 0.0f, friends, mutual, foes,
                 gone, lonely, people);
+}
+
+// Память (этап 6.1), долг и обида (этап 6.2) у живых.
+void printMemories(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    constexpr auto kKinds = static_cast<std::size_t>(lw::MemoryKind::Count);
+    std::size_t byKind[kKinds] = {};
+    std::size_t people = 0;
+    std::size_t remembering = 0;
+    std::size_t memories = 0;
+    std::size_t debts = 0;
+    std::size_t grudges = 0;
+    float debt = 0.0f;
+    float grudge = 0.0f;
+    // Кто помнит больше всех (при равных — меньший id): его удобно открыть в
+    // инспекторе (living_world --select ID).
+    lw::EntityId richest = lw::kInvalidId;
+    std::size_t most = 0;
+    for (const auto [entity, id, person, memory] :
+         registry.view<const lw::Id, const lw::Person, const lw::Memories>().each()) {
+        ++people;
+        memories += memory.count;
+        remembering += memory.count > 0 ? 1 : 0;
+        if (memory.count > most || (memory.count == most && most > 0 && id.value < richest)) {
+            most = memory.count;
+            richest = id.value;
+        }
+        for (std::size_t i = 0; i < memory.count; ++i) {
+            ++byKind[static_cast<std::size_t>(memory.items[i].kind)];
+        }
+        if (const auto* relations = registry.try_get<lw::Relations>(entity)) {
+            for (std::size_t i = 0; i < relations->count; ++i) {
+                const lw::Bond& bond = relations->bonds[i];
+                debts += bond.debt > 0.0f ? 1 : 0;
+                grudges += bond.grudge > 0.0f ? 1 : 0;
+                debt += bond.debt;
+                grudge += bond.grudge;
+            }
+        }
+    }
+    if (people == 0) {
+        return;
+    }
+    constexpr const char* kNames[] = {"saved", "defended", "abandoned", "robbed", "bereaved",
+                                      "turned"};
+    static_assert(std::size(kNames) == kKinds);
+    std::printf("memories: %zu (%zu of %zu people remember something):", memories, remembering,
+                people);
+    for (std::size_t i = 0; i < kKinds; ++i) {
+        std::printf("%s %s %zu", i == 0 ? "" : ",", kNames[i], byKind[i]);
+    }
+    std::printf("\n  debts %zu (mean %.2f), grudges %zu (mean %.2f)", debts,
+                debts > 0 ? debt / static_cast<float>(debts) : 0.0f, grudges,
+                grudges > 0 ? grudge / static_cast<float>(grudges) : 0.0f);
+    if (richest != lw::kInvalidId) {
+        std::printf("; remembers most: #%llu (%zu)", static_cast<unsigned long long>(richest),
+                    most);
+    }
+    std::printf("\n");
 }
 
 // Восприятие: сколько контактов у существ и как они замечены.
@@ -723,6 +782,7 @@ int main(int argc, char** argv) {
     printWeather(world);
     printPeople(world);
     printRelations(world);
+    printMemories(world);
     printPerception(world);
     printZombies(world);
     printAnimals(world);

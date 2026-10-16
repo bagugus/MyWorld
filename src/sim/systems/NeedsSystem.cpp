@@ -132,7 +132,7 @@ void updateNeeds(World& world, float minutes) {
         }
         bool company = false;
         bool body = false;
-        // Рядом с тем, кого невзлюбил, всё равно одиноко (этап 6.1).
+        // Рядом с тем, кого невзлюбил, всё равно одиноко (этап 6.2).
         const Relations* relations = registry.try_get<Relations>(entity);
         const auto disliked = [relations](EntityId other) {
             const Bond* bond = relations != nullptr ? relations->find(other) : nullptr;

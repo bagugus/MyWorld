@@ -47,6 +47,8 @@ add_library(lw_sim STATIC
     src/sim/Items.h
     src/sim/Map.cpp
     src/sim/Map.h
+    src/sim/Memory.cpp
+    src/sim/Memory.h
     src/sim/Perception.cpp
     src/sim/Perception.h
     src/sim/Places.cpp
@@ -90,6 +92,8 @@ add_library(lw_sim STATIC
     src/sim/systems/AnimalSystem.h
     src/sim/systems/CombatSystem.cpp
     src/sim/systems/CombatSystem.h
+    src/sim/systems/MemorySystem.cpp
+    src/sim/systems/MemorySystem.h
     src/sim/systems/MovementSystem.cpp
     src/sim/systems/MovementSystem.h
     src/sim/systems/NeedsSystem.cpp
