@@ -2,6 +2,7 @@
 
 #include "sim/Perception.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -52,6 +53,9 @@ constexpr float kBystanderConcern = 0.1f;
 constexpr float kWitnessMemory = 0.5f;
 // Товарищ по группе (этап 6.4) небезразличен ещё на столько.
 constexpr float kGroupConcern = 0.3f;
+// Пока кража и нападение — преступление (фаза мира, этап 7.4), пострадавший
+// небезразличен свидетелю не меньше чем на столько.
+constexpr float kLawConcern = 0.3f;
 // Ради меньших долга и обиды незнакомца не запоминают в лицо.
 constexpr float kMinBondEffect = 0.05f;
 // Сколько вещей взял вор, по слухам неизвестно: считается столько.
@@ -152,6 +156,11 @@ const Traits& traitsOf(const entt::registry& registry, entt::entity entity) {
 
 bool isDeed(MemoryKind kind) {
     return kind != MemoryKind::Bereaved && kind != MemoryKind::Turned;
+}
+
+bool isCrime(MemoryKind kind) {
+    return kind == MemoryKind::Robbed || kind == MemoryKind::Betrayed ||
+           kind == MemoryKind::Assaulted || kind == MemoryKind::Killed;
 }
 
 bool remember(Memories& memories, const Memory& memory) {
@@ -257,8 +266,13 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
     const Traits& traits = traitsOf(registry, self);
     const Impression impression = impressionOf(kind, traits, close, mourned, a);
     // Чужой поступок весит столько, насколько небезразличен пострадавший;
-    // слух — меньше и по доверию к рассказчику.
-    const float concern = own ? 1.0f : concernFor(world, self, account.victim);
+    // слух — меньше и по доверию к рассказчику. Пока есть закон (этап 7.4),
+    // кража, нападение и убийство — преступление: их осуждают и тогда, когда
+    // пострадал чужой (но не недруг).
+    float concern = own ? 1.0f : concernFor(world, self, account.victim);
+    if (!own && concern > 0.0f && isCrime(kind) && rulesOf(world).lawful) {
+        concern = std::max(concern, kLawConcern);
+    }
     const float belief = heard ? kHearsay * clamp01(account.credibility) : 1.0f;
     const float effect = concern * belief;
     const float strength =
@@ -466,6 +480,21 @@ bool retaliates(const World& world, entt::entity self, EntityId selfId, EntityId
 }
 
 } // namespace
+
+bool isAssault(const World& world, entt::entity attacker, EntityId victim) {
+    const entt::registry& registry = world.registry();
+    const entt::entity target = world.find(victim);
+    if (target == entt::null || !registry.all_of<Person>(target)) {
+        return false;
+    }
+    const auto* combat = registry.try_get<Combat>(target);
+    const EntityId victimTarget = combat != nullptr ? combat->target : kInvalidId;
+    if (retaliates(world, attacker, registry.get<Id>(attacker).value, victim, victimTarget)) {
+        return false; // отбивается
+    }
+    const entt::entity protegee = world.find(victimTarget);
+    return protegee == entt::null || !registry.all_of<Person>(protegee); // не заступается
+}
 
 void witnessAssault(World& world, entt::entity attacker, entt::entity victim) {
     entt::registry& registry = world.registry();

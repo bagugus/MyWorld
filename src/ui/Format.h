@@ -36,6 +36,9 @@ const char* corpseKindName(CorpseKind kind);
 const char* memoryKindName(MemoryKind kind);
 // Ивент: «падение припасов».
 const char* eventKindName(EventKind kind);
+// Сценарий и фаза мира (этап 7.4): «зомби-вирус», «паника».
+const char* scenarioKindName(ScenarioKind kind);
+const char* phaseName(WorldPhase phase);
 // Предмет: «бинт», «патроны к винтовке».
 const char* itemName(ItemKind kind);
 // Строка «еда 3, вода 2, бинт 1» — непустые позиции инвентаря; «пусто».
@@ -51,7 +54,11 @@ void setNameSource(const World* world);
 // Подпись объекта: «John Miller #1745» или «#1745».
 std::string idLabel(EntityId id);
 
-// Длительность в тиках — как игровое время: «2 ч 05 мин», «35 мин».
+// Длительность в тиках — как игровое время: «3 сут 4 ч», «2 ч 05 мин», «35 мин».
 void formatGameDuration(char* buffer, std::size_t size, std::uint64_t ticks);
+
+// Когда наступит следующая фаза мира (этап 7.4): «паника — при 3 пострадавших
+// (сейчас 1), иначе через 2 сут 4 ч». Пусто — фаза последняя.
+void formatNextPhase(char* buffer, std::size_t size, const World& world, const Scenario& scenario);
 
 } // namespace lw::ui

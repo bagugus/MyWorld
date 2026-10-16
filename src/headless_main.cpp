@@ -11,6 +11,8 @@
 //   lw_headless --seed 42 --ticks 720000 --events         и журнал ивентов (этап 7)
 //   lw_headless --seed 42 --event drop 3                 один сброс груза через 3 ч
 //   lw_headless --seed 42 --event-schedule               временное расписание ивентов (до рассказчика)
+//   lw_headless --seed 42 --outbreak 3 --daily           вспышка на 4-е сутки (0 — не по расписанию)
+//   lw_headless --seed 42 --phase collapse               сразу в фазу коллапса (этап 7.4)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -19,12 +21,14 @@
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
+#include "sim/Scenario.h"
 #include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
 #include "sim/nav/NavGraph.h"
 #include "sim/systems/EventSystem.h"
+#include "sim/systems/ScenarioSystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -826,10 +830,61 @@ void printClimate(std::uint64_t seed) {
 
 // Строка на игровые сутки: сколько кого, смерти по причинам, еда и патроны.
 // По таким строкам подбирается баланс дефицита (этап 5.7).
+// «day 9 14:00».
+std::string dayTime(std::uint64_t tick) {
+    const lw::CalendarTime time = lw::calendarAt(tick);
+    char text[32];
+    std::snprintf(text, sizeof(text), "day %d %02d:%02d", time.day, time.hour, time.minute);
+    return text;
+}
+
+// Сценарий и фазы мира (этап 7.4): фаза, когда начиналась каждая, беда в цифрах.
+void printScenario(const lw::World& world) {
+    const lw::Scenario* scenario = lw::scenarioOf(world);
+    if (scenario == nullptr) {
+        std::printf("scenario: none (world without peacetime lives by survival rules)\n");
+        return;
+    }
+    std::printf("scenario #%llu zombie virus: phase %s; began:",
+                static_cast<unsigned long long>(lw::scenarioIdOf(world)),
+                lw::phaseRules(scenario->phase).name);
+    const char* separator = " ";
+    for (std::size_t i = 0; i < lw::kWorldPhases; ++i) {
+        if (scenario->began[i] != lw::Scenario::kNever) {
+            std::printf("%s%s %s", separator, lw::phaseRules(static_cast<lw::WorldPhase>(i)).name,
+                        dayTime(scenario->began[i]).c_str());
+            separator = ", ";
+        }
+    }
+    std::printf("\n");
+    const lw::ScenarioStats stats = lw::scenarioStats(world);
+    std::printf("  population %d, alive %d (infected %d), lost %d, casualties %d; zombies %d "
+                "(target %d, arrivals %d a day)",
+                stats.population, stats.alive, stats.infected, stats.lost, stats.casualties(),
+                stats.zombies, lw::zombieTarget(world), lw::arrivalsPerDay(world));
+    if (const std::uint64_t deadline = lw::phaseDeadline(*scenario); deadline != lw::Scenario::kNever) {
+        std::printf("; next phase by %s", dayTime(deadline).c_str());
+        if (const int trigger = lw::phaseTrigger(*scenario); trigger > 0) {
+            std::printf(" or at %d casualties", trigger);
+        }
+    }
+    std::printf("\n");
+    std::size_t left[lw::kWorldPhases] = {};
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::LeftWork) {
+            ++left[std::min<std::size_t>(static_cast<std::size_t>(event.a), lw::kWorldPhases - 1)];
+        }
+    }
+    std::printf("  left work: panic %zu, collapse %zu, survival %zu\n",
+                left[static_cast<std::size_t>(lw::WorldPhase::Panic)],
+                left[static_cast<std::size_t>(lw::WorldPhase::Collapse)],
+                left[static_cast<std::size_t>(lw::WorldPhase::Survival)]);
+}
+
 void printDailyHeader() {
-    std::printf("day season | people (hungry thirsty) | zombies hordes | animals | died: wounds "
+    std::printf("day season phase | people (hungry thirsty) | zombies hordes | animals | died: wounds "
                 "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
-                "forest | ammo | bought money\n");
+                "forest | ammo | bought money | workers shops\n");
 }
 
 void printDaily(const lw::World& world) {
@@ -867,17 +922,33 @@ void printDaily(const lw::World& world) {
     for (const auto [entity, person, wallet] : registry.view<const lw::Person, const lw::Wallet>().each()) {
         money += wallet.money;
     }
+    // Держится ли порядок (этап 7.4): сколько людей ещё выходит на работу и в
+    // скольких магазинах ещё работают.
+    std::size_t onDuty = 0;
+    for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
+        onDuty += lw::keepsWorking(world, entity) ? 1 : 0;
+    }
+    std::size_t shops = 0;
+    for (const lw::EntityId workplace : lw::mannedWorkplaces(world)) {
+        const entt::entity building = world.find(workplace);
+        shops += building != entt::null &&
+                         registry.get<lw::Building>(building).kind == lw::BuildingKind::Shop
+                     ? 1
+                     : 0;
+    }
     const lw::Chronicle& chronicle = world.chronicle();
-    std::printf("%3d %d | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
-                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f\n",
-                time.day, static_cast<int>(time.season), people, hungry, thirsty,
+    std::printf("%3d %d %-8s | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f | %3zu %3zu\n",
+                time.day, static_cast<int>(time.season), lw::rulesOf(world).name, people, hungry,
+                thirsty,
                 registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
                 registry.view<const lw::Animal>().size(), died[0], died[1], died[2], died[3],
                 died[4], died[5], chronicle.countOf(lw::ChronicleKind::Turned),
                 chronicle.countOf(lw::ChronicleKind::KilledZombie),
                 chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
                 world.resources().forestTotal(), ammo, chronicle.countOf(lw::ChronicleKind::Bought),
-                people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0);
+                people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0, onDuty,
+                shops);
     std::fflush(stdout);
 }
 
@@ -1047,6 +1118,8 @@ int main(int argc, char** argv) {
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
+    // Фаза мира с самого начала (этап 7.4).
+    std::optional<lw::WorldPhase> startPhase;
     lw::WorldConfig config;
 
     for (int i = 1; i < argc; ++i) {
@@ -1073,6 +1146,10 @@ int main(int argc, char** argv) {
             config.events = true;
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
             config.peacetime = false;
+        } else if (std::strcmp(argv[i], "--outbreak") == 0 && hasValue) {
+            config.outbreakDays = std::strtod(argv[++i], nullptr);
+        } else if (std::strcmp(argv[i], "--phase") == 0 && hasValue && lw::phaseByName(argv[i + 1])) {
+            startPhase = lw::phaseByName(argv[++i]);
         } else if (std::strcmp(argv[i], "--event") == 0 && i + 2 < argc &&
                    lw::eventKindByName(argv[i + 1])) {
             manualEvent = lw::eventKindByName(argv[++i]);
@@ -1089,6 +1166,7 @@ int main(int argc, char** argv) {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
+                        "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
                         "[--profile]\n");
             return 2;
         }
@@ -1101,6 +1179,9 @@ int main(int argc, char** argv) {
 
     const auto genStart = std::chrono::steady_clock::now();
     lw::World world(seed, config);
+    if (startPhase) {
+        lw::enterPhase(world, *startPhase);
+    }
     const std::chrono::duration<double> genElapsed = std::chrono::steady_clock::now() - genStart;
     printMapSummary(world, genElapsed.count());
     if (paths > 0) {
@@ -1135,6 +1216,7 @@ int main(int argc, char** argv) {
                 world.entityCount(),
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
+    printScenario(world);
     printPeople(world);
     printWork(world);
     printRelations(world);

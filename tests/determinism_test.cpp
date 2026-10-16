@@ -3,7 +3,8 @@
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
 // память, долг и обида, чужие поступки и слухи, группы, социальные действия
-// (поделиться, обмен, предательство, месть), ивенты, мирная жизнь.
+// (поделиться, обмен, предательство, месть), ивенты, мирная жизнь, сценарий и
+// фазы мира.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -20,6 +21,7 @@
 #include "sim/Relations.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
+#include "sim/Scenario.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
 #include "sim/Traits.h"
@@ -38,6 +40,7 @@
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/ScenarioSystem.h"
 #include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WorkSystem.h"
@@ -5161,6 +5164,7 @@ lw::WorldConfig peaceConfig(int people) {
     lw::WorldConfig config = regionConfig();
     config.people = people;
     config.peacetime = true;
+    config.outbreakDays = 0.0; // вспышку (этап 7.4) начинают тесты сценария
     return config;
 }
 
@@ -5233,7 +5237,8 @@ entt::entity idlerNear(const lw::World& world, lw::BuildingKind kind) {
 // школа, в деревне — магазин; у людей профессии в своём поселении и деньги.
 void testPeacefulStart() {
     const lw::WorldConfig defaults;
-    CHECK(defaults.zombies == 0 && defaults.peacetime && !defaults.events);
+    CHECK(defaults.zombies == 0 && defaults.peacetime && !defaults.events &&
+          defaults.outbreakDays > 0.0);
     const lw::World world(7, peaceConfig(150));
     const lw::World twin(7, peaceConfig(150));
     CHECK(world.stateHash() == twin.stateHash());
@@ -5655,6 +5660,466 @@ void testTapWater() {
     }
 }
 
+// --- Сценарий и фазы мира (этап 7.4) ---------------------------------------------
+
+// Убрать всех зомби и орды: тесту нужны правила фаз, а не нападения.
+void clearZombies(lw::World& world) {
+    std::vector<entt::entity> doomed;
+    for (const auto [entity, zombie] : world.registry().view<const lw::Zombie>().each()) {
+        doomed.push_back(entity);
+    }
+    for (const auto [entity, horde] : world.registry().view<const lw::Horde>().each()) {
+        doomed.push_back(entity);
+    }
+    for (const entt::entity entity : doomed) {
+        world.destroy(entity);
+    }
+    world.syncSpatial();
+}
+
+// Оценка действия человека сейчас.
+float scoreOf(const lw::World& world, entt::entity person, lw::Action action) {
+    return lw::evaluateActions(world, person)[static_cast<std::size_t>(action)];
+}
+
+// Работник на смене весь день, каждый день, с такими чертами.
+void alwaysOnShift(entt::registry& registry, entt::entity worker, const lw::Traits& traits) {
+    lw::Job& job = registry.get<lw::Job>(worker);
+    job.start = 0;
+    job.end = 24 * 60;
+    job.days = 0b1111111;
+    registry.get<lw::Traits>(worker) = traits;
+}
+
+// Все черты — value.
+lw::Traits traitsOf(float value) {
+    lw::Traits traits;
+    traits.bravery = traits.greed = traits.altruism = traits.aggression = traits.leadership =
+        traits.sociability = traits.curiosity = traits.prudence = value;
+    return traits;
+}
+
+// Живые люди с домом и без работы — по возрастанию id.
+std::vector<entt::entity> idlers(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::vector<std::pair<lw::EntityId, entt::entity>> found;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const auto* job = registry.try_get<lw::Job>(entity);
+        if ((job == nullptr || job->profession == lw::Profession::None) &&
+            person.home != lw::kInvalidId) {
+            found.emplace_back(id.value, entity);
+        }
+    }
+    std::sort(found.begin(), found.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    std::vector<entt::entity> result;
+    for (const auto& [id, entity] : found) {
+        result.push_back(entity);
+    }
+    return result;
+}
+
+lw::EntityId idOf(const lw::World& world, entt::entity entity) {
+    return world.registry().get<lw::Id>(entity).value;
+}
+
+std::uint64_t phaseBegan(const lw::World& world, lw::WorldPhase phase) {
+    return lw::scenarioOf(world)->began[static_cast<std::size_t>(phase)];
+}
+
+// Правила фаз: что держится и что нет, кто выходит на работу. Мир без мирной
+// жизни сценария не имеет и живёт по правилам выживания.
+void testPhaseRules() {
+    using P = lw::WorldPhase;
+    const lw::PhaseRules& peace = lw::phaseRules(P::Peace);
+    const lw::PhaseRules& outbreak = lw::phaseRules(P::Outbreak);
+    const lw::PhaseRules& panic = lw::phaseRules(P::Panic);
+    const lw::PhaseRules& collapse = lw::phaseRules(P::Collapse);
+    const lw::PhaseRules& survival = lw::phaseRules(P::Survival);
+    CHECK(peace.economy && peace.tapWater && peace.lawful && peace.supply == 1.0f &&
+          !peace.groups && peace.zombieShare == 0.0f && peace.eveningHome > 0.0f);
+    CHECK(outbreak.lawful && outbreak.supply == 1.0f && outbreak.zombieShare > 0.0f);
+    CHECK(panic.economy && panic.lawful && panic.supply < 1.0f && panic.stockpile > 1.0f &&
+          panic.groups && panic.eveningHome > peace.eveningHome);
+    CHECK(!collapse.economy && !collapse.tapWater && !collapse.lawful && collapse.supply == 0.0f);
+    CHECK(!survival.economy && !survival.lawful && survival.professions == 0 &&
+          survival.maxHours == 0);
+    CHECK(lw::phaseByName("panic") == P::Panic);
+    CHECK(!lw::phaseByName("riot"));
+    CHECK(lw::nextPhase(P::Peace) == P::Outbreak && lw::nextPhase(P::Survival) == P::Survival);
+
+    const lw::Traits steadfast = traitsOf(1.0f);
+    const lw::Traits timid = traitsOf(0.0f);
+    for (int i = 1; i < static_cast<int>(lw::Profession::Count); ++i) {
+        const auto profession = static_cast<lw::Profession>(i);
+        CHECK(lw::keepsWorking(P::Peace, profession, timid));
+        CHECK(lw::keepsWorking(P::Outbreak, profession, timid));
+        CHECK(!lw::keepsWorking(P::Survival, profession, steadfast));
+    }
+    CHECK(!lw::keepsWorking(P::Peace, lw::Profession::None, steadfast));
+    CHECK(!lw::keepsWorking(P::Panic, lw::Profession::Teacher, steadfast)); // школа закрыта
+    CHECK(lw::keepsWorking(P::Panic, lw::Profession::Shopkeeper, steadfast));
+    CHECK(!lw::keepsWorking(P::Panic, lw::Profession::Shopkeeper, timid));
+    CHECK(lw::keepsWorking(P::Collapse, lw::Profession::Doctor, steadfast));
+    CHECK(lw::keepsWorking(P::Collapse, lw::Profession::PoliceOfficer, steadfast));
+    CHECK(!lw::keepsWorking(P::Collapse, lw::Profession::Doctor, timid));
+    CHECK(!lw::keepsWorking(P::Collapse, lw::Profession::Shopkeeper, steadfast));
+
+    // Без мирной жизни сценария нет: катастрофа уже случилась.
+    lw::WorldConfig plain = peaceConfig(20);
+    plain.peacetime = false;
+    plain.zombies = 40;
+    const lw::World before(7, plain);
+    CHECK(lw::scenarioOf(before) == nullptr && lw::scenarioIdOf(before) == lw::kInvalidId);
+    CHECK(lw::worldPhase(before) == P::Survival);
+    CHECK(lw::zombieTarget(before) == 40 && lw::arrivalsPerDay(before) == 1);
+}
+
+// Мир начинается с фазы «мир»; вспышка — по расписанию, с ней издалека
+// приходят первые заражённые. Один seed — одна и та же вспышка.
+void testOutbreakScheduled() {
+    lw::WorldConfig config = peaceConfig(60);
+    config.outbreakDays = 0.25; // через 6 игровых часов
+    lw::World world(7, config);
+    lw::World twin(7, config);
+    const entt::registry& registry = world.registry();
+    const lw::Scenario* scenario = lw::scenarioOf(world);
+    CHECK(scenario != nullptr);
+    if (scenario == nullptr) {
+        return;
+    }
+    const std::uint64_t sixHours = 6 * lw::kTicksPerGameHour;
+    CHECK(scenario->phase == lw::WorldPhase::Peace && phaseBegan(world, lw::WorldPhase::Peace) == 0);
+    CHECK(phaseBegan(world, lw::WorldPhase::Outbreak) == lw::Scenario::kNever);
+    CHECK(scenario->outbreakAt == sixHours && lw::phaseDeadline(*scenario) == sixHours);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PhaseBegan) == 1);
+    CHECK(registry.view<const lw::Zombie>().empty() && lw::zombieTarget(world) == 0);
+
+    runMinutes(world, 6 * 60 - 1);
+    runMinutes(twin, 6 * 60 - 1);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Peace);
+    runMinutes(world, 2);
+    runMinutes(twin, 2);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Outbreak);
+    CHECK(phaseBegan(world, lw::WorldPhase::Outbreak) == sixHours);
+    const int people = static_cast<int>(registry.view<const lw::Person>().size());
+    CHECK(lw::scenarioOf(world)->population == people);
+    const std::size_t zombies = registry.view<const lw::Zombie>().size();
+    CHECK(zombies >= static_cast<std::size_t>(lw::kFirstInfectedMin) &&
+          zombies <= static_cast<std::size_t>(lw::kFirstInfectedMax));
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PhaseBegan) == 2);
+    CHECK(lw::zombieTarget(world) ==
+          static_cast<int>(std::lround(lw::phaseRules(lw::WorldPhase::Outbreak).zombieShare *
+                                       static_cast<float>(people))));
+    CHECK(world.stateHash() == twin.stateHash());
+}
+
+// Фазы сменяются сами: раньше срока — когда пострадавших не меньше порога, но
+// не раньше minHours. Вперёд их можно перевести и вручную, назад — нет.
+void testPhaseTransitions() {
+    lw::World world(7, peaceConfig(40));
+    entt::registry& registry = world.registry();
+    CHECK(lw::phaseDeadline(*lw::scenarioOf(world)) == lw::Scenario::kNever); // не по расписанию
+    runMinutes(world, 5);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Peace);
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    clearZombies(world);
+    const std::uint64_t start = world.tick();
+    const lw::Scenario* scenario = lw::scenarioOf(world);
+    CHECK(scenario->phase == lw::WorldPhase::Outbreak && scenario->population == 40);
+    CHECK(lw::phaseEarliest(*scenario) == start + 12 * lw::kTicksPerGameHour);
+    CHECK(lw::phaseDeadline(*scenario) == start + 72 * lw::kTicksPerGameHour);
+    const int trigger = lw::phaseTrigger(*scenario);
+    CHECK(trigger == lw::phaseRules(lw::WorldPhase::Outbreak).triggerMin);
+
+    // Трое заражены (укушены где-то ещё) — уже пострадавшие.
+    std::vector<std::pair<lw::EntityId, entt::entity>> people;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        people.emplace_back(id.value, entity);
+    }
+    std::sort(people.begin(), people.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (int i = 0; i < trigger; ++i) {
+        lw::Wounds& wounds = registry.get_or_emplace<lw::Wounds>(people[static_cast<std::size_t>(i)].second);
+        wounds.bites = 1;
+        wounds.infection = 0.05f;
+    }
+    CHECK(lw::scenarioStats(world).casualties() == trigger);
+    runMinutes(world, 11 * 60);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Outbreak); // ещё рано
+    runMinutes(world, 2 * 60);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Panic);
+    const std::uint64_t panic = phaseBegan(world, lw::WorldPhase::Panic);
+    CHECK(panic >= start + 12 * lw::kTicksPerGameHour && panic < start + 13 * lw::kTicksPerGameHour);
+    CHECK(lw::calendarAt(panic).minute == 0); // порог проверяется раз в час
+
+    // Вручную — только вперёд.
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Panic);
+    lw::enterPhase(world, lw::WorldPhase::Survival);
+    CHECK(lw::worldPhase(world) == lw::WorldPhase::Survival);
+    CHECK(phaseBegan(world, lw::WorldPhase::Collapse) == world.tick() &&
+          phaseBegan(world, lw::WorldPhase::Survival) == world.tick());
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PhaseBegan) == lw::kWorldPhases);
+    CHECK(lw::phaseDeadline(*lw::scenarioOf(world)) == lw::Scenario::kNever);
+    // Кто работал, бросил работу — каждый по разу.
+    std::size_t employed = 0;
+    for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
+        employed += job.profession != lw::Profession::None ? 1 : 0;
+    }
+    CHECK(employed > 0);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::LeftWork) == employed);
+}
+
+// Коллапс: на работу выходят только самые стойкие врачи и полицейские, кто
+// бросил — в летописи; ни завоза, ни пособия, ни воды из крана; кража уже не
+// преступление — лезть в чужое не совестно.
+void testCollapseRules() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    const entt::entity seller = workerOf(world, lw::Profession::Shopkeeper);
+    const entt::entity doctor = workerOf(world, lw::Profession::Doctor);
+    const std::vector<entt::entity> idle = idlers(world);
+    CHECK(seller != entt::null && doctor != entt::null && !idle.empty());
+    if (seller == entt::null || doctor == entt::null || idle.empty()) {
+        return;
+    }
+    alwaysOnShift(registry, seller, traitsOf(1.0f));
+    alwaysOnShift(registry, doctor, traitsOf(1.0f));
+    // Голоден, а еды и денег нет — тянет обыскать чужое.
+    const entt::entity hungry = idle.front();
+    registry.get<lw::Needs>(hungry) = {};
+    registry.get<lw::Needs>(hungry).hunger = 0.7f;
+    registry.get<lw::Traits>(hungry) = {};
+    registry.get<lw::Inventory>(hungry) = {};
+    registry.get<lw::Wallet>(hungry).money = 0;
+    lw::Inventory& pantry = registry.get<lw::Inventory>(world.find(registry.get<lw::Person>(hungry).home));
+    pantry.set(lw::ItemKind::Food, 0);
+    pantry.set(lw::ItemKind::Meat, 0);
+    CHECK(scoreOf(world, seller, lw::Action::Work) > 0.0f);
+    CHECK(scoreOf(world, doctor, lw::Action::Work) > 0.0f);
+    const float lawful = scoreOf(world, hungry, lw::Action::Scavenge);
+    CHECK(lawful > 0.0f);
+
+    lw::enterPhase(world, lw::WorldPhase::Collapse);
+    clearZombies(world);
+    CHECK(scoreOf(world, seller, lw::Action::Work) == 0.0f);
+    CHECK(scoreOf(world, doctor, lw::Action::Work) > 0.0f);
+    CHECK(scoreOf(world, hungry, lw::Action::Scavenge) > 2.0f * lawful);
+    // Кто бросил работу — в летописи, со своим местом работы.
+    std::size_t quit = 0;
+    bool sellerQuit = false;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind != lw::ChronicleKind::LeftWork) {
+            continue;
+        }
+        ++quit;
+        const entt::entity person = world.find(event.subject);
+        const lw::Job& job = registry.get<lw::Job>(person);
+        CHECK(event.object == job.workplace);
+        CHECK(!lw::keepsWorking(lw::WorldPhase::Collapse, job.profession, registry.get<lw::Traits>(person)));
+        CHECK(event.subject != idOf(world, doctor));
+        sellerQuit = sellerQuit || event.subject == idOf(world, seller);
+    }
+    CHECK(quit > 0 && sellerQuit);
+
+    // Ни завоза, ни пособия, ни воды из крана.
+    const entt::entity shop = world.find(registry.get<lw::Job>(seller).workplace);
+    registry.get<lw::Inventory>(shop).set(lw::ItemKind::Food, 0);
+    entt::entity house = entt::null;
+    for (const auto [entity, id, building] : registry.view<const lw::Id, const lw::Building>().each()) {
+        if (building.kind != lw::BuildingKind::House ||
+            (house != entt::null && id.value > idOf(world, house))) {
+            continue;
+        }
+        bool empty = true;
+        for (const auto [other, person] : registry.view<const lw::Person>().each()) {
+            empty = empty && person.home != id.value;
+        }
+        if (empty) {
+            house = entity;
+        }
+    }
+    CHECK(house != entt::null);
+    if (house != entt::null) {
+        registry.get<lw::Inventory>(house).set(lw::ItemKind::Water, 0);
+    }
+    world.weather().precipitation = 0.0f; // без дождя: бочки не наполняются
+    world.weather().minutesLeft = 100000;
+    runUntil(world, lw::kRestockHour, 1);
+    CHECK(registry.get<lw::Inventory>(shop).count(lw::ItemKind::Food) == 0);
+    if (house != entt::null) {
+        CHECK(registry.get<lw::Inventory>(house).count(lw::ItemKind::Water) == 0);
+    }
+    if (const auto* wallet = registry.try_get<lw::Wallet>(hungry)) {
+        CHECK(wallet->money == 0);
+    }
+}
+
+// Паника: школа закрыта, на работу выходят те, кто держится за неё, туда и
+// везут товар — вполовину; вечером сильнее тянет домой; в группы сбиваются
+// только теперь.
+void testPanicRules() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    const entt::entity teacher = workerOf(world, lw::Profession::Teacher);
+    const entt::entity seller = workerOf(world, lw::Profession::Shopkeeper);
+    const std::vector<entt::entity> idle = idlers(world);
+    CHECK(teacher != entt::null && seller != entt::null && idle.size() >= 3);
+    if (teacher == entt::null || seller == entt::null || idle.size() < 3) {
+        return;
+    }
+    alwaysOnShift(registry, teacher, traitsOf(1.0f));
+    alwaysOnShift(registry, seller, traitsOf(0.0f));
+    CHECK(scoreOf(world, teacher, lw::Action::Work) > 0.0f);
+    CHECK(scoreOf(world, seller, lw::Action::Work) > 0.0f);
+
+    // Двое друзей с одним домом: в мирное время группу не собирают.
+    for (const auto [entity, relations] : registry.view<lw::Relations>().each()) {
+        relations = {};
+    }
+    const entt::entity a = idle[0];
+    const entt::entity b = idle[1];
+    registry.get<lw::Traits>(a).leadership = 0.8f;
+    registry.get<lw::Traits>(b).leadership = 0.3f;
+    registry.get<lw::Person>(b).home = registry.get<lw::Person>(a).home;
+    setBond(registry, a, idOf(world, b), 0.9f, 0.7f, 0.5f, 0.7f);
+    setBond(registry, b, idOf(world, a), 0.9f, 0.7f, 0.5f, 0.7f);
+    lw::updateGroups(world);
+    CHECK(registry.get<lw::Person>(a).group == lw::kInvalidId);
+
+    lw::enterPhase(world, lw::WorldPhase::Panic);
+    clearZombies(world);
+    CHECK(scoreOf(world, teacher, lw::Action::Work) == 0.0f); // школа закрыта
+    CHECK(scoreOf(world, seller, lw::Action::Work) == 0.0f);  // нестойкий бросил
+    registry.get<lw::Traits>(seller) = traitsOf(1.0f);
+    CHECK(scoreOf(world, seller, lw::Action::Work) > 0.0f);
+    lw::updateGroups(world);
+    CHECK(registry.get<lw::Person>(a).group != lw::kInvalidId &&
+          registry.get<lw::Person>(a).group == registry.get<lw::Person>(b).group);
+
+    // Вечером, не дома, тянет домой с силой фазы.
+    lw::Job& job = registry.get<lw::Job>(seller);
+    job.start = 8 * 60;
+    job.end = 18 * 60;
+    const entt::entity walker = idle[2];
+    registry.get<lw::Traits>(walker).chronotype = 1.0f; // сова: в 19:00 ещё не ночь
+    runUntil(world, 19, 0);
+    if (registry.all_of<lw::Person>(walker)) {
+        registry.get<lw::Needs>(walker).fear = 0.0f;
+        for (lw::Danger& danger : registry.get<lw::Mind>(walker).dangers) {
+            danger = {};
+        }
+        const lw::Cell door =
+            registry.get<lw::Building>(world.find(registry.get<lw::Person>(walker).home)).door;
+        registry.get<lw::Position>(walker) = {lw::Map::cellCenter(door.x) + 40.0f,
+                                              lw::Map::cellCenter(door.y)};
+        CHECK(std::abs(scoreOf(world, walker, lw::Action::GoHome) -
+                       lw::phaseRules(lw::WorldPhase::Panic).eveningHome) < 1e-4f);
+    }
+
+    // Завоз — вполовину, в магазин, где ещё работают.
+    const entt::entity shop = world.find(job.workplace);
+    registry.get<lw::Inventory>(shop).set(lw::ItemKind::Food, 0);
+    const bool town = registry.get<lw::Settlement>(world.find(registry.get<lw::Building>(shop).settlement))
+                          .kind == lw::SettlementKind::Town;
+    runUntil(world, lw::kRestockHour, 1);
+    const int expected = static_cast<int>(
+        std::lround(static_cast<float>(town ? 40 : 25) * lw::phaseRules(lw::WorldPhase::Panic).supply));
+    CHECK(registry.get<lw::Inventory>(shop).count(lw::ItemKind::Food) == expected);
+}
+
+// Пока есть закон, кражу осуждает и тот, кому пострадавший чужой; без закона
+// за чужого почти не обидно.
+void testCrimeCondemned() {
+    lw::World world(7, peaceConfig(30));
+    entt::registry& registry = world.registry();
+    const std::vector<entt::entity> idle = idlers(world);
+    CHECK(idle.size() >= 4);
+    if (idle.size() < 4) {
+        return;
+    }
+    const entt::entity thief = idle[0];
+    const entt::entity victim = idle[1];
+    const entt::entity lawful = idle[2];
+    const entt::entity lawless = idle[3];
+    for (const entt::entity person : {thief, victim, lawful, lawless}) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Memories>(person) = {};
+        registry.get<lw::Traits>(person) = {};
+    }
+    const lw::EntityId home = registry.get<lw::Person>(victim).home;
+    lw::Account account;
+    account.victim = idOf(world, victim);
+    lw::experience(world, lawful, lw::MemoryKind::Robbed, idOf(world, thief), home, 3, account);
+    lw::enterPhase(world, lw::WorldPhase::Collapse);
+    lw::experience(world, lawless, lw::MemoryKind::Robbed, idOf(world, thief), home, 3, account);
+
+    const lw::Memory* condemned = registry.get<lw::Memories>(lawful).find(
+        lw::MemoryKind::Robbed, idOf(world, thief), idOf(world, victim));
+    const lw::Memory* shrugged = registry.get<lw::Memories>(lawless).find(
+        lw::MemoryKind::Robbed, idOf(world, thief), idOf(world, victim));
+    CHECK(condemned != nullptr);
+    CHECK(condemned != nullptr && (shrugged == nullptr || shrugged->strength < condemned->strength));
+    const lw::Bond* grudge = registry.get<lw::Relations>(lawful).find(idOf(world, thief));
+    const lw::Bond* indifferent = registry.get<lw::Relations>(lawless).find(idOf(world, thief));
+    CHECK(grudge != nullptr && grudge->grudge > 0.0f);
+    CHECK(grudge != nullptr && (indifferent == nullptr || indifferent->grudge < grudge->grudge));
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Witnessed) == 1);
+}
+
+// Полицейский на службе заступается за любого: нападение на незнакомца для
+// него — угроза, для прохожего — нет. Когда полиции не стало — и для него нет.
+void testPoliceDefends() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    const entt::entity officer = workerOf(world, lw::Profession::PoliceOfficer);
+    const std::vector<entt::entity> idle = idlers(world);
+    CHECK(officer != entt::null && idle.size() >= 3);
+    if (officer == entt::null || idle.size() < 3) {
+        return;
+    }
+    const entt::entity attacker = idle[0];
+    const entt::entity victim = idle[1];
+    const entt::entity bystander = idle[2];
+    const entt::entity defender = idle.size() > 3 ? idle[3] : entt::null;
+    alwaysOnShift(registry, officer, traitsOf(1.0f));
+    registry.get<lw::Mind>(officer).action = lw::Action::Work;
+    registry.get<lw::Person>(officer).asleep = false;
+    registry.get<lw::Person>(officer).indoors = false;
+    for (const entt::entity person : {officer, bystander}) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Awareness>(person) = {};
+    }
+    const lw::Position at = registry.get<lw::Position>(officer);
+    registry.get<lw::Position>(attacker) = {at.x + 15.0f, at.y};
+    registry.get<lw::Position>(victim) = {at.x + 16.0f, at.y};
+    registry.get<lw::Position>(bystander) = {at.x, at.y + 5.0f};
+    registry.get<lw::Combat>(attacker).target = idOf(world, victim);
+    for (const entt::entity observer : {officer, bystander}) {
+        lw::Awareness& awareness = registry.get<lw::Awareness>(observer);
+        awareness.contacts[awareness.count++] = {idOf(world, attacker), at.x + 15.0f, at.y,
+                                                 world.tick(), true, lw::SoundKind::None};
+    }
+    CHECK(lw::policeOnDuty(world, officer));
+    CHECK(lw::threatOf(world, officer).level > 0.25f);
+    CHECK(scoreOf(world, officer, lw::Action::Fight) > 0.0f);
+    CHECK(lw::threatOf(world, bystander).level == 0.0f);
+    // Кто бьёт напавшего, заступается: для полицейского он не угроза, хоть и ближе.
+    if (defender != entt::null) {
+        registry.get<lw::Position>(defender) = {at.x + 8.0f, at.y};
+        registry.get<lw::Combat>(defender).target = idOf(world, attacker);
+        lw::Awareness& awareness = registry.get<lw::Awareness>(officer);
+        awareness.contacts[awareness.count++] = {idOf(world, defender), at.x + 8.0f, at.y,
+                                                 world.tick(), true, lw::SoundKind::None};
+        CHECK(lw::threatOf(world, officer).nearest == idOf(world, attacker));
+    }
+
+    lw::enterPhase(world, lw::WorldPhase::Survival);
+    CHECK(!lw::policeOnDuty(world, officer));
+    CHECK(lw::threatOf(world, officer).level == 0.0f);
+}
+
 } // namespace
 
 int main() {
@@ -5774,6 +6239,13 @@ int main() {
     testSeeDoctor();
     testPoliceDeters();
     testTapWater();
+    testPhaseRules();
+    testOutbreakScheduled();
+    testPhaseTransitions();
+    testCollapseRules();
+    testPanicRules();
+    testCrimeCondemned();
+    testPoliceDefends();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

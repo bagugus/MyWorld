@@ -1,7 +1,8 @@
 // Living World — приложение с окном.
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
-//                [--camera fly|shoulder] [--screenshot FILE.png]
+//                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
+//                [--no-peace] [--screenshot FILE.png]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -18,6 +19,10 @@
 //               выбранного (--select)
 // --foliage     облик сезона в 3D (листва и снег) — как на долю года F (0 — 1 марта,
 //               0,3 — лето, 0,6 — осень, 0,9 — зима), а не по календарю; только облик
+// --outbreak    вспышка через DAYS игровых суток от начала мира (0 — не по расписанию)
+// --phase       сразу перевести мир в фазу: outbreak, panic, collapse, survival (этап 7.4);
+//               --hours прокручивает мир уже после этого
+// --zombies, --no-peace — как у lw_headless
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
 
@@ -29,8 +34,10 @@
 #include "sim/Climate.h"
 #include "sim/SimDriver.h"
 #include "sim/Events.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
+#include "sim/systems/ScenarioSystem.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
@@ -63,6 +70,7 @@ int main(int argc, char** argv) {
     std::optional<float> foliage;
     std::optional<lw::ViewMode> startView; // --camera: полёт или из-за плеча
     std::optional<lw::EventKind> event;
+    std::optional<lw::WorldPhase> phase; // --phase: сразу в эту фазу мира
     lw::WorldConfig config;
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
@@ -107,12 +115,19 @@ int main(int argc, char** argv) {
             config.zombies = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
             config.peacetime = false;
+        } else if (std::strcmp(argv[i], "--outbreak") == 0 && i + 1 < argc) {
+            config.outbreakDays = std::strtod(argv[++i], nullptr);
+        } else if (std::strcmp(argv[i], "--phase") == 0 && i + 1 < argc) {
+            phase = lw::phaseByName(argv[++i]);
         }
     }
 
     // Мир создаётся до окна: генерация карты занимает пару секунд, и пустое
     // окно в это время выглядело бы зависшим.
     lw::World world(seed, config);
+    if (phase) {
+        lw::enterPhase(world, *phase);
+    }
     if (event) {
         const lw::EntityId id = lw::startEvent(world, *event);
         if (selectId == 0) {

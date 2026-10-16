@@ -56,6 +56,8 @@ private:
     // Ивент и его груз (этап 7.1).
     void drawEvent(entt::entity entity);
     void drawCache(entt::entity entity);
+    // Сценарий и фазы мира (этап 7.4).
+    void drawScenario(entt::entity entity);
     // Позиция, скорость, оставшийся путь.
     void drawMovement(entt::entity entity);
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по

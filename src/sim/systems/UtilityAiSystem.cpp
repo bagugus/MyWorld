@@ -6,6 +6,7 @@
 #include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
+#include "sim/Scenario.h"
 #include "sim/Weapons.h"
 #include "sim/Work.h"
 #include "sim/World.h"
@@ -329,9 +330,9 @@ constexpr int kPatrolAttempts = 6;
 // оценка × kPoliceDeterrence (отчаявшемуся всё равно).
 constexpr float kPoliceWatch = 120.0f;
 constexpr float kPoliceDeterrence = 0.2f;
-// Вечером, с kEveningMinute и до своей ночи, тянет домой (в мирное время).
+// Вечером, с kEveningMinute и до своей ночи, тянет домой — с силой фазы мира
+// (PhaseRules::eveningHome: в мирное время 0,2, в панике сильнее).
 constexpr int kEveningMinute = 18 * 60;
-constexpr float kEveningHome = 0.2f;
 // За покупками: еды дома и с собой меньше запаса — kBuyStockBase +
 // kBuyStockSpread × запасливость порций. Оценка — нужда × near(d, kNearScale):
 // голодный без еды — kBuyWeight × голод (охотнее, чем лезть в чужой дом),
@@ -357,6 +358,16 @@ constexpr float kHospitalSearch = 3000.0f;
 constexpr int kDoctorMinutes = 30;
 constexpr float kDoctorHeal = 0.2f;
 constexpr float kDoctorMedicineHeal = 0.4f;
+
+// --- Фазы мира (этап 7.4) -------------------------------------------------------
+// Пока кража — преступление (PhaseRules::lawful), лезть в чужое и красть
+// совестно и страшно: оценка × kCrimeDeterrence (отчаявшемуся всё равно);
+// мстить — × kLawRestraint: за обиду не бьют, пока есть закон.
+constexpr float kCrimeDeterrence = 0.4f;
+constexpr float kLawRestraint = 0.5f;
+// Полицейский на службе заступается за любого, на кого напали: верность
+// пострадавшему — kDutyLoyalty, как к своему.
+constexpr float kDutyLoyalty = 1.0f;
 
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
@@ -450,6 +461,10 @@ struct Context {
     // Работа и деньги (этап 7.2); nullptr — нет.
     const Job* job = nullptr;
     const Wallet* wallet = nullptr;
+    // Правила фазы мира (этап 7.4).
+    const PhaseRules* rules = nullptr;
+    // Полицейский на службе: заступается за любого.
+    bool policing = false;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -490,6 +505,8 @@ Context makeContext(const World& world, entt::entity entity) {
     ctx.current = mind != nullptr ? mind->action : Action::Idle;
     ctx.job = registry.try_get<Job>(entity);
     ctx.wallet = registry.try_get<Wallet>(entity);
+    ctx.rules = &rulesOf(world);
+    ctx.policing = policeOnDuty(world, entity);
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -695,9 +712,15 @@ Option evalScavenge(const Context& ctx) {
     if (ctx.night) {
         need *= kNightPenalty;
     }
-    // При полицейском лезть в чужое страшно (этап 7.2).
-    if (ctx.needs.hunger < kDesperate && policeNearby(ctx.world, ctx.x, ctx.y, kPoliceWatch)) {
-        need *= kPoliceDeterrence;
+    // При полицейском лезть в чужое страшно (этап 7.2), а пока есть закон —
+    // и без него совестно (этап 7.4).
+    if (ctx.needs.hunger < kDesperate) {
+        if (policeNearby(ctx.world, ctx.x, ctx.y, kPoliceWatch)) {
+            need *= kPoliceDeterrence;
+        }
+        if (ctx.rules->lawful) {
+            need *= kCrimeDeterrence;
+        }
     }
     // Здание выберется при выполнении; пока — расстояние до центра поселения.
     const float d = distance(ctx.x, ctx.y, settlement->x, settlement->y);
@@ -758,6 +781,9 @@ float warmth(const Context& ctx, EntityId other) {
 // Насколько человек верен other — для заступничества: товарищ по группе и
 // близость, 0..1.
 float loyaltyTo(const Context& ctx, EntityId other) {
+    if (ctx.policing) {
+        return kDutyLoyalty; // на службе свои — все (этап 7.4)
+    }
     const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(other) : nullptr;
     const float close = bond != nullptr && !bond->hostile() ? closeness(*bond) : 0.0f;
     return std::min(1.0f, close + (groupMate(ctx, other) ? kGroupLoyalty : 0.0f));
@@ -832,9 +858,9 @@ Option evalGoHome(const Context& ctx) {
         return {};
     }
     float score = ctx.needs.fear * (1.2f - 0.6f * ctx.traits.bravery);
-    // Мирный вечер — домой (этап 7.2).
-    if (ctx.world.config().peacetime && !ctx.night && ctx.time.minuteOfDay >= kEveningMinute) {
-        score = std::max(score, kEveningHome);
+    // Вечер — домой (этап 7.2), пока жизнь идёт по распорядку (этап 7.4).
+    if (!ctx.night && ctx.time.minuteOfDay >= kEveningMinute) {
+        score = std::max(score, ctx.rules->eveningHome);
     }
     return {score, ctx.homeDoor, ctx.homeId};
 }
@@ -1372,11 +1398,16 @@ Option evalSteal(const Context& ctx) {
                                  ctx.homeDoor, ctx.homeId});
         }
     }
-    // Полицейский рядом с вором или с домом — страшно, если не отчаялся (этап 7.2).
-    if (best.score > 0.0f && ctx.needs.hunger < kDesperate &&
-        (policeNearby(world, ctx.x, ctx.y, kPoliceWatch) ||
-         policeNearby(world, cellX(best.spot), cellY(best.spot), kPoliceWatch))) {
-        best.score *= kPoliceDeterrence;
+    // Полицейский рядом с вором или с домом — страшно, если не отчаялся (этап 7.2);
+    // пока есть закон — и без него (этап 7.4).
+    if (best.score > 0.0f && ctx.needs.hunger < kDesperate) {
+        if (policeNearby(world, ctx.x, ctx.y, kPoliceWatch) ||
+            policeNearby(world, cellX(best.spot), cellY(best.spot), kPoliceWatch)) {
+            best.score *= kPoliceDeterrence;
+        }
+        if (ctx.rules->lawful) {
+            best.score *= kCrimeDeterrence;
+        }
     }
     return best;
 }
@@ -1422,6 +1453,9 @@ Option evalAvenge(const Context& ctx) {
                                  nearness(d, kAvengeScale),
                              Map::cellAt(at.x, at.y), bond.other});
     }
+    if (ctx.rules->lawful) {
+        best.score *= kLawRestraint; // пока есть закон, расправу откладывают (этап 7.4)
+    }
     return best;
 }
 
@@ -1430,8 +1464,10 @@ Option evalAvenge(const Context& ctx) {
 // На работу: в смену или заранее, чтобы успеть дойти. Место — дверь работы;
 // фермеру поле и полицейскому обход выберутся при выполнении (pickWorkSpot).
 Option evalWork(const Context& ctx) {
+    // В беде на работу выходят не все (этап 7.4): кто держится за неё.
     if (ctx.job == nullptr || ctx.job->profession == Profession::None ||
-        !isWorkday(*ctx.job, ctx.time.dayOfWeek)) {
+        !isWorkday(*ctx.job, ctx.time.dayOfWeek) ||
+        !keepsWorking(worldPhase(ctx.world), ctx.job->profession, ctx.traits)) {
         return {};
     }
     const entt::entity workplace = ctx.world.find(ctx.job->workplace);
@@ -1450,9 +1486,11 @@ Option evalWork(const Context& ctx) {
     return {kWorkBase + kWorkDiligence * ctx.traits.prudence, door, ctx.job->workplace};
 }
 
-// Сколько еды держать дома (с несомым): запасливый — больше.
-int buyTarget(const Traits& traits) {
-    return kBuyStockBase + static_cast<int>(std::lround(kBuyStockSpread * traits.prudence));
+// Сколько еды держать дома (с несомым): запасливый — больше; в панике скупают
+// впрок — × stockpile (PhaseRules, этап 7.4).
+int buyTarget(const Traits& traits, float stockpile) {
+    return static_cast<int>(std::lround(
+        stockpile * (kBuyStockBase + static_cast<int>(std::lround(kBuyStockSpread * traits.prudence)))));
 }
 
 bool rememberedBy(const Context& ctx, EntityId building) {
@@ -1502,7 +1540,7 @@ Option evalBuy(const Context& ctx) {
     const int homeFood = ctx.homeSupplies != nullptr ? ctx.homeSupplies->food() : 0;
     const int homeWater = ctx.homeSupplies != nullptr ? ctx.homeSupplies->count(ItemKind::Water) : 0;
     const int have = ctx.carry.food() + homeFood;
-    const int target = buyTarget(ctx.traits);
+    const int target = buyTarget(ctx.traits, ctx.rules->stockpile);
     const float start = needStart(ctx);
     float need = 0.0f;
     if (have == 0) {
@@ -2762,7 +2800,9 @@ private:
             workplace->till += count * price;
             return count;
         };
-        int wantFood = (traits != nullptr ? buyTarget(*traits) : kBuyStockBase) - carry.food() - homeFood;
+        const float stockpile = rulesOf(world_).stockpile;
+        int wantFood = (traits != nullptr ? buyTarget(*traits, stockpile) : kBuyStockBase) -
+                       carry.food() - homeFood;
         if (carry.food() + homeFood == 0 && needs_.hunger > kSnackThreshold) {
             wantFood = std::max(wantFood, 1);
         }

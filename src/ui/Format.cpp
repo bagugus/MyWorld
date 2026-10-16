@@ -1,6 +1,7 @@
 #include "ui/Format.h"
 
 #include "sim/Names.h"
+#include "sim/Scenario.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 
@@ -126,6 +127,20 @@ const char* eventKindName(EventKind kind) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* scenarioKindName(ScenarioKind kind) {
+    constexpr const char* kNames[] = {"зомби-вирус"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(ScenarioKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* phaseName(WorldPhase phase) {
+    constexpr const char* kNames[] = {"мир", "вспышка", "паника", "коллапс", "выживание"};
+    static_assert(std::size(kNames) == kWorldPhases);
+    const auto index = static_cast<std::size_t>(phase);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
 const char* itemName(ItemKind kind) {
     constexpr const char* kNames[] = {"еда",      "вода",       "мясо",     "бинты",
                                       "лекарства", "патроны к пистолету", "патроны к дробовику",
@@ -187,13 +202,48 @@ bool idLink(EntityId id) {
 
 void formatGameDuration(char* buffer, std::size_t size, std::uint64_t ticks) {
     const std::uint64_t minutes = ticks / kTicksPerGameMinute;
-    if (minutes >= 60) {
+    if (minutes >= 24 * 60) {
+        std::snprintf(buffer, size, "%llu сут %llu ч",
+                      static_cast<unsigned long long>(minutes / (24 * 60)),
+                      static_cast<unsigned long long>(minutes / 60 % 24));
+    } else if (minutes >= 60) {
         std::snprintf(buffer, size, "%llu ч %02llu мин",
                       static_cast<unsigned long long>(minutes / 60),
                       static_cast<unsigned long long>(minutes % 60));
     } else {
         std::snprintf(buffer, size, "%llu мин", static_cast<unsigned long long>(minutes));
     }
+}
+
+void formatNextPhase(char* buffer, std::size_t size, const World& world, const Scenario& scenario) {
+    buffer[0] = '\0';
+    if (scenario.phase == WorldPhase::Survival) {
+        return;
+    }
+    const WorldPhase next = nextPhase(scenario.phase);
+    const std::uint64_t tick = world.tick();
+    const auto until = [tick](std::uint64_t at, char* text, std::size_t length) {
+        char duration[32];
+        formatGameDuration(duration, sizeof(duration), at > tick ? at - tick : 0);
+        std::snprintf(text, length, "через %s", duration);
+    };
+    char deadline[96] = "не по расписанию";
+    if (const std::uint64_t at = phaseDeadline(scenario); at != Scenario::kNever) {
+        until(at, deadline, sizeof(deadline));
+    }
+    const int trigger = phaseTrigger(scenario);
+    if (trigger == 0) {
+        std::snprintf(buffer, size, "%s — %s", phaseName(next), deadline);
+        return;
+    }
+    char earliest[128] = "";
+    if (const std::uint64_t at = phaseEarliest(scenario); at > tick) {
+        char text[96];
+        until(at, text, sizeof(text));
+        std::snprintf(earliest, sizeof(earliest), ", но не раньше чем %s", text);
+    }
+    std::snprintf(buffer, size, "%s — при %d пострадавших (сейчас %d)%s, иначе %s", phaseName(next),
+                  trigger, scenarioStats(world).casualties(), earliest, deadline);
 }
 
 } // namespace lw::ui

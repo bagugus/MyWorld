@@ -2,6 +2,7 @@
 
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
+#include "sim/systems/ScenarioSystem.h"
 
 #include <algorithm>
 #include <chrono>
@@ -56,6 +57,10 @@ void SimDriver::advance(double realDt) {
     ticksLastFrame_ = 0;
     behind_ = false;
 
+    if (phaseRequest_) {
+        enterPhase(world_, *phaseRequest_);
+        phaseRequest_.reset();
+    }
     if (eventRequest_) {
         lastEvent_ = startEvent(world_, eventRequest_->kind, eventRequest_->near);
         eventRequest_.reset();

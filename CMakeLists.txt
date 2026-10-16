@@ -65,6 +65,8 @@ add_library(lw_sim STATIC
     src/sim/Resources.h
     src/sim/Rng.cpp
     src/sim/Rng.h
+    src/sim/Scenario.cpp
+    src/sim/Scenario.h
     src/sim/SimDriver.cpp
     src/sim/SimDriver.h
     src/sim/Sound.h
@@ -113,6 +115,8 @@ add_library(lw_sim STATIC
     src/sim/systems/PerceptionSystem.h
     src/sim/systems/ResourceSystem.cpp
     src/sim/systems/ResourceSystem.h
+    src/sim/systems/ScenarioSystem.cpp
+    src/sim/systems/ScenarioSystem.h
     src/sim/systems/SocialSystem.cpp
     src/sim/systems/SocialSystem.h
     src/sim/systems/UtilityAiSystem.cpp

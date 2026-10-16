@@ -5,6 +5,7 @@
 #include "render/WorldRenderer3D.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Scenario.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
@@ -448,6 +449,15 @@ void drawTimePanel(const World& world, const Environment& environment, SimDriver
                     time.dayOfSeason + 1, kGameDaysPerSeason, time.year);
         ImGui::Text("Рассвет %02d:%02d, закат %02d:%02d", sun.sunriseMinute / 60,
                     sun.sunriseMinute % 60, sun.sunsetMinute / 60, sun.sunsetMinute % 60);
+        // Фаза мира (этап 7.4): управление — в панели «Сценарий и ивенты».
+        if (const Scenario* scenario = scenarioOf(world)) {
+            char duration[32];
+            formatGameDuration(duration, sizeof(duration),
+                               world.tick() - scenario->began[static_cast<std::size_t>(scenario->phase)]);
+            ImGui::Text("Фаза мира: %s, %s", phaseName(scenario->phase), duration);
+        } else {
+            ImGui::TextDisabled("Фаза мира: выживание (без сценария)");
+        }
         meter("Свет", environment.light);
         meter("Луна", sun.moonFullness);
 
@@ -763,11 +773,46 @@ void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector
     ImGui::SetNextWindowPos({display.x - 12.0f, display.y * 0.5f}, ImGuiCond_FirstUseEver,
                             {1.0f, 0.0f});
     ImGui::SetNextWindowSize({320.0f, 0.0f}, ImGuiCond_FirstUseEver);
-    if (!ImGui::Begin("Ивенты###events")) {
+    if (!ImGui::Begin("Сценарий и ивенты###events")) {
         ImGui::End();
         return;
     }
     const entt::registry& registry = world.registry();
+
+    // Сценарий (этап 7.4): фаза мира и переход к следующей.
+    ImGui::SeparatorText("Сценарий");
+    if (const Scenario* scenario = scenarioOf(world)) {
+        const EntityId id = scenarioIdOf(world);
+        if (idLink(id)) {
+            inspector.select(id);
+        }
+        ImGui::SameLine();
+        char duration[32];
+        formatGameDuration(duration, sizeof(duration),
+                           world.tick() - scenario->began[static_cast<std::size_t>(scenario->phase)]);
+        ImGui::Text("%s: %s, %s", scenarioKindName(scenario->kind), phaseName(scenario->phase),
+                    duration);
+        if (scenario->phase != WorldPhase::Survival) {
+            char next[320];
+            formatNextPhase(next, sizeof(next), world, *scenario);
+            ImGui::TextWrapped("Дальше: %s", next);
+            const WorldPhase following = nextPhase(scenario->phase);
+            char label[96];
+            if (scenario->phase == WorldPhase::Peace) {
+                std::snprintf(label, sizeof(label), "Начать вспышку###nextPhase");
+            } else {
+                std::snprintf(label, sizeof(label), "Следующая фаза: %s###nextPhase",
+                              phaseName(following));
+            }
+            if (ImGui::Button(label)) {
+                driver.requestPhase(following);
+            }
+        }
+    } else {
+        ImGui::TextDisabled("Нет: мир начат без мирной жизни\nи живёт по правилам выживания");
+    }
+
+    ImGui::SeparatorText("Ивенты");
     if (world.config().events) {
         ImGui::TextWrapped("По расписанию (пока нет рассказчика): в среднем %.1f в сутки, днём",
                            kEventsPerDay);

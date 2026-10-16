@@ -2,6 +2,7 @@
 
 #include "sim/Memory.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -419,8 +420,12 @@ void updateGroups(World& world) {
             world.destroy(entity);
         }
     }
-    foundGroups(world);
-    admitFriends(world);
+    // Новые группы и новички — когда жизнь перестала идти по распорядку (фаза
+    // мира, этап 7.4): в мирное время друзья не съезжаются на общую базу.
+    if (rulesOf(world).groups) {
+        foundGroups(world);
+        admitFriends(world);
+    }
 }
 
 void tickGroups(World& world) {

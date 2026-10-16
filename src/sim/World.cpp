@@ -16,6 +16,7 @@
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/ScenarioSystem.h"
 #include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
@@ -57,6 +58,10 @@ World::World(std::uint64_t seed, const WorldConfig& config)
     // Животные и птицы — вдали от людей.
     spawnAnimals(*this, config_.animals, config_.flocks);
     spatial_.sync(registry_);
+    // Сценарий (этап 7.4) — последним: id остальных сущностей не сдвигаются.
+    if (config_.peacetime) {
+        createScenario(*this);
+    }
 }
 
 void World::generate() {
@@ -87,8 +92,9 @@ void World::generate() {
 namespace {
 
 constexpr const char* kPhaseNames[World::kStepPhases] = {
-    "weather", "resources", "events", "work", "needs", "relations", "memories", "groups", "bodies",
-    "perception", "zombies", "animals", "utility ai", "combat", "movement", "spatial sync"};
+    "weather", "resources", "scenario", "events", "work", "needs", "relations", "memories",
+    "groups", "bodies", "perception", "zombies", "animals", "utility ai", "combat", "movement",
+    "spatial sync"};
 
 } // namespace
 
@@ -113,6 +119,9 @@ void World::step() {
     updateWeather(*this);
     lap();
     updateResources(*this);
+    lap();
+    // Сценарий — до ивентов, работы и решений: фаза задаёт правила этой минуты.
+    updateScenario(*this);
     lap();
     // Ивенты — до восприятия: шум начавшегося ивента слышат в этом же тике.
     updateEvents(*this);
@@ -319,6 +328,16 @@ std::uint64_t World::stateHash() const {
             for (const EntityId cache : event->caches) {
                 hasher.add(cache);
             }
+        }
+        if (const auto* scenario = registry_.try_get<Scenario>(entity)) {
+            hasher.add(std::uint64_t{35});
+            hasher.add(static_cast<std::uint8_t>(scenario->kind));
+            hasher.add(static_cast<std::uint8_t>(scenario->phase));
+            for (const std::uint64_t began : scenario->began) {
+                hasher.add(began);
+            }
+            hasher.add(scenario->outbreakAt);
+            hasher.add(scenario->population);
         }
         if (const auto* cache = registry_.try_get<Cache>(entity)) {
             hasher.add(std::uint64_t{29});

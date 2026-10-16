@@ -421,6 +421,43 @@ struct Leads {
     }
 };
 
+// Сценарий катастрофы (этап 7.4). Значения попадают в хеш и сохранения: новые
+// добавлять только в конец (перед Count). Правила — sim/Scenario.h.
+enum class ScenarioKind : std::uint8_t {
+    ZombieVirus, // зомби-вирус
+    Count
+};
+
+// Фазы мира: от мирной жизни к выживанию, только вперёд. Фаза меняет правила
+// (sim/Scenario.h), а не решает за людей. Значения попадают в хеш и сохранения.
+enum class WorldPhase : std::uint8_t {
+    Peace,    // мир: работа, магазины, полиция, водопровод
+    Outbreak, // вспышка: первые заражённые, порядок держится
+    Panic,    // паника: скупают запасы, многие не выходят на работу
+    Collapse, // коллапс: ни завоза, ни зарплаты, ни воды из крана; держатся немногие
+    Survival, // выживание: каждый сам за себя или со своими
+    Count
+};
+inline constexpr std::size_t kWorldPhases = static_cast<std::size_t>(WorldPhase::Count);
+
+// Сценарий мира (этап 7.4, ScenarioSystem): какая катастрофа и до какой фазы
+// она дошла. Сущность без позиции, как ивент: её можно открыть в инспекторе,
+// начало каждой фазы — в её летописи. Есть только у мира, начавшегося с мирной
+// жизни (WorldConfig::peacetime); без него мир живёт по правилам выживания.
+struct Scenario {
+    static constexpr std::uint64_t kNever = ~std::uint64_t{0};
+
+    ScenarioKind kind = ScenarioKind::ZombieVirus;
+    WorldPhase phase = WorldPhase::Peace;
+    // Тик начала каждой фазы; kNever — ещё не было.
+    std::array<std::uint64_t, kWorldPhases> began{};
+    // Когда вспышка начнётся сама (WorldConfig::outbreakDays); kNever — не по расписанию.
+    std::uint64_t outbreakAt = kNever;
+    // Сколько было людей, когда началась вспышка: от этого считаются
+    // пострадавшие и приток зомби.
+    std::int32_t population = 0;
+};
+
 // Органы чувств существа (PerceptionSystem). Есть у всех, кто воспринимает
 // мир, и только их замечают другие: предметы пока невидимы.
 struct Senses {

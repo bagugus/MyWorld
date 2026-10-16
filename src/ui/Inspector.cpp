@@ -6,6 +6,7 @@
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/TimeScale.h"
 #include "sim/Items.h"
 #include "sim/Weapons.h"
@@ -28,6 +29,7 @@
 #include <cstdio>
 #include <limits>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -470,6 +472,8 @@ void Inspector::drawPanel() {
                 drawEvent(entity);
             } else if (registry.all_of<Cache>(entity)) {
                 drawCache(entity);
+            } else if (registry.all_of<Scenario>(entity)) {
+                drawScenario(entity);
             } else if (registry.all_of<Building>(entity)) {
                 drawBuilding(entity);
             } else if (registry.all_of<Settlement>(entity)) {
@@ -632,10 +636,18 @@ void Inspector::drawPerson(entt::entity entity) {
         char shift[96];
         formatShift(shift, sizeof(shift), *job);
         const bool now = onShift(*job, calendarAt(tick));
-        ImGui::Text("Смена %s; %s", shift,
-                    !now ? "сейчас не его смена"
-                    : isOnDuty(world_, entity) ? "сейчас на месте"
-                                               : "сейчас смена, а его нет на месте");
+        const auto* traits = registry.try_get<Traits>(entity);
+        if (!keepsWorking(world_, entity)) {
+            // Фаза мира (этап 7.4): на работу больше не выходит.
+            ImGui::Text("Смена %s; бросил работу (%s, долг %.2f)", shift,
+                        phaseName(worldPhase(world_)),
+                        traits != nullptr ? dutyOf(job->profession, *traits) : 0.0f);
+        } else {
+            ImGui::Text("Смена %s; %s", shift,
+                        !now ? "сейчас не его смена"
+                        : isOnDuty(world_, entity) ? "сейчас на месте"
+                                                   : "сейчас смена, а его нет на месте");
+        }
     } else if (registry.all_of<Wallet>(entity)) {
         ImGui::TextUnformatted("Работа: нет");
     }
@@ -1416,6 +1428,84 @@ void Inspector::drawCache(entt::entity entity) {
         formatInventory(text, sizeof(text), *stock);
         ImGui::TextWrapped("Внутри: %s", text);
     }
+}
+
+void Inspector::drawScenario(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Scenario& scenario = registry.get<Scenario>(entity);
+    const std::uint64_t tick = world_.tick();
+    char text[320];
+
+    ImGui::Text("Сценарий #%llu: %s", static_cast<unsigned long long>(selected_),
+                scenarioKindName(scenario.kind));
+    formatGameDuration(text, sizeof(text),
+                       tick - scenario.began[static_cast<std::size_t>(scenario.phase)]);
+    ImGui::Text("Фаза: %s, идёт %s", phaseName(scenario.phase), text);
+    if (scenario.phase != WorldPhase::Survival) {
+        formatNextPhase(text, sizeof(text), world_, scenario);
+        ImGui::TextWrapped("Дальше: %s", text);
+    }
+
+    ImGui::SeparatorText("Фазы");
+    for (std::size_t i = 0; i < kWorldPhases; ++i) {
+        const std::uint64_t began = scenario.began[i];
+        if (began == Scenario::kNever) {
+            ImGui::TextDisabled("%s — ещё не было", phaseName(static_cast<WorldPhase>(i)));
+            continue;
+        }
+        const CalendarTime time = calendarAt(began);
+        ImGui::Text("%s — с дня %d, %02d:%02d", phaseName(static_cast<WorldPhase>(i)), time.day,
+                    time.hour, time.minute);
+    }
+
+    const ScenarioStats stats = scenarioStats(world_);
+    ImGui::SeparatorText("Беда в цифрах");
+    ImGui::Text("Людей к началу вспышки: %d, живы: %d", stats.population, stats.alive);
+    ImGui::Text("Погибли и обратились: %d, заражены: %d", stats.lost, stats.infected);
+    ImGui::Text("Зомби: %d; приток держит %d, орда %d раз в сутки", stats.zombies,
+                zombieTarget(world_), arrivalsPerDay(world_));
+    int onDuty = 0;
+    int employed = 0;
+    for (const auto [other, person, job] : registry.view<const Person, const Job>().each()) {
+        employed += job.profession != Profession::None ? 1 : 0;
+        onDuty += isOnDuty(world_, other) ? 1 : 0;
+    }
+    ImGui::Text("На работе сейчас: %d из %d работающих; бросили работу: %zu", onDuty, employed,
+                world_.chronicle().countOf(ChronicleKind::LeftWork));
+
+    const PhaseRules& rules = phaseRules(scenario.phase);
+    ImGui::SeparatorText("Правила фазы");
+    if (rules.supply > 0.0f) {
+        ImGui::Text("Завоз в магазины и больницу: %.0f %% обычного", 100.0f * rules.supply);
+    } else {
+        ImGui::TextUnformatted("Завоза нет");
+    }
+    ImGui::Text("Зарплата и пособие: %s; водопровод: %s", rules.economy ? "да" : "нет",
+                rules.tapWater ? "да" : "нет");
+    // Кто выходит на работу: профессии и чувство долга.
+    std::string workers;
+    for (std::size_t i = 1; i < static_cast<std::size_t>(Profession::Count); ++i) {
+        if ((rules.professions & (1u << i)) != 0) {
+            workers += workers.empty() ? "" : ", ";
+            workers += professionName(static_cast<Profession>(i));
+        }
+    }
+    if (workers.empty()) {
+        ImGui::TextUnformatted("На работу не выходит никто");
+    } else if (rules.dutyNeeded > 0.0f) {
+        ImGui::TextWrapped("На работу выходят: %s — с чувством долга от %.2f", workers.c_str(),
+                           rules.dutyNeeded);
+    } else {
+        ImGui::TextWrapped("На работу выходят все: %s", workers.c_str());
+    }
+    ImGui::Text("Кража и нападение — преступление: %s", rules.lawful ? "да" : "нет");
+    if (rules.eveningHome > 0.0f) {
+        ImGui::Text("Вечером тянет домой: %.2f", rules.eveningHome);
+    }
+    if (rules.stockpile != 1.0f) {
+        ImGui::Text("Еды дома держат в %.1f раза больше: скупают впрок", rules.stockpile);
+    }
+    ImGui::Text("Группы выживших: %s", rules.groups ? "собираются" : "нет");
 }
 
 void Inspector::drawBuilding(entt::entity entity) {

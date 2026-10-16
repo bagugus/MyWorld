@@ -1,5 +1,6 @@
 #include "sim/systems/WorkSystem.h"
 
+#include "sim/Scenario.h"
 #include "sim/Work.h"
 #include "sim/World.h"
 
@@ -26,9 +27,14 @@ void topUp(Inventory& inventory, ItemKind kind, int level) {
     }
 }
 
-// Завоз в магазины и больницы, где есть работники. Деревенский магазин берёт
-// еду сперва с ферм своей деревни — урожай, — остальное привозят.
-void restock(World& world) {
+// Завоз в магазины и больницы, где ещё работают (этап 7.4: бросили работу —
+// не возят): до supply от обычного запаса (в панике — перебои). Деревенский
+// магазин берёт еду сперва с ферм своей деревни — урожай, — остальное привозят.
+void restock(World& world, float supply) {
+    const auto share = [supply](int level) {
+        return static_cast<int>(std::lround(static_cast<float>(level) * supply));
+    };
+    const std::vector<EntityId> manned = mannedWorkplaces(world);
     entt::registry& registry = world.registry();
     for (const Places::SettlementPlace& place : world.places().settlements()) {
         const bool town =
@@ -37,37 +43,39 @@ void restock(World& world) {
             const entt::entity entity = world.find(building.id);
             auto* workplace = registry.try_get<Workplace>(entity);
             auto* inventory = registry.try_get<Inventory>(entity);
-            if (workplace == nullptr || inventory == nullptr) {
+            if (workplace == nullptr || inventory == nullptr ||
+                !std::binary_search(manned.begin(), manned.end(), building.id)) {
                 continue;
             }
             if (building.kind == BuildingKind::Hospital) {
                 const Stock& stock = kHospitalStock;
-                topUp(*inventory, ItemKind::Food, stock.food);
-                topUp(*inventory, ItemKind::Water, stock.water);
-                topUp(*inventory, ItemKind::Bandage, stock.bandages);
-                topUp(*inventory, ItemKind::Medicine, stock.medicine);
+                topUp(*inventory, ItemKind::Food, share(stock.food));
+                topUp(*inventory, ItemKind::Water, share(stock.water));
+                topUp(*inventory, ItemKind::Bandage, share(stock.bandages));
+                topUp(*inventory, ItemKind::Medicine, share(stock.medicine));
                 continue;
             }
             if (building.kind != BuildingKind::Shop) {
                 continue;
             }
             const Stock& stock = town ? kTownShopStock : kVillageShopStock;
+            const int food = share(stock.food);
             if (!town) {
                 for (const Places::BuildingPlace& farm : place.buildings) {
-                    if (farm.kind != BuildingKind::Barn || inventory->count(ItemKind::Food) >= stock.food) {
+                    if (farm.kind != BuildingKind::Barn || inventory->count(ItemKind::Food) >= food) {
                         continue;
                     }
                     if (auto* harvest = registry.try_get<Inventory>(world.find(farm.id))) {
                         inventory->add(ItemKind::Food,
                                        harvest->take(ItemKind::Food,
-                                                     stock.food - inventory->count(ItemKind::Food)));
+                                                     food - inventory->count(ItemKind::Food)));
                     }
                 }
             }
-            topUp(*inventory, ItemKind::Food, stock.food);
-            topUp(*inventory, ItemKind::Water, stock.water);
-            topUp(*inventory, ItemKind::Bandage, stock.bandages);
-            topUp(*inventory, ItemKind::Medicine, stock.medicine);
+            topUp(*inventory, ItemKind::Food, food);
+            topUp(*inventory, ItemKind::Water, share(stock.water));
+            topUp(*inventory, ItemKind::Bandage, share(stock.bandages));
+            topUp(*inventory, ItemKind::Medicine, share(stock.medicine));
             workplace->till = 0; // выручку сдали поставщику
         }
     }
@@ -108,6 +116,8 @@ void updateWork(World& world) {
     entt::registry& registry = world.registry();
     const CalendarTime time = calendarAt(tick);
     const bool hourly = time.minute == 0;
+    // Что ещё работает — по фазе мира (этап 7.4).
+    const PhaseRules& rules = rulesOf(world);
 
     // Кто на месте. Сложение не зависит от порядка обхода.
     for (const auto [entity, workplace] : registry.view<Workplace>().each()) {
@@ -120,7 +130,7 @@ void updateWork(World& world) {
         if (auto* workplace = registry.try_get<Workplace>(world.find(job.workplace))) {
             workplace->onDuty = static_cast<std::uint8_t>(std::min(255, workplace->onDuty + 1));
         }
-        if (hourly) {
+        if (hourly && rules.economy) {
             if (auto* wallet = registry.try_get<Wallet>(entity)) {
                 wallet->money += professionSpec(job.profession).wage;
             }
@@ -142,21 +152,24 @@ void updateWork(World& world) {
         workplace.harvest -= whole;
     }
 
-    if (!world.config().peacetime) {
-        return;
-    }
     // Водопровод: в жилье вода не кончается.
-    for (const auto [entity, building, inventory] : registry.view<const Building, Inventory>().each()) {
-        topUp(inventory, ItemKind::Water, tapWater(building.kind));
+    if (rules.tapWater) {
+        for (const auto [entity, building, inventory] : registry.view<const Building, Inventory>().each()) {
+            topUp(inventory, ItemKind::Water, tapWater(building.kind));
+        }
     }
     if (time.hour != kRestockHour) {
         return;
     }
-    restock(world);
-    for (const auto [entity, person, wallet] : registry.view<const Person, Wallet>().each()) {
-        const auto* job = registry.try_get<Job>(entity);
-        if (job == nullptr || job->profession == Profession::None) {
-            wallet.money += kAllowance;
+    if (rules.supply > 0.0f) {
+        restock(world, rules.supply);
+    }
+    if (rules.economy) {
+        for (const auto [entity, person, wallet] : registry.view<const Person, Wallet>().each()) {
+            const auto* job = registry.try_get<Job>(entity);
+            if (job == nullptr || job->profession == Profession::None) {
+                wallet.money += kAllowance;
+            }
         }
     }
 }

@@ -45,9 +45,10 @@ void drawTimePanel(const World& world, const Environment& environment, SimDriver
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     CameraController& camera, const WorldRenderer& renderer,
                     WorldRenderer3D& renderer3d);
-// Ивенты (этап 7.1): идущие ивенты (ссылки в инспектор) и кнопки «начать
-// ивент» — где выберет мир или у центра экрана. Начатый ивент открывается в
-// инспекторе.
+// Сценарий и ивенты: фаза мира, когда наступит следующая, кнопка «начать
+// вспышку» / «следующая фаза» (этап 7.4); идущие ивенты (ссылки в инспектор) и
+// кнопки «начать ивент» — где выберет мир или у центра экрана (этап 7.1).
+// Начатый ивент открывается в инспекторе.
 void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector,
                      const CameraController& camera);
 

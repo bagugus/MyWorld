@@ -2,10 +2,12 @@
 
 #include "sim/Hash.h"
 #include "sim/Calendar.h"
+#include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Population.h"
 #include "sim/Places.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/systems/MovementSystem.h"
@@ -702,6 +704,8 @@ Threat threatOf(const World& world, entt::entity person) {
     const std::uint64_t tick = world.tick();
     const auto* own = registry.try_get<Person>(person);
     const auto* relations = registry.try_get<Relations>(person);
+    // Полицейский на службе заступается за любого, на кого напали первым (этап 7.4).
+    const bool policing = policeOnDuty(world, person);
     // Дорог ли человек: товарищ по группе или близкий (этап 6.5).
     const auto dear = [&](EntityId other) {
         const entt::entity entity = world.find(other);
@@ -746,7 +750,8 @@ Threat threatOf(const World& world, entt::entity person) {
                 level = std::max(contact.seen ? 1.0f - d / kThreatSightRange : 0.0f,
                                  d <= kHuntedRange ? kHuntedThreat : 0.0f);
                 threat.assailant = contact.id;
-            } else if (contact.seen && dear(combat->target)) {
+            } else if (contact.seen && (dear(combat->target) ||
+                                        (policing && isAssault(world, entity, combat->target)))) {
                 level = kDefendThreat * (1.0f - d / kThreatSightRange);
             }
         }
@@ -858,9 +863,13 @@ void updateZombies(World& world) {
     if (tick % kHordeUpdateTicks == 0) {
         updateHordes(world);
     }
-    // Приток: упокоенных заменяют пришедшие издалека, не больше орды в сутки.
-    if ((tick + kStartGameTick) % kTicksPerGameDay == 0) {
-        const int target = static_cast<int>(kArrivalBelow * static_cast<float>(world.config().zombies));
+    // Приток: упокоенных заменяют пришедшие издалека — орда в сутки, а по ходу
+    // катастрофы (этап 7.4) — и чаще, до числа, которое держит фаза мира.
+    const int arrivals = arrivalsPerDay(world);
+    const std::uint64_t every =
+        arrivals > 0 ? kTicksPerGameDay / static_cast<std::uint64_t>(arrivals) : 0;
+    if (every > 0 && (tick + kStartGameTick) % every == 0) {
+        const int target = static_cast<int>(kArrivalBelow * static_cast<float>(zombieTarget(world)));
         const int missing = target - static_cast<int>(world.registry().view<const Zombie>().size());
         if (missing > 0) {
             spawnZombieGroup(world, std::min(missing, rng.rangeInt(kArrivalMin, kArrivalMax)), rng);

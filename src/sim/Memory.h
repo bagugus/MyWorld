@@ -56,6 +56,9 @@ inline constexpr float kBetrayTrust = 0.2f;
 // Поступок ли это (кто-то что-то сделал с кем-то), а не весть о близком
 // (погиб, встал зомби): у поступка есть с кем — victim.
 bool isDeed(MemoryKind kind);
+// Преступление ли это, пока есть закон (этап 7.4): кража, предательство,
+// нападение, убийство.
+bool isCrime(MemoryKind kind);
 
 // Запомнить: занять свободное место или вытеснить самое слабое, если оно
 // слабее нового. Тот же случай (вид, кто, с кем) в пределах kEpisodeTicks от
@@ -108,6 +111,11 @@ void witnessAttack(World& world, entt::entity victim, EntityId attacker);
 // ему доверял или был с ним в группе — как предателя, этап 6.5), а кто видел
 // его со стороны — что он обокрал хозяина.
 void witnessTheft(World& world, entt::entity thief, EntityId building, int items);
+
+// Нападает ли attacker на человека victim первым (этап 7.4: за такого
+// заступается полицейский): victim не бьёт его сам и недавно не ранил, и
+// attacker не заступается за другого — victim не нападает на другого человека.
+bool isAssault(const World& world, entt::entity attacker, EntityId victim);
 
 // Человек attacker ударил человека victim (этап 6.5). Если victim сам напал
 // на attacker, это самооборона — ничего; если victim нападал на другого

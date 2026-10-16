@@ -429,6 +429,22 @@ Phrase phraseOf(const ChronicleEvent& event) {
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— здоровья +%d %%%s", event.a,
                       event.b == 1 ? ", остановили кровь" : "");
         break;
+    case ChronicleKind::PhaseBegan:
+        phrase.verb = "— началась фаза:";
+        if (static_cast<WorldPhase>(event.a) == WorldPhase::Peace) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
+                          phaseName(static_cast<WorldPhase>(event.a)));
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s; пострадавших: %d",
+                          phaseName(static_cast<WorldPhase>(event.a)), event.b);
+        }
+        break;
+    case ChronicleKind::LeftWork:
+        phrase.verb = "бросил работу:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      phaseName(static_cast<WorldPhase>(event.a)));
+        break;
     case ChronicleKind::Count:
         break;
     }

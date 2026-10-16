@@ -72,6 +72,8 @@ enum class ChronicleKind : std::uint8_t {
     Bought,        // купил в магазине object еды a, воды b (оба 0 — полки пусты); third — продавец
     SoldOut,       // в магазине (subject) кончилась еда; object — кто купил последнюю
     SawDoctor,     // лечился в больнице object: здоровья +a %, b = 1 — остановили кровь; third — врач
+    PhaseBegan,    // сценарий (subject) перешёл в фазу a (WorldPhase); b — пострадавших к этому часу (этап 7.4)
+    LeftWork,      // бросил работу в object: в фазе a (WorldPhase) на работу больше не выходит
     Count
 };
 
