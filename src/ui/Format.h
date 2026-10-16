@@ -5,6 +5,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+
+namespace lw {
+class World;
+}
 
 namespace lw::ui {
 
@@ -37,8 +42,12 @@ void formatInventory(char* buffer, std::size_t size, const Inventory& inventory)
 // Полоска-индикатор 0..1 с подписью.
 void meter(const char* label, float value);
 
-// Ссылка на объект: кнопка «#id»; true — по ней щёлкнули.
+// Ссылка на объект: кнопка «#id», у людей — «John Miller #id»; true — по ней
+// щёлкнули. Имена берутся из мира, заданного setNameSource (раз за кадр).
 bool idLink(EntityId id);
+void setNameSource(const World* world);
+// Подпись объекта: «John Miller #1745» или «#1745».
+std::string idLabel(EntityId id);
 
 // Длительность в тиках — как игровое время: «2 ч 05 мин», «35 мин».
 void formatGameDuration(char* buffer, std::size_t size, std::uint64_t ticks);

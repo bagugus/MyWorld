@@ -3,6 +3,7 @@
 #include "sim/Components.h"
 #include "sim/Death.h"
 #include "sim/Hash.h"
+#include "sim/Names.h"
 #include "sim/Population.h"
 #include "sim/gen/MapGenerator.h"
 #include "sim/systems/AnimalSystem.h"
@@ -258,6 +259,16 @@ std::uint64_t World::stateHash() const {
             hasher.add(static_cast<std::uint8_t>(person->indoors));
             hasher.add(person->group);
             hasher.add(person->formerHome);
+        }
+        if (const auto* name = registry_.try_get<Name>(entity)) {
+            hasher.add(std::uint64_t{31});
+            for (const char c : name->first) {
+                hasher.add(static_cast<std::uint8_t>(c));
+            }
+            hasher.add(std::uint8_t{0});
+            for (const char c : name->last) {
+                hasher.add(static_cast<std::uint8_t>(c));
+            }
         }
         if (const auto* group = registry_.try_get<Group>(entity)) {
             hasher.add(std::uint64_t{27});

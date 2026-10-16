@@ -485,7 +485,7 @@ void Inspector::drawPerson(entt::entity entity) {
     const std::uint64_t tick = world_.tick();
     char duration[32];
 
-    ImGui::Text("Человек #%llu", static_cast<unsigned long long>(selected_));
+    ImGui::Text("Человек %s", idLabel(selected_).c_str());
     if (const auto* mind = registry.try_get<Mind>(entity)) {
         ImGui::Text("Сейчас: %s%s%s", actionName(mind->action),
                     mind->phase == ActionPhase::Travel ? " (в пути)" : "",
@@ -943,7 +943,7 @@ void Inspector::drawZombie(entt::entity entity) {
     const Zombie& zombie = registry.get<Zombie>(entity);
     char duration[32];
 
-    ImGui::Text("Зомби #%llu", static_cast<unsigned long long>(selected_));
+    ImGui::Text("Зомби %s", idLabel(selected_).c_str());
     ImGui::Text("Сейчас: %s", zombieStateName(zombie.state));
     if (zombie.target != kInvalidId) {
         ImGui::SameLine();
@@ -1178,8 +1178,7 @@ void Inspector::drawCorpse(entt::entity entity) {
                     animalKindName(corpse.animal));
         ImGui::Text("Мяса осталось: %d порций", corpse.meat);
     } else {
-        ImGui::Text("Тело #%llu: %s", static_cast<unsigned long long>(selected_),
-                    corpseKindName(corpse.kind));
+        ImGui::Text("Тело %s: %s", idLabel(selected_).c_str(), corpseKindName(corpse.kind));
     }
     formatGameDuration(duration, sizeof(duration), world_.tick() - corpse.diedAt);
     ImGui::Text("Погиб %s назад: %s", duration, deathCauseName(corpse.cause));

@@ -1,6 +1,7 @@
 #include "sim/Population.h"
 
 #include "sim/Components.h"
+#include "sim/Names.h"
 #include "sim/Relations.h"
 #include "sim/Traits.h"
 #include "sim/World.h"
@@ -10,6 +11,9 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,6 +26,10 @@ constexpr std::uint32_t kHouseWeight = 1;
 constexpr std::uint32_t kApartmentWeight = 4;
 // Попыток найти проходимую клетку для бездомного.
 constexpr int kSpawnAttempts = 200;
+// Имена: вероятность, что новый жилец дома — родня первого (общая фамилия);
+// сколько раз перевыбирать имя, пока не найдётся незанятое.
+constexpr float kFamilyChance = 0.7f;
+constexpr int kNameAttempts = 50;
 // Первое решение — в течение стольких игровых минут: люди думают не в один тик.
 constexpr int kFirstThinkMinutes = 10;
 
@@ -247,6 +255,7 @@ void spawnPeople(World& world, int count) {
     Rng& rng = world.rng(RngStream::Spawn);
     Rng& character = world.rng(RngStream::Traits);
     Rng& gear = world.rng(RngStream::Combat);
+    Rng& naming = world.rng(RngStream::Names);
     entt::registry& registry = world.registry();
     const NavGrid& nav = world.nav();
 
@@ -268,6 +277,14 @@ void spawnPeople(World& world, int count) {
     for (const auto& [id, building] : buildings) {
         totalWeight += building->kind == BuildingKind::Apartment ? kApartmentWeight : kHouseWeight;
         homes.push_back({id, building->door, totalWeight});
+    }
+
+    // Имена: жильцы одного дома чаще всего — одна семья с общей фамилией;
+    // полное имя у каждого своё, чтобы людей было легко различать.
+    std::unordered_map<EntityId, std::string> familyOf;
+    std::unordered_set<std::string> takenNames;
+    for (const auto [entity, name] : registry.view<const Name>().each()) {
+        takenNames.insert(name.first + " " + name.last);
     }
 
     for (int i = 0; i < count; ++i) {
@@ -309,10 +326,26 @@ void spawnPeople(World& world, int count) {
                                             kFirstThinkMinutes * kTicksPerGameMinute));
         mind.until = mind.nextThink;
 
+        Name name;
+        const auto family = familyOf.find(person.home);
+        const bool relative = family != familyOf.end() && naming.chance(kFamilyChance);
+        for (int attempt = 0; attempt < kNameAttempts; ++attempt) {
+            name.first = randomFirstName(naming);
+            name.last = relative ? family->second : std::string(randomLastName(naming));
+            if (!takenNames.contains(name.first + " " + name.last)) {
+                break;
+            }
+        }
+        takenNames.insert(name.first + " " + name.last);
+        if (person.home != kInvalidId && family == familyOf.end()) {
+            familyOf.emplace(person.home, name.last);
+        }
+
         const entt::entity entity = world.create();
         registry.emplace<Position>(entity, Map::cellCenter(cell->x), Map::cellCenter(cell->y));
         registry.emplace<Velocity>(entity);
         registry.emplace<Person>(entity, person);
+        registry.emplace<Name>(entity, std::move(name));
         registry.emplace<Walker>(entity, std::move(walker));
         registry.emplace<Needs>(entity, needs);
         registry.emplace<Traits>(entity, generateTraits(character));

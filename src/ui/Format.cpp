@@ -1,6 +1,8 @@
 #include "ui/Format.h"
 
+#include "sim/Names.h"
 #include "sim/TimeScale.h"
+#include "sim/World.h"
 
 #include <imgui.h>
 
@@ -145,11 +147,25 @@ void meter(const char* label, float value) {
     ImGui::ProgressBar(std::clamp(value, 0.0f, 1.0f), {-FLT_MIN, 0.0f}, overlay);
 }
 
+namespace {
+const World* nameSource = nullptr;
+} // namespace
+
+void setNameSource(const World* world) {
+    nameSource = world;
+}
+
+std::string idLabel(EntityId id) {
+    if (nameSource == nullptr) {
+        return "#" + std::to_string(id);
+    }
+    return labelOf(nameSource->registry(), nameSource->find(id), id);
+}
+
 bool idLink(EntityId id) {
-    char label[32];
-    std::snprintf(label, sizeof(label), "#%llu", static_cast<unsigned long long>(id));
+    const std::string label = idLabel(id);
     ImGui::PushID(static_cast<int>(id));
-    const bool clicked = ImGui::SmallButton(label);
+    const bool clicked = ImGui::SmallButton(label.c_str());
     ImGui::PopID();
     return clicked;
 }

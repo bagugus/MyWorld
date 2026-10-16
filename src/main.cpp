@@ -21,6 +21,7 @@
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
 #include "ui/ChronicleView.h"
+#include "ui/Format.h"
 #include "ui/Inspector.h"
 #include "ui/PathTool.h"
 #include "ui/Ui.h"
@@ -139,6 +140,7 @@ int main(int argc, char** argv) {
             EndMode2D();
 
             lw::ui::beginFrame();
+            lw::ui::setNameSource(&world);
             lw::ui::drawSettlementLabels(world, camera);
             lw::ui::drawTimePanel(world, environment, driver);
             lw::ui::drawStatsPanel(world, environment, driver, camera, renderer);

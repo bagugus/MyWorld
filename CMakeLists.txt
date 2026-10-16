@@ -55,6 +55,8 @@ add_library(lw_sim STATIC
     src/sim/Perception.h
     src/sim/Places.cpp
     src/sim/Places.h
+    src/sim/Names.cpp
+    src/sim/Names.h
     src/sim/Population.cpp
     src/sim/Population.h
     src/sim/Relations.cpp

@@ -14,6 +14,7 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Events.h"
+#include "sim/Names.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
@@ -32,10 +33,16 @@
 #include <functional>
 #include <iterator>
 #include <optional>
+#include <string>
 #include <utility>
 #include <vector>
 
 namespace {
+
+// «John Miller #1745» — для людей (живых, погибших, обращённых), иначе «#1745».
+std::string label(const lw::World& world, lw::EntityId id) {
+    return lw::labelOf(world.registry(), world.find(id), id);
+}
 
 // Сводка по карте: по ней видно, что генерация дала осмысленный мир.
 void printMapSummary(const lw::World& world, double seconds) {
@@ -287,8 +294,7 @@ void printMemories(const lw::World& world) {
                 debts > 0 ? debt / static_cast<float>(debts) : 0.0f, grudges,
                 grudges > 0 ? grudge / static_cast<float>(grudges) : 0.0f);
     if (richest != lw::kInvalidId) {
-        std::printf("; remembers most: #%llu (%zu)", static_cast<unsigned long long>(richest),
-                    most);
+        std::printf("; remembers most: %s (%zu)", label(world, richest).c_str(), most);
     }
     std::printf("\n");
     // Репутация (этап 6.3): кого знают многие и любят меньше и больше всех.
@@ -311,10 +317,9 @@ void printMemories(const lw::World& world) {
         }
     }
     if (worst != lw::kInvalidId) {
-        std::printf("  reputation (known by 3+): worst #%llu %+.2f (%d), best #%llu %+.2f (%d)\n",
-                    static_cast<unsigned long long>(worst), worstReputation.affinity,
-                    worstReputation.known, static_cast<unsigned long long>(best),
-                    bestReputation.affinity, bestReputation.known);
+        std::printf("  reputation (known by 3+): worst %s %+.2f (%d), best %s %+.2f (%d)\n",
+                    label(world, worst).c_str(), worstReputation.affinity, worstReputation.known,
+                    label(world, best).c_str(), bestReputation.affinity, bestReputation.known);
     }
 }
 
@@ -550,12 +555,12 @@ void printSocialLog(const lw::World& world) {
             continue;
         }
         const lw::CalendarTime time = lw::calendarAt(event.tick);
-        std::printf("  day %2d %02d:%02d %-15s #%llu -> #%llu a=%d b=%d", time.day, time.hour,
+        std::printf("  day %2d %02d:%02d %-15s %s -> %s a=%d b=%d", time.day, time.hour,
                     time.minute, lw::chronicleKindName(event.kind),
-                    static_cast<unsigned long long>(event.subject),
-                    static_cast<unsigned long long>(event.object), event.a, event.b);
+                    label(world, event.subject).c_str(), label(world, event.object).c_str(),
+                    event.a, event.b);
         if (event.third != lw::kInvalidId) {
-            std::printf(" third=#%llu", static_cast<unsigned long long>(event.third));
+            std::printf(" third=%s", label(world, event.third).c_str());
         }
         std::printf("\n");
     }
@@ -629,10 +634,10 @@ void printEventLog(const lw::World& world) {
             continue;
         }
         const lw::CalendarTime time = lw::calendarAt(event.tick);
-        std::printf("  day %2d %02d:%02d %-12s #%llu -> #%llu a=%d b=%d", time.day, time.hour,
+        std::printf("  day %2d %02d:%02d %-12s %s -> %s a=%d b=%d", time.day, time.hour,
                     time.minute, lw::chronicleKindName(event.kind),
-                    static_cast<unsigned long long>(event.subject),
-                    static_cast<unsigned long long>(event.object), event.a, event.b);
+                    label(world, event.subject).c_str(), label(world, event.object).c_str(),
+                    event.a, event.b);
         if (event.kind == K::EventBegan) {
             const auto it = std::find_if(learned.begin(), learned.end(),
                                          [&](const auto& item) { return item.first == event.subject; });

@@ -449,18 +449,18 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                 ImGui::Text("Животное #%llu: %s, %s", static_cast<unsigned long long>(picked->id),
                             animalKindName(animal->kind), animalStateName(animal->state));
             } else if (const auto* corpse = world.registry().try_get<Corpse>(picked->entity)) {
-                ImGui::Text("Тело #%llu: %s", static_cast<unsigned long long>(picked->id),
+                ImGui::Text("Тело %s: %s", idLabel(picked->id).c_str(),
                             corpse->kind == CorpseKind::Animal ? animalKindName(corpse->animal)
                                                                : corpseKindName(corpse->kind));
             } else if (const auto* flock = world.registry().try_get<Flock>(picked->entity)) {
                 ImGui::Text("Стая #%llu: %d ворон%s", static_cast<unsigned long long>(picked->id),
                             flock->birds, flock->flying ? ", в воздухе" : "");
             } else if (const auto* zombie = world.registry().try_get<Zombie>(picked->entity)) {
-                ImGui::Text("Зомби #%llu: %s", static_cast<unsigned long long>(picked->id),
+                ImGui::Text("Зомби %s: %s", idLabel(picked->id).c_str(),
                             zombieStateName(zombie->state));
             } else {
                 const auto* mind = world.registry().try_get<Mind>(picked->entity);
-                ImGui::Text("Человек #%llu: %s", static_cast<unsigned long long>(picked->id),
+                ImGui::Text("Человек %s: %s", idLabel(picked->id).c_str(),
                             mind != nullptr ? actionName(mind->action) : "—");
             }
         }
