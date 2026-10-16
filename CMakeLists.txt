@@ -53,6 +53,8 @@ add_library(lw_sim STATIC
     src/sim/Places.h
     src/sim/Population.cpp
     src/sim/Population.h
+    src/sim/Relations.cpp
+    src/sim/Relations.h
     src/sim/Resources.cpp
     src/sim/Resources.h
     src/sim/Rng.cpp
@@ -96,6 +98,8 @@ add_library(lw_sim STATIC
     src/sim/systems/PerceptionSystem.h
     src/sim/systems/ResourceSystem.cpp
     src/sim/systems/ResourceSystem.h
+    src/sim/systems/SocialSystem.cpp
+    src/sim/systems/SocialSystem.h
     src/sim/systems/UtilityAiSystem.cpp
     src/sim/systems/UtilityAiSystem.h
     src/sim/systems/WeatherSystem.cpp

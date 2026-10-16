@@ -51,6 +51,8 @@ private:
     // Дальность зрения и слуха, кого существо заметило. false — щёлкнули по
     // ссылке и выбор сменился.
     bool drawPerception(entt::entity entity);
+    // Кого человек знает и как к нему относится. false — щёлкнули по ссылке.
+    bool drawRelations(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.

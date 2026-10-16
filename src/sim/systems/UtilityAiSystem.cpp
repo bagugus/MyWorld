@@ -96,6 +96,9 @@ constexpr float kSocialScale = 800.0f;
 constexpr float kWaterSearch = 2000.0f;
 constexpr float kForageSearch = 1500.0f;
 constexpr float kCompanySearch = 500.0f;
+// К знакомым с симпатией не ниже kVisitAffinity идут дальше (этап 6.1).
+constexpr float kFriendSearch = 1500.0f;
+constexpr float kVisitAffinity = 0.2f;
 constexpr float kGatheringSearch = 2000.0f;
 // Дальше этого от дома ночью ложатся спать на месте.
 constexpr float kSleepHomeRange = 1500.0f;
@@ -106,6 +109,10 @@ constexpr float kScavengeWeight = 0.9f;
 constexpr float kScavengeWaterWeight = 0.5f; // за водой проще к реке
 constexpr float kForageWeight = 0.8f;
 constexpr float kSocializeWeight = 0.6f;
+// Теплота к человеку — множитель оценки общения: 1 + kFriendWarmth × симпатия ×
+// знакомство (незнакомец — 1, близкий друг — до 1,6), не ниже kMinWarmth.
+constexpr float kFriendWarmth = 0.6f;
+constexpr float kMinWarmth = 0.3f;
 constexpr float kIdleScore = 0.08f;
 constexpr float kIdleHomeBonus = 0.06f; // дома отдыхать приятнее
 constexpr float kIdleFatigue = 0.15f;   // уставший охотнее присядет
@@ -251,6 +258,8 @@ struct Context {
     Weapon weapon{};
     // Кровотечение (этап 5.6: перевязка).
     float bleeding = 0.0f;
+    // Кого знает (этап 6.1); nullptr — никого.
+    const Relations* relations = nullptr;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -284,6 +293,7 @@ Context makeContext(const World& world, entt::entity entity) {
     if (const auto* wounds = registry.try_get<Wounds>(entity)) {
         ctx.bleeding = wounds->bleeding;
     }
+    ctx.relations = registry.try_get<Relations>(entity);
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -521,6 +531,21 @@ Option evalForage(const Context& ctx) {
     return {need * nearness(d, kForageScale), *spot, kInvalidId};
 }
 
+// Насколько тянет к человеку: незнакомец — 1, друг — больше, неприятный —
+// меньше; недруг — 0, к нему не идут.
+float warmth(const Context& ctx, EntityId other) {
+    const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(other) : nullptr;
+    if (bond == nullptr) {
+        return 1.0f;
+    }
+    if (bond->hostile()) {
+        return 0.0f;
+    }
+    return std::max(kMinWarmth, 1.0f + kFriendWarmth * bond->affinity * bond->familiarity);
+}
+
+// К людям: к другу или приятелю (их ищут дальше), к ближайшему, кто не спит,
+// а никого рядом — на площадь своего поселения. Недругов обходят.
 Option evalSocialize(const Context& ctx) {
     if (ctx.night) {
         return {};
@@ -533,15 +558,38 @@ Option evalSocialize(const Context& ctx) {
     }
     const World& world = ctx.world;
     const entt::registry& registry = world.registry();
-    // К ближайшему, кто не спит; никого рядом — на площадь своего поселения.
+    const auto awake = [&registry](entt::entity entity) {
+        const Person* person = registry.try_get<Person>(entity);
+        return person != nullptr && !person->asleep;
+    };
+    Option best;
+    if (ctx.relations != nullptr) {
+        for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+            const Bond& bond = ctx.relations->bonds[i];
+            const entt::entity other = world.find(bond.other);
+            if (bond.affinity < kVisitAffinity || other == entt::null || !awake(other)) {
+                continue;
+            }
+            const Position& at = registry.get<Position>(other);
+            const float d = distance(ctx.x, ctx.y, at.x, at.y);
+            if (d <= kFriendSearch) {
+                best = better(best, {need * warmth(ctx, bond.other) * nearness(d, kSocialScale),
+                                     Map::cellAt(at.x, at.y), bond.other});
+            }
+        }
+    }
     const auto other = world.spatial().nearest(
         ctx.x, ctx.y, kCompanySearch, [&](const SpatialHit& hit) {
-            const Person* person = registry.try_get<Person>(hit.entity);
-            return hit.id != ctx.id && person != nullptr && !person->asleep;
+            return hit.id != ctx.id && awake(hit.entity) && warmth(ctx, hit.id) > 0.0f;
         });
     if (other) {
         const float d = std::sqrt(other->distanceSq);
-        return {need * nearness(d, kSocialScale), Map::cellAt(other->x, other->y), kInvalidId};
+        best = better(best, {need * warmth(ctx, other->id) * nearness(d, kSocialScale),
+                             Map::cellAt(other->x, other->y), other->id});
+    }
+    // Площадь — если идти не к кому: пустая площадь рядом не лучше друга вдали.
+    if (best.score > 0.0f) {
+        return best;
     }
     if (const auto* settlement = world.places().settlement(ctx.settlement)) {
         const float d = distance(ctx.x, ctx.y, settlement->x, settlement->y);

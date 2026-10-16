@@ -156,6 +156,14 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— мяса %d", event.a);
         break;
+    case ChronicleKind::Befriended:
+        phrase.verb = "подружился с";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::Disliked:
+        phrase.verb = "невзлюбил";
+        phrase.withObject = true;
+        break;
     case ChronicleKind::Count:
         break;
     }

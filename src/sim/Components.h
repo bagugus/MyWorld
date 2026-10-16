@@ -190,6 +190,50 @@ struct Mind {
     Danger dangers[kDangerMemory] = {};
 };
 
+// Связь человека с другим человеком — его взгляд, не общий: у другого своя
+// связь в ответ, и она может быть другой (этап 6.1). Правила — sim/Relations.h.
+struct Bond {
+    // Отметки для летописи: событие пишется, когда отметка ставится, а снимается
+    // она с запасом — так колебание у порога не засоряет журнал.
+    static constexpr std::uint8_t kFriend = 1; // считает другом
+    static constexpr std::uint8_t kFoe = 2;    // невзлюбил
+
+    EntityId other = kInvalidId;
+    float familiarity = 0.0f; // знакомство 0..1: сколько времени провели рядом
+    float affinity = 0.0f;    // симпатия −1..1
+    float trust = 0.0f;       // доверие −1..1
+    // К чему тянется симпатия, когда они вместе: совместимость характеров,
+    // у соседей по дому — с надбавкой. Считается при знакомстве.
+    float chemistry = 0.0f;
+    std::uint64_t met = 0;    // тик знакомства
+    std::uint64_t seen = 0;   // тик, когда последний раз были вместе
+    std::uint8_t flags = 0;
+
+    bool friendly() const { return (flags & kFriend) != 0; }
+    bool hostile() const { return (flags & kFoe) != 0; }
+};
+
+// Кого человек знает. Связи остаются и после смерти другого — память о нём.
+// Мест мало: новое знакомство вытесняет самое слабое, если оно почти забыто.
+struct Relations {
+    static constexpr std::size_t kMaxBonds = 16;
+
+    Bond bonds[kMaxBonds] = {};
+    std::uint8_t count = 0;
+
+    const Bond* find(EntityId id) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (bonds[i].other == id) {
+                return &bonds[i];
+            }
+        }
+        return nullptr;
+    }
+    Bond* find(EntityId id) {
+        return const_cast<Bond*>(static_cast<const Relations*>(this)->find(id));
+    }
+};
+
 // Органы чувств существа (PerceptionSystem). Есть у всех, кто воспринимает
 // мир, и только их замечают другие: предметы пока невидимы.
 struct Senses {

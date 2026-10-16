@@ -132,10 +132,16 @@ void updateNeeds(World& world, float minutes) {
         }
         bool company = false;
         bool body = false;
+        // Рядом с тем, кого невзлюбил, всё равно одиноко (этап 6.1).
+        const Relations* relations = registry.try_get<Relations>(entity);
+        const auto disliked = [relations](EntityId other) {
+            const Bond* bond = relations != nullptr ? relations->find(other) : nullptr;
+            return bond != nullptr && bond->hostile();
+        };
         world.spatial().forEachInRadius(
             position.x, position.y, std::max(kCompanyRadius, kBodyRadius), [&](const SpatialHit& hit) {
                 if (hit.distanceSq <= kCompanyRadius * kCompanyRadius && hit.id != id.value &&
-                    registry.all_of<Person>(hit.entity)) {
+                    registry.all_of<Person>(hit.entity) && !disliked(hit.id)) {
                     company = true;
                 }
                 if (hit.distanceSq <= kBodyRadius * kBodyRadius) {

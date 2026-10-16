@@ -1,7 +1,7 @@
 // Тесты ядра симуляции: RNG, стабильные id, карта и её генерация, детерминизм,
 // драйвер времени, календарь, климат и погода, пространственный индекс, навигация,
 // люди и движение, нужды, черты, Utility AI, ресурсы, летопись, восприятие, зомби,
-// животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит.
+// животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -13,6 +13,7 @@
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
+#include "sim/Relations.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/SimDriver.h"
@@ -29,6 +30,7 @@
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -3559,6 +3561,262 @@ void testZombiesArrive() {
     }));
 }
 
+// Совместимость: общая часть пары одна с обеих сторон, доброта нравится,
+// агрессия отталкивает мирных сильнее, чем агрессивных.
+void testChemistry() {
+    const lw::Traits average{};
+    lw::Traits kind;
+    kind.altruism = 0.9f;
+    lw::Traits harsh;
+    harsh.aggression = 0.9f;
+    lw::Traits peaceful;
+    peaceful.aggression = 0.1f;
+    int friendly = 0;
+    int hostile = 0;
+    bool symmetric = true;
+    bool inRange = true;
+    bool kindLiked = true;
+    bool harshDisliked = true;
+    constexpr int kPairs = 2000;
+    for (lw::EntityId a = 1; a <= kPairs; ++a) {
+        const lw::EntityId b = a * 7919 + 13;
+        const float ab = lw::chemistry(a, average, b, average);
+        symmetric = symmetric && ab == lw::chemistry(b, average, a, average);
+        inRange = inRange && ab >= -1.0f && ab <= 1.0f;
+        kindLiked = kindLiked && lw::chemistry(a, average, b, kind) > ab;
+        harshDisliked = harshDisliked && lw::chemistry(a, peaceful, b, harsh) <
+                                             lw::chemistry(a, harsh, b, harsh);
+        friendly += ab >= lw::kFriendAffinity ? 1 : 0;
+        hostile += ab <= lw::kFoeAffinity ? 1 : 0;
+    }
+    CHECK(symmetric);
+    CHECK(inRange);
+    CHECK(kindLiked);
+    CHECK(harshDisliked);
+    // Примерно каждый четвёртый — в друзья, каждый двенадцатый — в недруги.
+    CHECK(friendly > kPairs / 6 && friendly < kPairs / 3);
+    CHECK(hostile > kPairs / 25 && hostile < kPairs / 6);
+}
+
+// Мест для связей мало: новое знакомство вытесняет только почти забытое.
+void testAcquireBond() {
+    lw::Relations relations;
+    bool created = false;
+    for (lw::EntityId id = 1; id <= lw::Relations::kMaxBonds; ++id) {
+        lw::Bond* bond = lw::acquireBond(relations, id, 0.2f, 5, &created);
+        CHECK(bond != nullptr && created && bond->other == id && bond->met == 5);
+        if (bond != nullptr) {
+            bond->familiarity = 0.5f;
+        }
+    }
+    CHECK(relations.count == lw::Relations::kMaxBonds);
+    // Уже знакомый — та же связь.
+    CHECK(lw::acquireBond(relations, 3, 0.9f, 7, &created) == relations.find(3) && !created);
+    CHECK(relations.find(3)->chemistry == 0.2f);
+    // Все связи крепкие — незнакомца не запомнить.
+    CHECK(lw::acquireBond(relations, 100, 0.2f, 9, &created) == nullptr && !created);
+    // Почти забытая уступает место.
+    relations.find(7)->familiarity = 0.05f;
+    lw::Bond* fresh = lw::acquireBond(relations, 100, 0.2f, 9, &created);
+    CHECK(fresh != nullptr && created && fresh->other == 100);
+    CHECK(relations.find(7) == nullptr);
+    CHECK(relations.count == lw::Relations::kMaxBonds);
+}
+
+// С начала мира соседи по дому знают друг друга, а люди — ближайших соседей.
+void testRelationsAtStart() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 150;
+    lw::World world(7, config);
+    const entt::registry& registry = world.registry();
+    std::size_t housemates = 0;
+    bool know = true;
+    std::size_t withBonds = 0;
+    for (const auto [entity, id, person, relations] :
+         registry.view<const lw::Id, const lw::Person, const lw::Relations>().each()) {
+        withBonds += relations.count > 0 ? 1 : 0;
+        for (const auto [other, otherId, otherPerson] :
+             registry.view<const lw::Id, const lw::Person>().each()) {
+            if (other == entity || otherPerson.home != person.home) {
+                continue;
+            }
+            ++housemates;
+            const lw::Bond* bond = relations.find(otherId.value);
+            know = know && (bond != nullptr || relations.count == lw::Relations::kMaxBonds);
+            know = know && (bond == nullptr || bond->familiarity > 0.5f);
+        }
+    }
+    CHECK(know);
+    CHECK(housemates > 0);
+    CHECK(withBonds > 100);
+    // Знакомства — без рандома и одинаковые для одного seed.
+    lw::World twin(7, config);
+    CHECK(world.stateHash() == twin.stateHash());
+}
+
+// Время вместе: знакомство растёт, симпатия тянется к совместимости; дальше —
+// друг, а с несовместимым — недруг. Оба события — в летописи.
+void testRelationsGrow() {
+    Field field(2);
+    CHECK(field.open && field.people.size() == 2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity a = field.people[0];
+    const entt::entity b = field.people[1];
+    registry.get<lw::Relations>(a) = {};
+    registry.get<lw::Relations>(b) = {};
+    field.place(a, 10);
+    field.place(b, 12);
+    registry.get<lw::Person>(a).asleep = false;
+    registry.get<lw::Person>(b).asleep = false;
+    lw::Mind& mind = registry.get<lw::Mind>(a);
+    mind.action = lw::Action::Socialize; // разговор
+    mind.phase = lw::ActionPhase::Perform;
+    registry.get<lw::Mind>(b).action = lw::Action::Idle;
+
+    lw::updateRelations(field.world, 60.0f);
+    lw::Bond* ab = registry.get<lw::Relations>(a).find(field.id(b));
+    const lw::Bond* ba = registry.get<lw::Relations>(b).find(field.id(a));
+    CHECK(ab != nullptr && ba != nullptr);
+    if (ab == nullptr || ba == nullptr) {
+        return;
+    }
+    const float first = ab->familiarity;
+    CHECK(first > 0.25f && first < 0.4f);
+    CHECK(ba->familiarity == first); // в разговоре оба
+    for (int hour = 0; hour < 5; ++hour) {
+        lw::updateRelations(field.world, 60.0f);
+    }
+    CHECK(ab->familiarity > 0.75f);
+    CHECK(std::abs(ab->affinity - ab->chemistry) < std::abs(ab->chemistry) * 0.6f + 1e-6f);
+
+    // Сошлись характерами — друзья.
+    ab->chemistry = 1.0f;
+    for (int hour = 0; hour < 8; ++hour) {
+        lw::updateRelations(field.world, 60.0f);
+    }
+    CHECK(ab->friendly() && ab->trust > 0.1f);
+    CHECK(field.world.chronicle().countOf(lw::ChronicleKind::Befriended) >= 1);
+
+    // Не сошлись — дружба прошла, невзлюбил.
+    ab->chemistry = -1.0f;
+    for (int hour = 0; hour < 12; ++hour) {
+        lw::updateRelations(field.world, 60.0f);
+    }
+    CHECK(!ab->friendly() && ab->hostile());
+    CHECK(field.world.chronicle().countOf(lw::ChronicleKind::Disliked) >= 1);
+    // Доверие от общения не падает: его подорвут только поступки.
+    CHECK(ab->trust > 0.1f);
+
+    // Врозь знакомство понемногу забывается: не виделись больше двух суток.
+    field.freeze(a, 0);
+    field.dismiss(b);
+    registry.get<lw::Needs>(a) = {};
+    const float before = ab->familiarity;
+    field.steps(2 * lw::kTicksPerGameDay + 2 * lw::kTicksPerGameHour);
+    CHECK(ab->familiarity < before && ab->familiarity > before - 0.01f);
+}
+
+// Рядом с недругом одиночество не проходит.
+void testFoeIsNoCompany() {
+    Field field(2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity a = field.people[0];
+    const entt::entity b = field.people[1];
+    field.freeze(a, 10);
+    field.freeze(b, 12);
+    registry.get<lw::Relations>(a) = {};
+    registry.get<lw::Relations>(b) = {};
+    lw::Bond* bond = lw::acquireBond(registry.get<lw::Relations>(a), field.id(b), -1.0f, 0);
+    CHECK(bond != nullptr);
+    if (bond == nullptr) {
+        return;
+    }
+    bond->familiarity = 0.8f;
+    bond->affinity = -0.8f;
+    lw::updateBondFlags(*bond);
+    CHECK(bond->hostile());
+    registry.get<lw::Needs>(a).loneliness = 0.5f;
+    registry.get<lw::Needs>(b).loneliness = 0.5f;
+    lw::updateNeeds(field.world, 30.0f);
+    CHECK(registry.get<lw::Needs>(a).loneliness > 0.5f);
+    CHECK(registry.get<lw::Needs>(b).loneliness < 0.5f);
+}
+
+// Одинокий идёт к другу, даже если тот дальше, чем ищут незнакомцев, а к
+// недругу не идёт, даже если тот рядом.
+void testSocializeSeeksFriend() {
+    Field field(2);
+    if (!field.open || field.people.size() != 2) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity a = field.people[0];
+    const entt::entity b = field.people[1];
+    const lw::NavGrid& nav = field.world.nav();
+    // Друг — в 800 м: незнакомцев так далеко не ищут.
+    std::optional<lw::Cell> spot;
+    for (int dy = -250; dy <= 250 && !spot; dy += 10) {
+        for (int dx = -250; dx <= 250 && !spot; dx += 10) {
+            const lw::Cell cell{field.row.x + dx, field.row.y + dy};
+            const int d2 = dx * dx + dy * dy;
+            if (d2 >= 160 * 160 && d2 <= 240 * 240 && nav.passable(cell) &&
+                nav.connected(field.row, cell)) {
+                spot = cell;
+            }
+        }
+    }
+    CHECK(spot.has_value());
+    if (!spot) {
+        return;
+    }
+    field.place(a, 10);
+    registry.get<lw::Person>(a).asleep = false;
+    registry.get<lw::Traits>(a) = {};
+    registry.get<lw::Needs>(a) = {};
+    registry.get<lw::Needs>(a).loneliness = 1.0f;
+    registry.get<lw::Relations>(a) = {};
+    lw::Bond* bond = lw::acquireBond(registry.get<lw::Relations>(a), field.id(b), 0.8f, 0);
+    CHECK(bond != nullptr);
+    if (bond == nullptr) {
+        return;
+    }
+    bond->familiarity = 0.9f;
+    bond->affinity = 0.8f;
+    lw::updateBondFlags(*bond);
+    field.freeze(b, 0);
+    registry.get<lw::Position>(b) = {lw::Map::cellCenter(spot->x), lw::Map::cellCenter(spot->y)};
+    field.world.syncSpatial();
+
+    const auto decide = [&]() {
+        lw::Mind& mind = registry.get<lw::Mind>(a);
+        mind.action = lw::Action::Idle;
+        mind.phase = lw::ActionPhase::Perform;
+        mind.until = field.world.tick();
+        mind.nextThink = field.world.tick();
+        field.world.step();
+        return registry.get<lw::Mind>(a);
+    };
+    const lw::Mind visit = decide();
+    CHECK(visit.action == lw::Action::Socialize && visit.target == field.id(b));
+
+    // Недруг рядом: к нему не идут.
+    bond->affinity = -0.8f;
+    lw::updateBondFlags(*bond);
+    CHECK(bond->hostile());
+    field.place(a, 10);
+    registry.get<lw::Position>(b) = {lw::Map::cellCenter(field.row.x + 14),
+                                     lw::Map::cellCenter(field.row.y)};
+    field.world.syncSpatial();
+    const lw::Mind avoid = decide();
+    CHECK(avoid.target != field.id(b));
+}
+
 } // namespace
 
 int main() {
@@ -3636,6 +3894,12 @@ int main() {
     testAnimalsReturn();
     testPharmacies();
     testZombiesArrive();
+    testChemistry();
+    testAcquireBond();
+    testRelationsAtStart();
+    testRelationsGrow();
+    testFoeIsNoCompany();
+    testSocializeSeeksFriend();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

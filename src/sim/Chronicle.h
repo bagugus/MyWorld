@@ -40,6 +40,8 @@ enum class ChronicleKind : std::uint8_t {
     FoundWeapon,   // нашёл в здании или на теле object оружие и взял в руки: a — WeaponKind
     LootedBody,    // обыскал тело object: взял еды a, воды b
     Treated,       // перевязался (a = 0) или принял лекарство (a = 1)
+    Befriended,    // стал считать object другом (этап 6.1)
+    Disliked,      // невзлюбил object (этап 6.1)
     Count
 };
 

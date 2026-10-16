@@ -167,6 +167,51 @@ void printPeople(const lw::World& world) {
     }
 }
 
+// Отношения (этап 6.1): сколько знакомых, друзей и недругов у живых.
+void printRelations(const lw::World& world) {
+    const entt::registry& registry = world.registry();
+    std::size_t people = 0;
+    std::size_t bonds = 0;
+    std::size_t friends = 0;
+    std::size_t mutual = 0;
+    std::size_t foes = 0;
+    std::size_t lonely = 0;
+    std::size_t gone = 0;
+    float familiarity = 0.0f;
+    for (const auto [entity, id, person, relations] :
+         registry.view<const lw::Id, const lw::Person, const lw::Relations>().each()) {
+        ++people;
+        bonds += relations.count;
+        bool hasFriend = false;
+        for (std::size_t i = 0; i < relations.count; ++i) {
+            const lw::Bond& bond = relations.bonds[i];
+            familiarity += bond.familiarity;
+            const entt::entity other = world.find(bond.other);
+            const bool alive = other != entt::null && registry.all_of<lw::Person>(other);
+            gone += alive ? 0 : 1;
+            foes += bond.hostile() ? 1 : 0;
+            if (bond.friendly()) {
+                ++friends;
+                hasFriend = hasFriend || alive;
+                const auto* theirs = alive ? registry.try_get<lw::Relations>(other) : nullptr;
+                const lw::Bond* back = theirs != nullptr ? theirs->find(id.value) : nullptr;
+                // Пара считается один раз — у меньшего id.
+                mutual += back != nullptr && back->friendly() && id.value < bond.other ? 1 : 0;
+            }
+        }
+        lonely += hasFriend ? 0 : 1;
+    }
+    if (people == 0) {
+        return;
+    }
+    std::printf("relations: %.1f bonds per person (mean familiarity %.2f), friends %zu "
+                "(mutual pairs %zu), foes %zu, bonds with the dead %zu; no living friend %zu "
+                "of %zu\n",
+                static_cast<double>(bonds) / static_cast<double>(people),
+                bonds > 0 ? familiarity / static_cast<float>(bonds) : 0.0f, friends, mutual, foes,
+                gone, lonely, people);
+}
+
 // Восприятие: сколько контактов у существ и как они замечены.
 void printPerception(const lw::World& world) {
     const entt::registry& registry = world.registry();
@@ -677,6 +722,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printPeople(world);
+    printRelations(world);
     printPerception(world);
     printZombies(world);
     printAnimals(world);

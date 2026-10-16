@@ -11,6 +11,7 @@
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
 #include "sim/systems/ZombieSystem.h"
@@ -76,6 +77,8 @@ void World::step() {
     updateWeather(*this);
     updateResources(*this);
     tickNeeds(*this);
+    // Отношения — по тому, кто был рядом и чем занят на начало тика.
+    tickRelations(*this);
     // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
     updateBodies(*this);
     // До решений и движения: восприятие видит мир на начало тика.
@@ -352,6 +355,21 @@ std::uint64_t World::stateHash() const {
             hasher.add(wounds->infection);
             hasher.add(wounds->hurtAt);
             hasher.add(wounds->hurtBy);
+        }
+        if (const auto* relations = registry_.try_get<Relations>(entity)) {
+            hasher.add(std::uint64_t{25});
+            hasher.add(relations->count);
+            for (std::size_t i = 0; i < relations->count; ++i) {
+                const Bond& bond = relations->bonds[i];
+                hasher.add(bond.other);
+                hasher.add(bond.familiarity);
+                hasher.add(bond.affinity);
+                hasher.add(bond.trust);
+                hasher.add(bond.chemistry);
+                hasher.add(bond.met);
+                hasher.add(bond.seen);
+                hasher.add(bond.flags);
+            }
         }
         if (const auto* corpse = registry_.try_get<Corpse>(entity)) {
             hasher.add(std::uint64_t{23});

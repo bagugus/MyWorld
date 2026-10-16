@@ -4,6 +4,7 @@
 #include "sim/Components.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
+#include "sim/Relations.h"
 #include "sim/TimeScale.h"
 #include "sim/Items.h"
 #include "sim/Weapons.h"
@@ -46,6 +47,9 @@ constexpr Color kHordeColor = {214, 96, 80, 200};
 // Опасные места, которые помнит человек.
 constexpr Color kDangerColor = {230, 70, 60, 110};
 constexpr Color kLeaderColor = {255, 170, 120, 255};
+// Отношения: линии к друзьям и недругам.
+constexpr Color kFriendColor = {255, 150, 220, 170};
+constexpr Color kFoeColor = {200, 50, 50, 170};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -246,6 +250,18 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             if (danger.until > world_.tick()) {
                 DrawRing(cellCenter(danger.cell), kDangerRadius - line, kDangerRadius, 0.0f, 360.0f,
                          64, kDangerColor);
+            }
+        }
+    }
+    // Друзья и недруги, которые живы, — линиями.
+    if (const auto* relations = registry.try_get<Relations>(entity)) {
+        for (std::size_t i = 0; i < relations->count; ++i) {
+            const Bond& bond = relations->bonds[i];
+            const entt::entity other = world_.find(bond.other);
+            if ((bond.friendly() || bond.hostile()) && other != entt::null &&
+                registry.all_of<Person>(other)) {
+                DrawLineEx(at, drawnPosition(registry, other, alpha), line,
+                           bond.hostile() ? kFoeColor : kFriendColor);
             }
         }
     }
@@ -531,6 +547,10 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
+    if (!drawRelations(entity)) {
+        return;
+    }
+
     if (registry.all_of<Mind, Needs>(entity) && ImGui::CollapsingHeader("Оценки действий")) {
         const ActionScores scores = evaluateActions(world_, entity);
         const Action current = registry.get<Mind>(entity).action;
@@ -646,6 +666,75 @@ bool Inspector::drawPerception(entt::entity entity) {
         }
         ImGui::TableNextColumn();
         ImGui::Text("%.0f м", std::hypot(contact.x - position.x, contact.y - position.y));
+    }
+    ImGui::EndTable();
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
+}
+
+bool Inspector::drawRelations(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* relations = registry.try_get<Relations>(entity);
+    if (relations == nullptr) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Отношения: %d###relations", relations->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    if (relations->count == 0) {
+        ImGui::TextDisabled("никого не знает");
+        return true;
+    }
+    // Сначала самые крепкие связи.
+    std::vector<const Bond*> bonds;
+    for (std::size_t i = 0; i < relations->count; ++i) {
+        bonds.push_back(&relations->bonds[i]);
+    }
+    std::stable_sort(bonds.begin(), bonds.end(), [](const Bond* a, const Bond* b) {
+        return bondStrength(*a) > bondStrength(*b);
+    });
+    ImGui::TextDisabled("знакомство, симпатия, доверие (%%); совместимость");
+    if (!ImGui::BeginTable("relations", 5, ImGuiTableFlags_SizingFixedFit)) {
+        return true;
+    }
+    const std::uint64_t tick = world_.tick();
+    EntityId clicked = kInvalidId;
+    char ago[32];
+    for (const Bond* bond : bonds) {
+        ImGui::TableNextColumn();
+        if (idLink(bond->other)) {
+            clicked = bond->other;
+        }
+        ImGui::TableNextColumn();
+        ImGui::Text("%3.0f %+4.0f %+4.0f", bond->familiarity * 100.0f, bond->affinity * 100.0f,
+                    bond->trust * 100.0f);
+        ImGui::TableNextColumn();
+        ImGui::Text("%+.2f", bond->chemistry);
+        ImGui::TableNextColumn();
+        const entt::entity other = world_.find(bond->other);
+        if (other == entt::null || registry.all_of<Corpse>(other)) {
+            ImGui::TextDisabled("погиб");
+        } else if (registry.all_of<Zombie>(other)) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "стал зомби");
+        } else if (bond->friendly()) {
+            ImGui::TextColored({1.0f, 0.6f, 0.86f, 1.0f}, "друг");
+        } else if (bond->hostile()) {
+            ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "недруг");
+        } else {
+            ImGui::TextDisabled("знакомый");
+        }
+        ImGui::TableNextColumn();
+        if (tick - bond->seen <= kTicksPerGameMinute) { // вместе в последнюю минуту
+            ImGui::TextUnformatted("рядом");
+        } else {
+            formatGameDuration(ago, sizeof(ago), tick - bond->seen);
+            ImGui::TextDisabled("%s назад", ago);
+        }
     }
     ImGui::EndTable();
     if (clicked != kInvalidId) {
