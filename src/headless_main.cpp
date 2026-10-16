@@ -13,6 +13,7 @@
 //   lw_headless --seed 42 --event-schedule               временное расписание ивентов (до рассказчика)
 //   lw_headless --seed 42 --outbreak 3 --daily           вспышка на 4-е сутки (0 — не по расписанию)
 //   lw_headless --seed 42 --phase collapse               сразу в фазу коллапса (этап 7.4)
+//   lw_headless --seed 42 --phase panic --stories        и сюжетные линии из летописи (этап 12а)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -22,6 +23,7 @@
 #include "sim/Relations.h"
 #include "sim/Rng.h"
 #include "sim/Scenario.h"
+#include "sim/Story.h"
 #include "sim/Work.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -662,6 +664,79 @@ void printSocialLog(const lw::World& world) {
     }
 }
 
+// Сюжетные линии (этап 12а.1): сколько каких и чем кончились, затем самые
+// длинные — со всеми событиями по порядку.
+void printStories(const lw::World& world) {
+    lw::StoryTracker tracker;
+    tracker.update(world);
+    const std::vector<lw::Story>& stories = tracker.stories();
+    constexpr auto kKinds = static_cast<std::size_t>(lw::StoryKind::Count);
+    constexpr auto kEndings = static_cast<std::size_t>(lw::StoryEnding::Count);
+    std::size_t total[kKinds] = {};
+    std::size_t active[kKinds] = {};
+    std::size_t betrayals = 0;
+    std::size_t endings[kEndings] = {};
+    for (const lw::Story& story : stories) {
+        const auto kind = static_cast<std::size_t>(story.kind);
+        ++total[kind];
+        active[kind] += story.active() ? 1 : 0;
+        betrayals += story.betrayal ? 1 : 0;
+        ++endings[static_cast<std::size_t>(story.ending)];
+    }
+    std::printf("stories: %zu (betrayals %zu)\n", stories.size(), betrayals);
+    for (std::size_t kind = 0; kind < kKinds; ++kind) {
+        std::printf("  %-10s %4zu, active %zu\n",
+                    lw::storyKindName(static_cast<lw::StoryKind>(kind)), total[kind], active[kind]);
+    }
+    std::printf("  endings:");
+    for (std::size_t ending = 1; ending < kEndings; ++ending) {
+        std::printf(" %s %zu%s", lw::storyEndingName(static_cast<lw::StoryEnding>(ending)),
+                    endings[ending], ending + 1 < kEndings ? "," : "\n");
+    }
+
+    std::vector<const lw::Story*> longest;
+    for (const lw::Story& story : stories) {
+        longest.push_back(&story);
+    }
+    std::stable_sort(longest.begin(), longest.end(), [](const lw::Story* a, const lw::Story* b) {
+        return a->beats.size() > b->beats.size();
+    });
+    constexpr std::size_t kShown = 8;
+    constexpr std::size_t kBeats = 16;
+    const std::vector<lw::ChronicleEvent>& events = world.chronicle().events();
+    for (std::size_t i = 0; i < std::min(kShown, longest.size()); ++i) {
+        const lw::Story& story = *longest[i];
+        std::printf("story %u %s%s: hero %s", story.id, lw::storyKindName(story.kind),
+                    story.betrayal ? " (betrayal)" : "", label(world, story.hero).c_str());
+        if (story.other != lw::kInvalidId) {
+            std::printf(", other %s", label(world, story.other).c_str());
+        }
+        if (story.focus != lw::kInvalidId) {
+            std::printf(", about #%llu", static_cast<unsigned long long>(story.focus));
+        }
+        std::printf(" — %s, %s, cast %zu, interest %.2f\n", lw::storyStageName(story.stage),
+                    lw::storyEndingName(story.active() ? lw::expectedEnding(story) : story.ending),
+                    story.cast.size(), lw::storyInterest(story, world.tick()));
+        for (std::size_t b = 0; b < story.beats.size(); ++b) {
+            if (b == kBeats && story.beats.size() > kBeats + 1) {
+                std::printf("    ... %zu more\n", story.beats.size() - kBeats);
+                b = story.beats.size() - 1; // и последнее событие
+            }
+            const lw::StoryBeat& beat = story.beats[b];
+            const lw::ChronicleEvent& event = events[beat.event];
+            const lw::CalendarTime time = lw::calendarAt(event.tick);
+            std::printf("    day %2d %02d:%02d %-7s %-16s %s -> %s a=%d b=%d", time.day, time.hour,
+                        time.minute, lw::storyStageName(beat.stage),
+                        lw::chronicleKindName(event.kind), label(world, event.subject).c_str(),
+                        label(world, event.object).c_str(), event.a, event.b);
+            if (event.third != lw::kInvalidId) {
+                std::printf(" third=%s", label(world, event.third).c_str());
+            }
+            std::printf("\n");
+        }
+    }
+}
+
 // Ивенты (этап 7.1): сколько было, сколько идёт, что осталось в грузах, кто
 // узнал и сколько унесли.
 void printEvents(const lw::World& world) {
@@ -1115,6 +1190,7 @@ int main(int argc, char** argv) {
     bool social = false;
     bool profile = false;
     bool eventLog = false;
+    bool storyLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1142,6 +1218,8 @@ int main(int argc, char** argv) {
             profile = true;
         } else if (std::strcmp(argv[i], "--events") == 0) {
             eventLog = true;
+        } else if (std::strcmp(argv[i], "--stories") == 0) {
+            storyLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
             config.events = true;
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
@@ -1167,7 +1245,7 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--profile]\n");
+                        "[--stories] [--profile]\n");
             return 2;
         }
     }
@@ -1235,6 +1313,9 @@ int main(int argc, char** argv) {
     if (eventLog) {
         std::printf("event log:\n");
         printEventLog(world);
+    }
+    if (storyLog) {
+        printStories(world);
     }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

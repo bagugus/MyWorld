@@ -4,7 +4,7 @@
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
 // память, долг и обида, чужие поступки и слухи, группы, социальные действия
 // (поделиться, обмен, предательство, месть), ивенты, мирная жизнь, сценарий и
-// фазы мира.
+// фазы мира, сюжетные линии.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
@@ -24,6 +24,7 @@
 #include "sim/Scenario.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
+#include "sim/Story.h"
 #include "sim/Traits.h"
 #include "sim/Weapons.h"
 #include "sim/Work.h"
@@ -6120,6 +6121,77 @@ void testPoliceDefends() {
     CHECK(lw::threatOf(world, officer).level == 0.0f);
 }
 
+// Сюжетные линии (этап 12а.1): из записей летописи собираются вражда,
+// предательство, заражение, группа и гонка за грузом — с завязкой, нарастанием
+// и развязкой; события после развязки — эпилог той же линии.
+void testStoryLines() {
+    using K = lw::ChronicleKind;
+    lw::World world(1, smallConfig(0));
+    // Участники — просто номера: линии собираются из летописи, сущности не нужны.
+    world.record(K::Stole, 20, 500, 3, 0, 10); // 20 обокрал дом 500, хозяин 10
+    world.record(K::AssaultedBy, 10, 20);      // 20 напал на 10
+    world.record(K::Avenged, 10, 20, 1);       // 10 отомстил
+    world.record(K::Died, 20, 10);             // и 20 погиб от его руки
+    world.record(K::Befriended, 30, 31);
+    world.record(K::BetrayedBy, 30, 31, 2);
+    world.record(K::Reconciled, 30, 31);
+    world.record(K::Bitten, 40, 900);
+    world.record(K::Feverish, 40);
+    world.record(K::Died, 40, 900, static_cast<std::int32_t>(lw::DeathCause::Infection));
+    world.record(K::GroupFormed, 50, 600);
+    world.record(K::JoinedGroup, 51, 600, 1, 0, 50);
+    world.record(K::EventBegan, 700, 5);
+    world.record(K::LearnedOfEvent, 60, 700);
+    world.record(K::Salvaged, 60, 700, 2, 1);
+
+    lw::StoryTracker tracker;
+    tracker.update(world);
+    const std::vector<lw::Story>& stories = tracker.stories();
+    CHECK(stories.size() == 5);
+    if (stories.size() != 5) {
+        return;
+    }
+    const lw::Story& feud = stories[0];
+    CHECK(feud.kind == lw::StoryKind::Feud && feud.hero == 10 && feud.other == 20);
+    CHECK(!feud.betrayal && !feud.active() && feud.ending == lw::StoryEnding::Revenge);
+    CHECK(feud.beats.size() == 4); // кража, нападение, месть и смерть обидчика — эпилог
+    CHECK(feud.beats[0].stage == lw::StoryStage::Setup);
+    CHECK(feud.beats[1].stage == lw::StoryStage::Rising);
+
+    const lw::Story& betrayal = stories[1];
+    CHECK(betrayal.kind == lw::StoryKind::Feud && betrayal.betrayal);
+    CHECK(betrayal.ending == lw::StoryEnding::Reconciled);
+
+    const lw::Story& infection = stories[2];
+    CHECK(infection.kind == lw::StoryKind::Infection && infection.hero == 40);
+    CHECK(infection.active() && infection.stage == lw::StoryStage::Climax);
+
+    const lw::Story& group = stories[3];
+    CHECK(group.kind == lw::StoryKind::Group && group.hero == 50 && group.focus == 600);
+    CHECK(group.cast.size() == 2 && group.stage == lw::StoryStage::Setup);
+
+    const lw::Story& salvage = stories[4];
+    CHECK(salvage.kind == lw::StoryKind::Salvage && salvage.focus == 700);
+    CHECK(salvage.hero == 60 && salvage.stage == lw::StoryStage::Climax);
+
+    // Дочитываются только новые записи.
+    world.record(K::Turned, 40);
+    world.record(K::GroupDisbanded, 600, 51);
+    world.record(K::EventEnded, 700);
+    tracker.update(world);
+    CHECK(tracker.stories().size() == 5);
+    CHECK(tracker.stories()[2].ending == lw::StoryEnding::Turned);
+    CHECK(tracker.stories()[3].ending == lw::StoryEnding::Disbanded);
+    CHECK(tracker.stories()[4].ending == lw::StoryEnding::Claimed);
+
+    // Изгнание — вражда изгнанного с вожаком (группа уже распалась — без неё).
+    world.record(K::Expelled, 50, 51, 0, 0, 600);
+    tracker.update(world);
+    CHECK(tracker.stories().size() == 6);
+    CHECK(tracker.storiesOf(51) == (std::vector<std::uint32_t>{4, 6}));
+    CHECK(lw::storyInterest(tracker.stories()[5], world.tick()) > 0.0f);
+}
+
 } // namespace
 
 int main() {
@@ -6246,6 +6318,7 @@ int main() {
     testPanicRules();
     testCrimeCondemned();
     testPoliceDefends();
+    testStoryLines();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

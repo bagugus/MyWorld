@@ -2,7 +2,7 @@
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
-//                [--no-peace] [--screenshot FILE.png]
+//                [--no-peace] [--director] [--screenshot FILE.png]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -22,6 +22,7 @@
 // --outbreak    вспышка через DAYS игровых суток от начала мира (0 — не по расписанию)
 // --phase       сразу перевести мир в фазу: outbreak, panic, collapse, survival (этап 7.4);
 //               --hours прокручивает мир уже после этого
+// --director   включить режиссёра: камера сама ведёт самую интересную сюжетную линию (этап 12а)
 // --zombies, --no-peace — как у lw_headless
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
@@ -39,6 +40,7 @@
 #include "sim/systems/EventSystem.h"
 #include "sim/systems/ScenarioSystem.h"
 #include "ui/ChronicleView.h"
+#include "ui/Director.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
 #include "ui/PathTool.h"
@@ -64,6 +66,7 @@ int main(int argc, char** argv) {
     bool hasPath = false;
     float path[4] = {};
     bool navGraph = false;
+    bool director = false;
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
@@ -109,6 +112,8 @@ int main(int argc, char** argv) {
             view3d = true;
         } else if (std::strcmp(argv[i], "--foliage") == 0 && i + 1 < argc) {
             foliage = std::strtof(argv[++i], nullptr);
+        } else if (std::strcmp(argv[i], "--director") == 0) {
+            director = true;
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
             navGraph = true;
         } else if (std::strcmp(argv[i], "--zombies") == 0 && i + 1 < argc) {
@@ -174,6 +179,8 @@ int main(int argc, char** argv) {
             inspector.select(selectId);
             inspector.setFollow(true);
         }
+        lw::ui::Director storyDirector(world);
+        storyDirector.setEnabled(director);
 
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
@@ -186,6 +193,7 @@ int main(int argc, char** argv) {
             inspector.handleInput(camera, !lw::ui::wantsMouse());
             driver.advance(dt);
             const float alpha = driver.interpolationAlpha();
+            storyDirector.update(inspector, dt);
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
             // с отрисовкой этого кадра.
             inspector.updateCamera(camera, alpha);
@@ -235,6 +243,8 @@ int main(int argc, char** argv) {
             lw::ui::drawKeyHelp(camera);
             lw::ui::drawEventsPanel(world, driver, inspector, camera);
             lw::ui::drawChroniclePanel(world, inspector);
+            storyDirector.drawPanel(inspector);
+            storyDirector.drawCaption(inspector);
             lw::ui::endFrame();
 
             EndDrawing();

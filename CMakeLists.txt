@@ -72,6 +72,8 @@ add_library(lw_sim STATIC
     src/sim/Sound.h
     src/sim/SpatialIndex.cpp
     src/sim/SpatialIndex.h
+    src/sim/Story.cpp
+    src/sim/Story.h
     src/sim/TimeScale.h
     src/sim/Traits.cpp
     src/sim/Traits.h
@@ -164,6 +166,8 @@ if(LW_BUILD_APP)
         src/render/WorldRenderer3D.h
         src/ui/ChronicleView.cpp
         src/ui/ChronicleView.h
+        src/ui/Director.cpp
+        src/ui/Director.h
         src/ui/Format.cpp
         src/ui/Format.h
         src/ui/Inspector.cpp
