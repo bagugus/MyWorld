@@ -58,9 +58,10 @@ bool positionOf(const World& world, EntityId id, float alpha, Vector2& at);
 //   переход между сценами — затемнение, вводный титр места и времени
 //     («Old Village, дом семьи Miller. Вечер»), установочный общий план места
 //     и только потом ближе;
-//   скучное время вырезается скачком: на чёрном мир мотается вперёд порциями
-//     промотки (быстрее x100), пока у героев что-то не назреет, — «Три часа
-//     спустя»;
+//   скучное время вырезается скачком — мгновенной склейкой (12а.10): под
+//     чёрным кадром мир мотается вперёд без отрисовки порциями промотки за
+//     1–2 реальные секунды, пока у героев что-то не назреет, — «Три часа
+//     спустя»; ускорения на экране не видно;
 //   на экране только знакомый зрителю (он уже был в кадре) или угроза
 //     знакомому; новые лица входят через героев;
 //   перебивка с драматической иронией: угроза знакомому, о которой он не
@@ -156,6 +157,9 @@ public:
     // Идёт кадр-пауза и её план (12а.9).
     bool interlude() const { return phase_ == ShowPhase::Interlude; }
     ShotPlan interludePlan(const World& world, float alpha) const;
+    // Финал (12а.10): клиффхэнгер эпизода или герой погиб в кадре — камера
+    // медленно отъезжает.
+    bool finale() const;
     // Прятать ли обычные титры режиссёра (имя, намерение, линию).
     bool hidesTitles() const;
     // Подпись монтажа слева вверху: «Тем временем…», «Передышка»; пусто — нет.
@@ -287,6 +291,8 @@ private:
     void startCutaway(const ShowInput& in, const StoryPick& pick, std::string text, bool resume,
                       ShowOrders& orders);
     void startJump(const ShowInput& in, ShowOrders& orders);
+    // Можно ли скакнуть ещё (после скачка — только пока цепочка не затянулась).
+    bool canJump(const ShowInput& in) const;
     bool wake(const ShowInput& in);
     void endScene(const ShowInput& in, bool hurry);
     void startCliffhanger(const ShowInput& in, ShowOrders& orders);
@@ -363,7 +369,6 @@ private:
     std::string cliffLine_;
     std::string starring_;               // «John Miller, Mary Cole» — для титра эпизода
     std::string dayLine_;                // «День 9 · вечер»
-    std::string clockLine_;              // часы на чёрном во время скачка
     StoryPick cliff_;
     std::uint64_t lastDay_ = 0;          // день последнего вводного титра
 
@@ -380,6 +385,10 @@ private:
     // Скачок времени.
     std::uint64_t jumpStart_ = 0;
     float jumpReal_ = 0.0f;
+    // Скачки подряд (ночь, пока герои спят) — одна склейка (12а.10): титр —
+    // от начала цепочки, вся цепочка не дольше kJumpChainReal секунд.
+    std::uint64_t jumpFrom_ = 0;
+    float jumpChainReal_ = 0.0f;
     std::size_t jumpCursor_ = 0;         // с какой записи летописи смотреть новое
     bool jumpedIdle_ = false;            // прошлый скачок ничего не нашёл
 

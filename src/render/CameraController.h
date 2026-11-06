@@ -94,6 +94,14 @@ public:
 
     // Кинокамера (12а.7): следующий кадр; действует в виде Cinema.
     void setCinemaShot(const CinemaShot& shot);
+    // Кадр кинокамеры, какой он сейчас на экране (по пути к заданному).
+    const CinemaShot& cinemaShot() const { return cinema_; }
+    // Заслонён ли вид кинокамеры: пришлось подняться над препятствием или
+    // придвинуться к точке взгляда вплотную; и чист ли вид на нынешнюю точку
+    // взгляда с курса yaw без подъёма (12а.10: заслонили — камера
+    // переставляется, а не висит над крышей и не упирается в стену).
+    bool cinemaBlocked() const;
+    bool cinemaClearFrom(float yaw) const;
     // Выйти из кино в вид mode; zoom — зум (пикселей на метр), с которым
     // продолжить, чтобы не оказаться вплотную к герою.
     void leaveCinema(ViewMode mode, float zoom);
@@ -274,6 +282,7 @@ private:
     CinemaShot cinemaGoal_;
     CinemaShot cinema_;
     float cinemaLift_ = 0.0f;
+    float cinemaWantedLift_ = 0.0f; // подъём, нужный прямо сейчас (cinemaLift_ догоняет его)
     float cinemaReach_ = 0.0f; // насколько можно отъехать от точки, метры
     bool cinemaSnap_ = true;   // следующий шаг — сразу на кадр
 };

@@ -149,14 +149,17 @@ constexpr float kRecapTime = 8.0f;
 constexpr float kCliffhanger = 8.0f;
 constexpr float kClosing = 4.0f;
 constexpr std::size_t kRecapLines = 4;
-// Скачок: порции промотки по kJumpChunk тиков; не короче kJumpMin (если не
-// срочно) и не длиннее kJumpMax тиков, не дольше kJumpReal реальных секунд.
+// Скачок — мгновенная склейка (12а.10): под чёрным кадром мир мотается без
+// отрисовки порциями промотки по kJumpChunk тиков; не короче kJumpMin (если не
+// срочно) и не длиннее kJumpMax тиков, не дольше kJumpReal реальных секунд —
+// зритель видит только чёрный кадр и титр «Три часа спустя».
 // Будит: предвестие у знакомых ближе kWakeEta секунд симуляции, событие летописи
 // героя весом не меньше kWakeWeight, сцена не скучнее kWakeScore.
 constexpr std::uint64_t kJumpChunk = 20 * kTicksPerSecond;
 constexpr std::uint64_t kJumpMin = 20 * kTicksPerGameMinute;
 constexpr std::uint64_t kJumpMax = 6 * kTicksPerGameHour;
-constexpr float kJumpReal = 10.0f;
+constexpr float kJumpReal = 1.5f;
+constexpr float kJumpChainReal = 3.0f;
 constexpr float kWakeEta = 90.0f;
 constexpr float kWakeWeight = 1.0f;
 // Зритель знакомится с теми, кто в сцене ближе kKnownNear метров к герою.
@@ -1205,7 +1208,15 @@ void Showrunner::startCutaway(const ShowInput& in, const StoryPick& pick, std::s
     }
 }
 
+bool Showrunner::canJump(const ShowInput& in) const {
+    return !in.paused && (phase_ != ShowPhase::Jump || jumpChainReal_ + kJumpReal * 0.5f <= kJumpChainReal);
+}
+
 void Showrunner::startJump(const ShowInput& in, ShowOrders& orders) {
+    if (phase_ != ShowPhase::Jump) {
+        jumpFrom_ = in.world->tick(); // новая склейка, не продолжение
+        jumpChainReal_ = 0.0f;
+    }
     setPhase(ShowPhase::Jump);
     curtainTarget_ = 1.0f;
     jumpStart_ = in.world->tick();
@@ -1321,9 +1332,7 @@ void Showrunner::startCliffhanger(const ShowInput& in, ShowOrders& orders) {
     } else if (story != nullptr && story->active()) {
         switch (story->kind) {
         case StoryKind::Feud:
-            cliffLine_ = std::string(story->betrayal ? "Предательство" : "Вражда") + " между " +
-                         nameOf(world, story->hero) + " и " + nameOf(world, story->other) +
-                         " не окончена. Чем она кончится?";
+            cliffLine_ = frame::clean(storyHeadline(world, *story)) + ". Чем это кончится?";
             break;
         case StoryKind::Group: {
             const entt::entity group = world.find(story->focus);
@@ -1341,7 +1350,7 @@ void Showrunner::startCliffhanger(const ShowInput& in, ShowOrders& orders) {
             cliffLine_ = "Кому достанется груз?";
             break;
         default:
-            cliffLine_ = frame::clean(titleOf(*story)) + ". Чем кончится?";
+            cliffLine_ = frame::clean(storyHeadline(world, *story)) + ". Чем это кончится?";
             break;
         }
     } else if (const std::string intent = intentLine(world, cliff_.target); !intent.empty()) {
@@ -1418,7 +1427,7 @@ void Showrunner::proceed(const ShowInput& in, ShowOrders& orders) {
             startInterlude(std::move(pause), orders);
             return;
         }
-        if (!in.paused) {
+        if (canJump(in)) {
             startJump(in, orders);
             return;
         }
@@ -1426,7 +1435,7 @@ void Showrunner::proceed(const ShowInput& in, ShowOrders& orders) {
     const bool allAsleep = std::none_of(heroes_.begin(), heroes_.end(), [&](EntityId id) {
         return isPersonAlive(*in.world, id) && !asleep(*in.world, id);
     });
-    if ((!jumpedIdle_ || allAsleep) && !in.paused) {
+    if ((!jumpedIdle_ || allAsleep) && canJump(in)) {
         // Скучно — вырезать (и ночь, пока герои спят); перед скачком — кадр-пауза
         // связкой, если есть.
         if (!lastInterlude_ && scenes_ > 0 && chooseInterlude(in, pause)) {
@@ -2280,10 +2289,7 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
         break;
     case ShowPhase::Jump: {
         jumpReal_ += dt;
-        const CalendarTime time = calendarAt(world.tick());
-        char clock[16];
-        std::snprintf(clock, sizeof(clock), "%02d:%02d", time.hour, time.minute);
-        clockLine_ = clock;
+        jumpChainReal_ += dt;
         if (in.skipping) {
             break; // порция промотки ещё идёт
         }
@@ -2291,9 +2297,13 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
         // Будит развязка отложенной сцены (камера успевает к ней заранее) или
         // то, что назрело у героев.
         const bool woke = dueWait(in) >= 0 || wake(in);
-        if (woke || elapsed >= kJumpMax || jumpReal_ >= kJumpReal || in.paused) {
-            jumpText_ = jumpPhrase(jumpStart_, world.tick());
+        if (woke || elapsed >= kJumpMax || jumpReal_ >= kJumpReal || jumpChainReal_ >= kJumpChainReal || in.paused) {
+            jumpText_ = jumpPhrase(jumpFrom_, world.tick());
             jumpedIdle_ = !woke;
+            TraceLog(LOG_INFO, "SERIES: скачок на %llu тиков за %.2f с (с начала склейки %llu за %.2f с)%s",
+                     static_cast<unsigned long long>(elapsed), jumpReal_,
+                     static_cast<unsigned long long>(world.tick() - std::min(world.tick(), jumpFrom_)), jumpChainReal_,
+                     woke ? "" : " (ничего не назрело)");
             proceed(in, orders);
         } else {
             orders.skip = jumpChunk(in);
@@ -2443,6 +2453,10 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
     return orders;
 }
 
+bool Showrunner::finale() const {
+    return phase_ == ShowPhase::Cliffhanger || (phase_ == ShowPhase::Scene && scene_.deadFor > 0.0f);
+}
+
 bool Showrunner::hidesTitles() const {
     switch (phase_) {
     case ShowPhase::Opening:
@@ -2467,12 +2481,8 @@ std::string Showrunner::label() const {
         return "Тем временем…";
     case ShowPhase::Cliffhanger:
         return "Конец эпизода";
-    case ShowPhase::Scene:
-        if (scene_.breather) {
-            return "Передышка";
-        }
-        return scene_.calm && scene_.age < 6.0f ? "Будни" : "";
     default:
+        // «Передышка», «Будни» — слова монтажа, не истории (12а.10): их нет.
         return "";
     }
 }
@@ -2560,10 +2570,7 @@ void Showrunner::draw(float bar) const {
         break;
     }
     case ShowPhase::Jump:
-        // Время идёт: только часы.
-        frame::text(italicFont(), 26.0f * scale, cx, cy - 14.0f * scale, Align::Center,
-                    tint(muted, 0.55f * frame::fade(phaseAge_, 0.5f)), clockLine_);
-        break;
+        break; // склейка: только чёрный кадр, ускорения не видно (12а.10)
     case ShowPhase::Intro: {
         // Вводный титр: «Три часа спустя», место и время.
         const float length = introLength();

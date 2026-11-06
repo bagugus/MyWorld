@@ -21,7 +21,9 @@ constexpr float kCloseDistance = 6.5f;
 constexpr float kClosePitch = 9.0f;
 constexpr float kCloseFov = 34.0f;
 constexpr float kCloseAngle = 55.0f;
-constexpr float kCloseTurn = 65.0f;
+// Камера не ходит вокруг героя, который просто переминается или бродит:
+// переставляется, только когда видна уже его спина.
+constexpr float kCloseTurn = 115.0f;
 constexpr float kCloseSmoothing = 0.9f;
 // Средний план: все точки в кадре, не ближе и не дальше этого.
 constexpr float kMediumHeight = 1.2f;
@@ -32,16 +34,15 @@ constexpr float kMediumMax = 120.0f;
 constexpr float kMediumSmoothing = 1.0f;
 // Двое — сбоку от линии между ними; камера переставляется, если ушла от этой
 // стороны дальше kAxisTurn градусов.
-constexpr float kAxisTurn = 25.0f;
+constexpr float kAxisTurn = 50.0f;
 // Подсказка «откуда снимать» (ShotPlan::viewFrom): чуть сбоку от неё.
 constexpr float kViewFromAngle = 20.0f;
 constexpr float kViewFromTurn = 35.0f;
-// Общий план: сверху, облёт со скоростью kWideDrift градусов в секунду.
+// Общий план: сверху, неподвижно.
 constexpr float kWidePitch = 30.0f;
 constexpr float kWideFov = 45.0f;
 constexpr float kWideMin = 60.0f;
 constexpr float kWideMax = 1500.0f;
-constexpr float kWideDrift = 1.2f;
 constexpr float kWideSmoothing = 1.5f;
 // Кадр-пауза (ShotPlan::vista): низко над точкой взгляда, почти у горизонта,
 // широким объективом, неподвижно.
@@ -66,6 +67,9 @@ constexpr float kFitMargin = 1.2f;
 // расстояния); проявка из чёрного — за kFadeIn секунд.
 constexpr float kCutDistance = 30.0f;
 constexpr float kCutShare = 0.75f;
+// Смена крупности (расстояние меняется больше чем в kSizeCut раз: общий план
+// места → герой) — тоже склейка, но без затемнения: камера не пикирует (12а.10).
+constexpr float kSizeCut = 2.5f;
 constexpr float kFadeIn = 0.45f;
 // Близкая смена кадра — плавный переход не быстрее kSettleSmoothing, kSettleTime секунд.
 constexpr float kSettleTime = 2.0f;
@@ -74,7 +78,18 @@ constexpr float kSettleSmoothing = 1.3f;
 constexpr float kPushIn = 1.3f;
 constexpr float kPushTime = 12.0f;
 constexpr float kPushBack = 3.0f;
-
+// Отъезд в финале: камера в kPullOut раз дальше за kPullTime секунд (медленно,
+// без рывка); после финала — сразу, со склейкой нового кадра.
+constexpr float kPullOut = 1.7f;
+constexpr float kPullTime = 6.0f;
+// Вид заслонён (камера поднялась над препятствием или упёрлась в него)
+// дольше kBlockedTime секунд — переставить камеру на ближайший чистый курс
+// (шагами по kBlockedStep градусов в обе стороны): движение с причиной.
+constexpr float kBlockedTime = 0.6f;
+// После обхода камера kDodgeRest секунд не переставляется снова: доезжает и
+// успокаивается (иначе — то же кружение).
+constexpr float kDodgeRest = 3.0f;
+constexpr float kBlockedStep = 30.0f;
 float wrapDegrees(float angle) {
     return std::remainder(angle, 360.0f);
 }
@@ -101,12 +116,16 @@ void CinemaCamera::reset() {
     pendingCut_ = true;
     started_ = false;
     pushIn_ = 1.0f;
+    pullOut_ = 1.0f;
+    blocked_ = 0.0f;
+    dodgeRest_ = 0.0f;
+    dodged_ = false;
     blackout_ = 0.0f;
     settle_ = 0.0f;
 }
 
 void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::optional<float> heading,
-                          bool climax, float dt) {
+                          bool climax, bool finale, float dt) {
     blackout_ = std::max(0.0f, blackout_ - dt / kFadeIn);
     settle_ = std::max(0.0f, settle_ - dt);
     if (!plan.valid) {
@@ -114,6 +133,13 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
     }
     const float push = climax ? kPushIn : 1.0f;
     pushIn_ += (push - pushIn_) * std::min(1.0f, dt / (climax ? kPushTime : kPushBack));
+    if (finale) {
+        pullOut_ += (kPullOut - pullOut_) * std::min(1.0f, dt / kPullTime);
+    } else if (pendingCut_) {
+        pullOut_ = 1.0f; // новый кадр — с обычного расстояния
+    } else {
+        pullOut_ += (1.0f - pullOut_) * std::min(1.0f, dt / kPushBack);
+    }
 
     // Что в кадре: середина и радиус всех точек (крупно — только герой) и
     // самая дальняя от героя.
@@ -139,6 +165,9 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
 
     const bool cutting = pendingCut_ || !started_;
     pendingCut_ = false;
+    if (cutting) {
+        dodged_ = false;
+    }
     if (cutting && plan.subjectId != kInvalidId) {
         side_ = plan.subjectId % 2 == 0 ? 1.0f : -1.0f;
     }
@@ -146,7 +175,7 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
         heading ? std::optional<float>(*heading * RAD2DEG) : std::nullopt;
     // Повернуть камеру к желаемому курсу, если она ушла от него дальше turn.
     const auto aim = [&](float wanted, float turn) {
-        if (cutting || std::abs(wrapDegrees(wanted - yaw_)) > turn) {
+        if (cutting || (!dodged_ && std::abs(wrapDegrees(wanted - yaw_)) > turn)) {
             yaw_ = wanted;
         }
     };
@@ -211,22 +240,53 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
         shot.fovY = kWideFov;
         shot.distance = std::clamp(fitDistance(radius, shot.fovY, shot.pitch), kWideMin, kWideMax);
         shot.smoothing = kWideSmoothing;
-        yaw_ += kWideDrift * dt; // медленный облёт
+        // Неподвижно: курс прежний (с прошлого кадра или подсказки места).
+        if (cutting && plan.viewFrom) {
+            yaw_ = *plan.viewFrom;
+        }
     }
     if (plan.lookHeight > 0.0f) {
         shot.height = plan.lookHeight;
+    }
+    // Героя заслонили дом или кроны: не висеть над крышей, а обойти.
+    const bool movable = plan.vista <= 0.0f && plan.size != ShotSize::Wide;
+    dodgeRest_ = std::max(0.0f, dodgeRest_ - dt);
+    blocked_ = movable && !cutting && settle_ <= 0.0f && dodgeRest_ <= 0.0f && camera.cinemaBlocked() ? blocked_ + dt
+                                                                                                      : 0.0f;
+    if (blocked_ >= kBlockedTime) {
+        blocked_ = 0.0f;
+        for (float step = kBlockedStep; step <= 180.0f; step += kBlockedStep) {
+            if (camera.cinemaClearFrom(yaw_ + step)) {
+                yaw_ += step;
+                dodged_ = true;
+                dodgeRest_ = kDodgeRest;
+                break;
+            }
+            if (camera.cinemaClearFrom(yaw_ - step)) {
+                yaw_ -= step;
+                dodged_ = true;
+                dodgeRest_ = kDodgeRest;
+                break;
+            }
+        }
     }
     shot.offset = Vector2Subtract(center, plan.subject);
     yaw_ = wrapDegrees(yaw_);
     shot.yaw = yaw_;
     shot.fovY /= pushIn_;
+    shot.distance *= pullOut_;
 
     if (cutting) {
         // Далеко или впервые — склейка с проявкой из чёрного, близко — плавно.
         const float away = Vector2Distance(camera.focus(), center);
+        const float before = std::max(camera.cinemaShot().distance, 0.1f);
+        const float ratio = std::max(before, shot.distance) / std::max(std::min(before, shot.distance), 0.1f);
         if (!started_ || away > std::max(kCutDistance, kCutShare * shot.distance)) {
             shot.cut = true;
             blackout_ = 1.0f;
+            settle_ = 0.0f;
+        } else if (ratio > kSizeCut) {
+            shot.cut = true; // другая крупность — встык
             settle_ = 0.0f;
         } else {
             settle_ = kSettleTime;
