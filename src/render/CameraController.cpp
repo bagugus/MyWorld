@@ -32,6 +32,8 @@ constexpr float kMouseRotate = 0.25f; // градусов на пиксель
 constexpr float kKeyRotate = 90.0f;   // градусов в секунду
 constexpr float kKeyTilt = 45.0f;
 constexpr float kKeyPanRate = 0.8f; // расстояний до точки в секунду
+// Ближняя плоскость отсечения не ближе стольких метров (см. setClipPlanes).
+constexpr double kMinNearPlane = 0.1;
 constexpr float kMinEyeHeight = 1.7f; // метров над поверхностью: ниже глаз не опускается
 
 // Полёт: скорость — столько высот над рельефом в секунду (от 4 до 2000 м высоты).
@@ -858,6 +860,12 @@ void CameraController::setClipPlanes(double nearPlane) const {
     // Дальняя плоскость — за краем мира.
     const double diagonal = std::hypot(worldWidth_, worldHeight_);
     const double height = std::max(0.0f, eyeHeight());
+    // Точность буфера глубины (24 бита) падает с расстоянием как d² / near:
+    // при ближней плоскости 0,1 м уже в 300 м окна в 4 см от стены, настил
+    // моста над водой и берег начинают «драться» и мерцать. Поэтому ближняя
+    // плоскость отодвигается настолько, насколько позволяет вид, но не дальше
+    // половины высоты глаза над землёй — землю у ног она не срезает.
+    nearPlane = std::clamp(nearPlane, kMinNearPlane, std::max(kMinNearPlane, 0.5 * height));
     rlSetClipPlanes(nearPlane, height + 1.5 * diagonal + Vector3Distance(camera3d_.position, camera3d_.target));
 }
 
@@ -879,7 +887,7 @@ void CameraController::refreshOrbit() {
 
     // Ближняя плоскость отодвигается с расстоянием: так хватает точности
     // глубины и вблизи, и на весь мир.
-    setClipPlanes(std::max(0.1, 0.01 * orbit_.distance));
+    setClipPlanes(0.02 * orbit_.distance);
     camera_.offset = screenCenter();
     camera_.target = orbit_.focus;
     camera_.rotation = 0.0f;
@@ -904,7 +912,7 @@ void CameraController::refreshFly() {
     flyFocus_ = hit && distance <= look ? *hit : Vector2{camera3d_.target.x, camera3d_.target.z};
     flyFocus_ = {std::clamp(flyFocus_.x, 0.0f, worldWidth_), std::clamp(flyFocus_.y, 0.0f, worldHeight_)};
 
-    setClipPlanes(std::clamp(0.01 * altitude, 0.1, 50.0));
+    setClipPlanes(std::min(0.05 * altitude, 50.0));
     camera_.offset = screenCenter();
     camera_.target = flyFocus_;
     camera_.rotation = 0.0f;
@@ -918,7 +926,7 @@ void CameraController::refreshShoulder() {
     const float lowest = surfaceAt({camera3d_.position.x, camera3d_.position.z}) + 0.4f;
     camera3d_.position.y = std::max(camera3d_.position.y, lowest);
 
-    setClipPlanes(0.1);
+    setClipPlanes(0.2);
     camera_.offset = screenCenter();
     camera_.target = subject_ ? subject_->at : Vector2{pivot.x, pivot.z};
     camera_.rotation = 0.0f;
@@ -1208,7 +1216,7 @@ void CameraController::refreshCinema() {
     camera3d_.position = eye;
     camera3d_.target = target;
 
-    setClipPlanes(std::clamp(0.01 * distance, 0.1, 5.0));
+    setClipPlanes(std::min(0.04 * distance, 4.0));
     camera_.offset = screenCenter();
     camera_.target = {std::clamp(focus.x, 0.0f, worldWidth_), std::clamp(focus.y, 0.0f, worldHeight_)};
     camera_.rotation = 0.0f;

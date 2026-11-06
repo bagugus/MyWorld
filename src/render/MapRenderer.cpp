@@ -27,8 +27,8 @@ constexpr Color kDeepSea = {24, 62, 112, 255};
 constexpr Color kLake = {58, 122, 170, 255};
 constexpr Color kRiver = {78, 146, 192, 255};
 
-// Фильтр для 3D: вблизи клетки чёткие, вдаль — мип-уровни и анизотропия,
-// иначе земля под углом рябит и мылится.
+// Фильтр для 3D: билинейный с мип-уровнями и анизотропией — вдаль земля под
+// углом не рябит и не мылится; чёткие клетки вблизи — в шейдере земли.
 constexpr int kGroundFilter = 100;
 
 constexpr float kDeepSeaMeters = 45.0f;   // глубже цвет моря не меняется
@@ -205,7 +205,9 @@ void MapRenderer::setFilter(int filter) {
                 SetTextureFilter(texture, filter);
                 continue;
             }
-            rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_NEAREST);
+            // Увеличение — билинейное: чёткость клеткам даёт шейдер земли
+            // (Terrain3D, crisp), а край клетки сглажен на пиксель и не рябит.
+            rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
             rlTextureParameters(texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
             rlTextureParameters(texture.id, RL_TEXTURE_FILTER_ANISOTROPIC, 16);
         }

@@ -393,6 +393,7 @@ struct Layout {
     float floor = 0.0f;
     float wallTop = 0.0f;
     float ridge = 0.0f; // высота конька (у плоской крыши — верх стен)
+    float decalOut = 0.04f; // окна и двери — на столько снаружи стены
 };
 
 Layout layoutOf(const BuildingModel& model, const Shape& shape) {
@@ -419,10 +420,10 @@ Layout layoutOf(const BuildingModel& model, const Shape& shape) {
 enum class Side : std::uint8_t { PlusX, MinusX, PlusZ, MinusZ };
 
 // Прямоугольник на стене side: вдоль стены [a0, a1], по высоте [y0, y1],
-// чуть снаружи, чтобы не сливаться со стеной.
+// чуть снаружи (layout.decalOut), чтобы не сливаться со стеной.
 void emitOnWall(const Emitter& e, const Layout& layout, Side side, float a0, float a1, float y0, float y1,
                 Color color, bool glow = false) {
-    constexpr float kOut = 0.04f;
+    const float kOut = layout.decalOut;
     switch (side) {
     case Side::PlusZ: {
         const float z = layout.hz + kOut;
@@ -496,7 +497,8 @@ float buildingTop(const BuildingModel& model) {
 
 void emitBuilding(const BuildingModel& model) {
     const Shape shape = shapeOf(model);
-    const Layout layout = layoutOf(model, shape);
+    Layout layout = layoutOf(model, shape);
+    layout.decalOut = model.decalOut;
     const Emitter e(layout.frame);
     const Color wall = buildingColor(model.kind);
     const float hx = layout.hx;
@@ -559,7 +561,7 @@ void emitBuilding(const BuildingModel& model) {
     }
     const float doorHalf = shape.doorWidth * 0.5f;
     emitOnWall(e, layout, doorSide, doorAlong - doorHalf, doorAlong + doorHalf, layout.floor,
-               layout.floor + shape.doorHeight, shape.doorColor);
+               layout.floor + shape.doorHeight, mix(wall, shape.doorColor, model.detail));
     if (model.doorGround < layout.floor - 0.15f) {
         // Крыльцо до земли у двери.
         emitAtWall(e, layout, doorSide, doorAlong - doorHalf - 0.3f, doorAlong + doorHalf + 0.3f, 1.0f,
@@ -603,7 +605,7 @@ void emitBuilding(const BuildingModel& model) {
                                   static_cast<float>((bits * 0x2545F4914F6CDD1DULL) >> 40 & 0xFFFFu) / 65535.0f <
                                       model.lights;
                 emitOnWall(e, layout, side, along - windowHalf, along + windowHalf, y0, y1,
-                           glow ? kWindowLight : kGlassColor, glow);
+                           glow ? shaded(kWindowLight, model.detail) : mix(wall, kGlassColor, model.detail), glow);
             }
         }
     }

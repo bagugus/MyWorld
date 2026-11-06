@@ -75,6 +75,8 @@ private:
     Vector3 shadowCenter_{};
     float shadowRadius_ = 0.0f;
     float shadowRange_ = 1.0f; // глубина ортогональной проекции света, метры
+    Vector3 shadowDir_{};      // направление на свет для карты теней — ступенями
+
     Matrix lightViewProj_{};
 };
 

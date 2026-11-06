@@ -33,6 +33,8 @@ constexpr float kDrapeLift = 0.15f;
 
 // Клетка на экране не крупнее стольких пикселей: так выбирается уровень детализации.
 constexpr float kMaxQuadPixels = 8.0f;
+// Запас при смене уровня детализации, в долях уровня (двоичный логарифм клеток).
+constexpr float kLevelHysteresis = 0.25f;
 // Уровни от этого и грубее строятся сразу и не выгружаются.
 constexpr int kFirstEagerLevel = 2;
 // Подробных уровней за кадр строится не больше: при быстром полёте пока
@@ -83,6 +85,20 @@ uniform float snowAmount;
 uniform vec3 foliage;       // листва, пожелтение, молодая листва — в среднем
 
 out vec4 finalColor;
+
+// Клетки чёткие, но без ступенек: внутри клетки координата прижата к её
+// середине, а через край клетки переходит за один пиксель экрана (билинейный
+// фильтр сглаживает именно этот пиксель). Ближайший тексель давал жёсткие края,
+// которые на клетке в пиксель-два рябили при каждом движении камеры. Где
+// клетка мельче пикселя, координата не меняется — дальше работают мип-уровни.
+vec2 crisp(vec2 uv, vec2 size, vec2 cellsPerPixel) {
+    vec2 t = uv * size;
+    vec2 seam = floor(t + 0.5);
+    // При клетке в пиксель и мельче делитель — 1, и t не меняется.
+    t = seam + clamp((t - seam) / clamp(cellsPerPixel, vec2(1e-4), vec2(1.0)), -0.5, 0.5);
+    return t / size;
+}
+
 void main() {
     vec2 size = vec2(textureSize(texture0, 0));
     vec2 p = fragPosition.xz;
@@ -91,10 +107,14 @@ void main() {
     vec2 cellsPerPixel = fwidth(fragTexCoord * size);
     float near = 1.0 - smoothstep(0.3, 1.0, max(cellsPerPixel.x, cellsPerPixel.y));
     vec2 jitter = (texture(detailMap, p / 12.0).ba - 0.5) * 0.5 * near;
-    vec2 uv = fragTexCoord + jitter / size;
-    vec3 base = texture(texture0, uv).rgb;
+    vec2 uv = crisp(fragTexCoord + jitter / size, size, cellsPerPixel);
+    // Мип-уровень и анизотропия — по настоящему шагу координаты, а не по
+    // прижатой: иначе внутри клетки выбирался бы слишком чёткий уровень.
+    vec2 dx = dFdx(fragTexCoord);
+    vec2 dy = dFdy(fragTexCoord);
+    vec3 base = textureGrad(texture0, uv, dx, dy).rgb;
     // Лиственный лес под кронами и вдали, где деревьев уже нет, — по сезону.
-    float deciduous = texture(texture2, uv).r;
+    float deciduous = textureGrad(texture2, uv, dx, dy).r;
     if (deciduous > 0.0) {
         vec3 green = base * mix(vec3(1.08, 1.06, 0.92), vec3(1.35, 1.32, 0.8), foliage.z);
         vec3 leafy = mix(green, vec3(0.44, 0.33, 0.12), foliage.y);
@@ -103,7 +123,7 @@ void main() {
     float fine = texture(detailMap, p / 21.0).r;
     float broad = texture(detailMap, p / 230.0).g;
     base *= 0.78 + 0.26 * fine + 0.18 * broad;
-    float snow = texture(texture1, uv).a * snowAmount;
+    float snow = textureGrad(texture1, uv, dx, dy).a * snowAmount;
     base = mix(base, vec3(0.90, 0.92, 0.96) * (0.94 + 0.08 * fine), snow);
     vec3 n = normalize(fragNormal);
     vec3 color = base * lighting(n, shadowAt(fragPosition, n));
@@ -137,8 +157,14 @@ out vec4 finalColor;
 const vec3 shallowColor = vec3(0.20, 0.44, 0.48);
 const vec3 deepColor = vec3(0.04, 0.15, 0.28);
 
+// Метров воды на пиксель экрана — в main.
+float footprint;
+
+// Волна, мельче пары пикселей, гаснет: иначе её блик вспыхивал бы в случайных
+// пикселях и вода искрилась при каждом движении камеры.
 vec2 wave(vec2 p, vec2 dir, float frequency, float speed, float amplitude) {
-    return dir * (amplitude * cos(dot(p, dir) * frequency + time * speed));
+    float resolved = 1.0 - smoothstep(0.4, 1.2, frequency * footprint);
+    return dir * (amplitude * resolved * cos(dot(p, dir) * frequency + time * speed));
 }
 
 void main() {
@@ -146,6 +172,7 @@ void main() {
     float distance = length(toEye);
     vec3 v = toEye / max(distance, 1e-3);
     vec2 p = fragPosition.xz;
+    footprint = max(length(fwidth(p)), 1e-4);
     vec2 slope = wave(p, vec2(0.80, 0.60), 0.90, 1.7, 0.050)
                + wave(p, vec2(-0.53, 0.85), 1.70, 2.4, 0.030)
                + wave(p, vec2(0.20, -0.98), 3.10, 3.3, 0.020)
@@ -515,10 +542,15 @@ int Terrain3D::levelFor(const Tile& tile, const Camera3D& camera) const {
     const float pixelsPerMeter = static_cast<float>(GetScreenHeight()) /
                                  (2.0f * distance * std::tan(camera.fovy * 0.5f * DEG2RAD));
     const float cells = kMaxQuadPixels / (kCell * pixelsPerMeter);
-    if (cells < 2.0f) {
-        return 0;
+    // Уровень L — при log2(cells) в [L, L + 1). Прежний уровень держится, пока
+    // значение не выйдет за эти границы с запасом: камера, качнувшаяся у
+    // границы, не перещёлкивает плитку туда-обратно (рельеф вдали не дрожит).
+    const float value = std::log2(std::max(cells, 1e-3f));
+    if (tile.level >= 0 && value > static_cast<float>(tile.level) - kLevelHysteresis &&
+        value < static_cast<float>(tile.level + 1) + kLevelHysteresis) {
+        return tile.level;
     }
-    return std::min(static_cast<int>(std::log2(cells)), kLevels - 1);
+    return std::clamp(static_cast<int>(std::floor(value)), 0, kLevels - 1);
 }
 
 void Terrain3D::build(Tile& tile, int level) {
@@ -779,6 +811,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 fol
             continue;
         }
         const int wanted = levelFor(tile, camera);
+        tile.level = wanted;
         if (!tile.built[wanted] && builds < kBuildsPerFrame) {
             build(tile, wanted);
             ++builds;
