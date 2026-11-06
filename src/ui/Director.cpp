@@ -462,7 +462,9 @@ void Director::pace(SimDriver& driver, float dt) {
     userPaced_ += dt;
     quietFor_ = quiet() ? quietFor_ + dt : 0.0f;
     int wanted = baseSpeed_;
-    if (slowmo_) {
+    if (series_ && timelapse_) {
+        wanted = kTimelapseSpeed; // кадр-пауза таймлапсом (12а.9)
+    } else if (slowmo_) {
         wanted = 1; // кульминация — в реальном времени
     } else if (!series_ && quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
                !driver.skipping()) {
@@ -482,7 +484,9 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     // Скорость времени — по тому, сколько тиков прошло за кадр (скачок времени
     // шоураннера не считается: это не скорость, а склейка).
     const std::uint64_t tick = world_.tick();
-    if (dt > 0.0f && !skippedByShow_) {
+    // Таймлапс кадра-паузы — тоже приём монтажа, а не скорость.
+    const bool lapsing = timelapse_ && driver.speed() == kTimelapseSpeed;
+    if (dt > 0.0f && !skippedByShow_ && !lapsing) {
         const float rate = static_cast<float>(tick - std::min(tick, lastTick_)) /
                            static_cast<float>(kTicksPerSecond) / dt;
         simRate_ += (rate - simRate_) * std::min(1.0f, dt * kRateSmoothing);
@@ -691,6 +695,9 @@ void Director::updateShow(Inspector& inspector, SimDriver& driver, float dt, boo
     if (orders.recut) {
         cinema_.cut();
     }
+    if (orders.timelapse) {
+        timelapse_ = *orders.timelapse;
+    }
     if (orders.skip > 0) {
         driver.requestSkip(orders.skip); // скачок времени — порциями промотки
         skippedByShow_ = true;
@@ -875,6 +882,7 @@ void Director::enterSeries(CameraController& camera) {
 void Director::leaveSeries(CameraController& camera) {
     series_ = false;
     bars_ = 0.0f;
+    timelapse_ = false; // скорость пользователя вернёт pace
     show_.stop(); // паузу и промотку шоураннера снимет ближайший update
     if (fullscreen_) {
         ToggleBorderlessWindowed();
@@ -917,7 +925,9 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
     // Под вводным титром и на установочном плане — место сцены общим планом
     // (12а.8), дальше — план кадра.
     ShotPlan plan;
-    if (show_.establishing()) {
+    if (show_.interlude()) {
+        plan = show_.interludePlan(world_, alpha); // кадр-пауза (12а.9)
+    } else if (show_.establishing()) {
         plan = show_.placePlan(world_, alpha);
     }
     if (!plan.valid) {

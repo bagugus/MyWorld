@@ -43,6 +43,11 @@ constexpr float kWideMin = 60.0f;
 constexpr float kWideMax = 1500.0f;
 constexpr float kWideDrift = 1.2f;
 constexpr float kWideSmoothing = 1.5f;
+// Кадр-пауза (ShotPlan::vista): низко над точкой взгляда, почти у горизонта,
+// широким объективом, неподвижно.
+constexpr float kVistaHeight = 8.0f;
+constexpr float kVistaPitch = 5.0f;
+constexpr float kVistaFov = 50.0f;
 // Всё не влезает (точки разбросаны шире kMediumSpread / kWideSpread метров от
 // середины) — передний план и даль: камера позади героя смотрит туда, куда он
 // идёт; герой крупнее впереди, цель — вдали за ним.
@@ -150,7 +155,18 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
     shot.anchorId = plan.subjectId;
     shot.anchor = plan.subject;
     const float spread = plan.size == ShotSize::Wide ? kWideSpread : kMediumSpread;
-    if (plan.size == ShotSize::Close) {
+    if (plan.vista > 0.0f) {
+        // Кадр-пауза: вдаль, без облёта.
+        center = plan.subject;
+        shot.height = kVistaHeight;
+        shot.pitch = kVistaPitch;
+        shot.fovY = kVistaFov;
+        shot.distance = plan.vista;
+        shot.smoothing = kWideSmoothing;
+        if (plan.viewFrom) {
+            yaw_ = *plan.viewFrom;
+        }
+    } else if (plan.size == ShotSize::Close) {
         shot.height = kCloseHeight;
         shot.distance = kCloseDistance;
         shot.pitch = kClosePitch;
