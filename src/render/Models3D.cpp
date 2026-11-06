@@ -26,14 +26,16 @@ Color mix(Color a, Color b, float t) {
     return {channel(a.r, b.r), channel(a.g, b.g), channel(a.b, b.b), a.a};
 }
 
-// Сустав: поворот части вокруг точки pivot (в осях модели) — pitch вокруг
-// поперечной оси X (> 0 — нижний конец вперёд, нос вверх), roll вокруг
-// продольной оси Z (> 0 — конец по +X вверх); затем — поворот родителя.
+// Сустав: поворот части вокруг точки pivot (в осях модели) — roll вокруг
+// продольной оси Z (> 0 — конец по +X вверх), pitch вокруг поперечной оси X
+// (> 0 — нижний конец вперёд, нос вверх), yaw вокруг вертикали (> 0 — перёд
+// к +X); затем — поворот родителя.
 struct Joint {
     Vector3 pivot{};
     float pitch = 0.0f;
     float roll = 0.0f;
     const Joint* parent = nullptr;
+    float yaw = 0.0f;
 };
 
 Vector3 rotatePitch(Vector3 p, float angle) {
@@ -48,6 +50,12 @@ Vector3 rotateRoll(Vector3 p, float angle) {
     return {p.x * c - p.y * s, p.x * s + p.y * c, p.z};
 }
 
+Vector3 rotateYaw(Vector3 p, float angle) {
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    return {p.x * c + p.z * s, p.y, -p.x * s + p.z * c};
+}
+
 Vector3 applyJoint(const Joint* joint, Vector3 p) {
     for (; joint != nullptr; joint = joint->parent) {
         Vector3 q = Vector3Subtract(p, joint->pivot);
@@ -57,6 +65,9 @@ Vector3 applyJoint(const Joint* joint, Vector3 p) {
         if (joint->pitch != 0.0f) {
             q = rotatePitch(q, joint->pitch);
         }
+        if (joint->yaw != 0.0f) {
+            q = rotateYaw(q, joint->yaw);
+        }
         p = Vector3Add(q, joint->pivot);
     }
     return p;
@@ -64,6 +75,8 @@ Vector3 applyJoint(const Joint* joint, Vector3 p) {
 
 // Доля растворения граней (1 − видимость): texcoord.y для шейдера моделей.
 float gDissolve = 0.0f;
+// Все следующие грани светятся сами (значки эмоций).
+bool gGlow = false;
 
 // Грани коробки.
 enum Faces : unsigned { kTop = 1u, kBottom = 2u, kSides = 4u, kAll = 7u };
@@ -101,7 +114,7 @@ public:
             Vector3Normalize(Vector3CrossProduct(Vector3Subtract(wb, wa), Vector3Subtract(wc, wa)));
         // Освещает шейдер (render/Lighting3D) по нормали грани.
         rlNormal3f(normal.x, normal.y, normal.z);
-        rlTexCoord2f(glow ? 1.0f : 0.0f, gDissolve);
+        rlTexCoord2f(glow || gGlow ? 1.0f : 0.0f, gDissolve);
         rlColor4ub(color.r, color.g, color.b, color.a);
         rlVertex3f(wa.x, wa.y, wa.z);
         rlVertex3f(wb.x, wb.y, wb.z);
@@ -153,77 +166,187 @@ float headingOf(float dx, float dy) {
     return std::atan2(dx, dy);
 }
 
-void emitHuman(const ModelFrame& frame, const HumanLook& look, Gait gait) {
-    const Emitter e(frame);
-    const float step = std::sin(gait.phase) * 0.55f * gait.swing;
-    const float lean = look.zombie ? -0.32f : (look.running ? -0.25f : 0.0f);
-    const Joint hips{{0.0f, 0.9f, 0.0f}, lean};
-    // Левая сторона — +X (модель смотрит вдоль +Z).
+namespace {
+
+constexpr Color kShoeColor = {52, 40, 32, 255};
+constexpr Color kBottleColor = {74, 132, 96, 255};
+constexpr Color kBreadColor = {196, 150, 90, 255};
+constexpr Color kClothColor = {156, 124, 84, 255};
+constexpr Color kBandageColor = {236, 236, 228, 255};
+constexpr Color kPaperColor = {232, 230, 220, 255};
+constexpr Color kBarkColor = {96, 72, 50, 255};
+constexpr Color kStumpTop = {168, 134, 92, 255};
+constexpr Color kBagColor = {118, 92, 58, 255};
+
+// Кисть правой руки в осях предплечья.
+constexpr float kHandX = -0.255f;
+constexpr float kHandY = 0.86f;
+
+bool inRightHand(Prop prop) {
+    switch (prop) {
+    case Prop::Food:
+    case Prop::Bottle:
+    case Prop::Shovel:
+    case Prop::Scythe:
+    case Prop::Bundle:
+    case Prop::Bandage:
+    case Prop::Clipboard:
+        return true;
+    default:
+        return false;
+    }
+}
+
+// Что в правой руке: forearm — сустав предплечья, toolPitch — наклон черенка.
+void emitHandProp(const Emitter& e, Prop prop, const Joint* forearm, float toolPitch) {
+    const float hx = kHandX;
+    const float hy = kHandY;
+    switch (prop) {
+    case Prop::Food:
+        e.box({hx - 0.035f, hy - 0.06f, 0.0f}, {hx + 0.035f, hy + 0.02f, 0.09f}, kBreadColor, forearm);
+        break;
+    case Prop::Bottle:
+        e.box({hx - 0.03f, hy - 0.12f, 0.02f}, {hx + 0.03f, hy + 0.08f, 0.08f}, kBottleColor, forearm);
+        e.box({hx - 0.015f, hy + 0.08f, 0.035f}, {hx + 0.015f, hy + 0.12f, 0.065f}, kPaperColor, forearm);
+        break;
+    case Prop::Bundle:
+        e.box({hx - 0.11f, hy - 0.12f, 0.02f}, {hx + 0.11f, hy + 0.04f, 0.22f}, kClothColor, forearm);
+        break;
+    case Prop::Bandage:
+        e.box({hx - 0.035f, hy - 0.06f, 0.0f}, {hx + 0.035f, hy + 0.01f, 0.07f}, kBandageColor, forearm);
+        break;
+    case Prop::Clipboard:
+        e.box({hx - 0.12f, hy - 0.01f, -0.02f}, {hx + 0.12f, hy + 0.01f, 0.3f}, kWoodColor, forearm);
+        e.box({hx - 0.1f, hy + 0.01f, 0.0f}, {hx + 0.1f, hy + 0.016f, 0.27f}, kPaperColor, forearm);
+        break;
+    case Prop::Shovel:
+    case Prop::Scythe: {
+        const Joint tool{{hx, hy, 0.0f}, toolPitch, 0.0f, forearm};
+        if (prop == Prop::Shovel) {
+            e.box({hx - 0.02f, hy - 1.05f, -0.02f}, {hx + 0.02f, hy + 0.3f, 0.02f}, kWoodColor, &tool);
+            e.box({hx - 0.12f, hy - 1.32f, -0.015f}, {hx + 0.12f, hy - 1.03f, 0.015f}, kSteelColor, &tool);
+        } else {
+            e.box({hx - 0.02f, hy - 1.3f, -0.02f}, {hx + 0.02f, hy + 0.25f, 0.02f}, kWoodColor, &tool);
+            e.box({hx - 0.75f, hy - 1.33f, 0.0f}, {hx, hy - 1.27f, 0.07f}, kSteelColor, &tool);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
+
+} // namespace
+
+void emitHuman(const ModelFrame& frame, const HumanLook& look, const HumanPose& pose) {
+    // Таз — на своей высоте: сидит, присел, на коленях, лежит.
+    ModelFrame lowered = frame;
+    lowered.origin.y += (pelvisHeight(pose) - kHipHeight) * frame.scale;
+    const Emitter e(lowered);
+    const Emitter ground(frame);
+    // Всё тело поворачивается вокруг таза: на спину, ничком, на бок.
+    const Joint body{{0.0f, kHipHeight, 0.0f}, pose.bodyPitch, pose.bodyRoll};
+    const Joint torso{{0.0f, kHipHeight, 0.0f}, -pose.lean, -pose.side, &body, pose.twist};
+    const Joint head{{0.0f, 1.5f, 0.0f}, -pose.headPitch, -pose.headTilt, &torso, pose.headYaw};
+
+    // Что стоит рядом: прилавок перед продавцом, чурбак под сидящим.
+    if (look.prop == Prop::Counter && !look.simple) {
+        ground.box({-0.65f, 0.0f, 0.5f}, {0.65f, 0.9f, 0.95f}, kWoodColor, nullptr, kTop | kSides);
+        ground.box({-0.7f, 0.9f, 0.45f}, {0.7f, 0.96f, 1.0f}, shaded(kWoodColor, 1.25f), nullptr, kAll);
+        ground.box({-0.5f, 0.96f, 0.6f}, {-0.25f, 1.12f, 0.8f}, {196, 70, 52, 255}, nullptr, kTop | kSides);
+        ground.box({0.1f, 0.96f, 0.58f}, {0.4f, 1.06f, 0.85f}, {220, 190, 90, 255}, nullptr, kTop | kSides);
+    } else if (look.prop == Prop::Stump) {
+        ground.box({-0.21f, 0.0f, -0.22f}, {0.21f, 0.43f, 0.2f}, kBarkColor, nullptr, kTop | kSides, kStumpTop);
+    }
+
     if (look.simple) {
-        // Издали в несколько пикселей: силуэт и цвет одежды, без суставов.
-        e.box({-0.17f, 0.0f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &hips);
-        e.box({-0.2f, 0.88f, -0.11f}, {0.2f, 1.48f, 0.11f}, look.shirt, &hips);
-        e.box({-0.11f, 1.5f, -0.11f}, {0.11f, 1.74f, 0.12f}, look.skin, &hips);
+        // Издали в несколько пикселей: силуэт и цвет одежды.
+        e.box({-0.17f, 0.0f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &body);
+        e.box({-0.2f, 0.88f, -0.11f}, {0.2f, 1.48f, 0.11f}, look.shirt, &torso);
+        e.box({-0.11f, 1.5f, -0.11f}, {0.11f, 1.74f, 0.12f}, look.skin, &head);
         return;
     }
-    const Joint leftLeg{{0.0f, 0.9f, 0.0f}, step};
-    const Joint rightLeg{{0.0f, 0.9f, 0.0f}, -step};
-    e.pair({0.02f, 0.0f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &leftLeg, &rightLeg);
-    e.box({-0.2f, 0.88f, -0.11f}, {0.2f, 1.48f, 0.11f}, look.shirt, &hips);
-    e.box({-0.11f, 1.5f, -0.11f}, {0.11f, 1.74f, 0.12f}, look.skin, &hips);
 
-    // Руки машут против ног; зомби тянет их вперёд, целящийся держит оружие.
-    float leftArm = -step * 0.8f;
-    float rightArm = step * 0.8f;
-    if (look.zombie) {
-        const float sway = 0.08f * std::sin(gait.phase * 0.5f);
-        leftArm = 1.35f + sway;
-        rightArm = 1.35f - sway;
-    } else if (look.aiming) {
-        leftArm = 1.3f;
-        rightArm = 1.45f;
+    // Ноги: бедро, голень, ботинок. Левая сторона — +X (модель смотрит вдоль +Z).
+    const Joint leftHip{{0.095f, kHipHeight, 0.0f}, pose.leftLeg.hip, pose.leftLeg.spread, &body};
+    const Joint rightHip{{-0.095f, kHipHeight, 0.0f}, pose.rightLeg.hip, -pose.rightLeg.spread, &body};
+    const Joint leftKnee{{0.095f, kHipHeight - kThigh, 0.0f}, -pose.leftLeg.knee, 0.0f, &leftHip};
+    const Joint rightKnee{{-0.095f, kHipHeight - kThigh, 0.0f}, -pose.rightLeg.knee, 0.0f, &rightHip};
+    e.pair({0.02f, 0.44f, -0.08f}, {0.17f, 0.92f, 0.08f}, look.trousers, &leftHip, &rightHip);
+    e.pair({0.025f, 0.07f, -0.07f}, {0.165f, 0.47f, 0.07f}, look.trousers, &leftKnee, &rightKnee);
+    e.pair({0.03f, 0.0f, -0.08f}, {0.16f, 0.08f, 0.15f}, kShoeColor, &leftKnee, &rightKnee);
+
+    // Таз, корпус, голова: нос и волосы показывают, куда смотрит.
+    e.box({-0.18f, 0.82f, -0.1f}, {0.18f, 0.96f, 0.1f}, look.trousers, &body);
+    e.box({-0.2f, 0.94f, -0.11f}, {0.2f, 1.48f, 0.11f}, look.shirt, &torso);
+    e.box({-0.11f, 1.5f, -0.11f}, {0.11f, 1.74f, 0.12f}, look.skin, &head);
+    e.box({-0.022f, 1.57f, 0.12f}, {0.022f, 1.63f, 0.15f}, shaded(look.skin, 0.85f), &head);
+    e.box({-0.118f, 1.67f, -0.12f}, {0.118f, 1.775f, 0.1f}, look.hair, &head);
+    e.box({-0.118f, 1.53f, -0.125f}, {0.118f, 1.67f, -0.07f}, look.hair, &head);
+    if (look.bag) {
+        e.box({0.19f, 0.76f, -0.1f}, {0.27f, 0.98f, 0.08f}, kBagColor, &torso);
     }
-    const Joint leftShoulder{{0.255f, 1.44f, 0.0f}, leftArm, 0.0f, &hips};
-    const Joint rightShoulder{{-0.255f, 1.44f, 0.0f}, rightArm, 0.0f, &hips};
-    e.pair({0.2f, 1.02f, -0.055f}, {0.31f, 1.46f, 0.055f}, look.shirt, &leftShoulder, &rightShoulder);
-    e.pair({0.205f, 0.8f, -0.05f}, {0.305f, 1.02f, 0.05f}, look.skin, &leftShoulder, &rightShoulder);
 
-    // Оружие: длинное — за спиной или в руках, короткое и холодное — в правой руке.
+    // Руки: плечо, предплечье, кисть.
+    const Joint leftShoulder{{0.255f, kShoulderHeight, 0.0f}, pose.leftArm.raise, pose.leftArm.out, &torso};
+    const Joint rightShoulder{{-0.255f, kShoulderHeight, 0.0f}, pose.rightArm.raise, -pose.rightArm.out, &torso};
+    const Joint leftElbow{{0.255f, kShoulderHeight - kUpperArm, 0.0f}, pose.leftArm.elbow, 0.0f, &leftShoulder};
+    const Joint rightElbow{{-0.255f, kShoulderHeight - kUpperArm, 0.0f}, pose.rightArm.elbow, 0.0f, &rightShoulder};
+    e.pair({0.2f, 1.15f, -0.055f}, {0.31f, 1.46f, 0.055f}, look.shirt, &leftShoulder, &rightShoulder);
+    e.pair({0.205f, 0.99f, -0.05f}, {0.305f, 1.17f, 0.05f}, look.shirt, &leftElbow, &rightElbow);
+    e.pair({0.21f, 0.83f, -0.045f}, {0.3f, 0.99f, 0.045f}, look.skin, &leftElbow, &rightElbow);
+
+    // Оружие: длинное — за спиной или в руках, пистолет — в кобуре или в руке,
+    // нож и топор — в правой руке, а если она занята — на поясе и за спиной.
+    const bool handBusy = inRightHand(look.prop);
+    const Joint sling{{0.0f, 1.2f, -0.15f}, 0.0f, 0.6f, &torso};
     switch (look.weapon) {
     case WeaponKind::Rifle:
     case WeaponKind::Shotgun: {
         const float length = look.weapon == WeaponKind::Rifle ? 1.05f : 0.9f;
-        if (look.aiming) {
+        if (look.aiming && !handBusy) {
             e.box({-0.28f, 0.82f - 0.7f * length, 0.02f}, {-0.23f, 0.82f + 0.3f * length, 0.09f}, kGunColor,
-                  &rightShoulder);
+                  &rightElbow);
         } else {
-            const Joint sling{{0.0f, 1.2f, -0.15f}, 0.0f, 0.6f, &hips};
             e.box({-0.025f, 1.2f - 0.5f * length, -0.18f}, {0.025f, 1.2f + 0.5f * length, -0.12f}, kGunColor,
                   &sling);
         }
         break;
     }
     case WeaponKind::Pistol:
-        if (look.aiming) {
-            e.box({-0.275f, 0.66f, 0.0f}, {-0.235f, 0.84f, 0.1f}, kGunColor, &rightShoulder);
+        if (look.aiming && !handBusy) {
+            e.box({-0.275f, 0.66f, 0.0f}, {-0.235f, 0.84f, 0.1f}, kGunColor, &rightElbow);
+        } else {
+            e.box({-0.235f, 0.78f, -0.04f}, {-0.2f, 0.92f, 0.04f}, kGunColor, &torso);
         }
         break;
     case WeaponKind::Knife:
-        e.box({-0.27f, 0.6f, -0.015f}, {-0.245f, 0.8f, 0.015f}, kSteelColor, &rightShoulder);
+        if (!handBusy) {
+            e.box({-0.27f, 0.6f, -0.015f}, {-0.245f, 0.8f, 0.015f}, kSteelColor, &rightElbow);
+        } else {
+            e.box({-0.225f, 0.72f, 0.0f}, {-0.2f, 0.9f, 0.03f}, kSteelColor, &torso);
+        }
         break;
     case WeaponKind::Axe:
-        e.box({-0.275f, 0.42f, 0.05f}, {-0.24f, 0.86f, 0.085f}, kWoodColor, &rightShoulder);
-        e.box({-0.28f, 0.42f, 0.085f}, {-0.235f, 0.58f, 0.22f}, kSteelColor, &rightShoulder);
+        if (!handBusy) {
+            e.box({-0.275f, 0.42f, 0.05f}, {-0.24f, 0.86f, 0.085f}, kWoodColor, &rightElbow);
+            e.box({-0.28f, 0.42f, 0.085f}, {-0.235f, 0.58f, 0.22f}, kSteelColor, &rightElbow);
+        } else {
+            e.box({-0.02f, 0.95f, -0.16f}, {0.02f, 1.4f, -0.12f}, kWoodColor, &sling);
+            e.box({-0.02f, 1.28f, -0.2f}, {0.02f, 1.42f, -0.16f}, kSteelColor, &sling);
+        }
         break;
     default:
         break;
     }
+    emitHandProp(e, look.prop, &rightElbow, pose.toolPitch);
 }
 
-void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait, bool grazing,
+void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait, const AnimalPose& pose,
                 bool antlers) {
     const float step = std::sin(gait.phase) * 0.5f * gait.swing;
     const Color dark = shaded(color, 0.7f);
+    const float scratchWave = pose.scratch * std::sin(pose.scratchPhase);
     switch (kind) {
     case AnimalKind::Deer: {
         const Emitter e(frame);
@@ -236,10 +359,12 @@ void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait
         e.pair({0.08f, 0.0f, -0.49f}, {0.16f, 0.82f, -0.41f}, dark, &backLeft, &backRight);
         e.box({-0.19f, 0.75f, -0.6f}, {0.19f, 1.2f, 0.58f}, color);
         e.box({-0.06f, 1.02f, -0.66f}, {0.06f, 1.16f, -0.6f}, {226, 220, 206, 255});
-        // Пасущийся опускает шею к земле.
-        const Joint neck{{0.0f, 1.05f, 0.5f}, grazing ? -2.3f : -0.35f};
+        // Шея: пасётся — к земле, прислушивается — вверх, чешется — к боку.
+        const Joint neck{{0.0f, 1.05f, 0.5f}, -0.35f - 1.95f * pose.graze + 0.3f * pose.lookUp + 0.12f * scratchWave,
+                         0.0f, nullptr, pose.headYaw + 1.9f * pose.scratch};
         e.box({-0.08f, 1.0f, 0.42f}, {0.08f, 1.6f, 0.62f}, color, &neck);
         e.box({-0.09f, 1.5f, 0.5f}, {0.09f, 1.66f, 0.84f}, color, &neck);
+        e.pair({0.05f, 1.62f, 0.52f}, {0.1f, 1.72f + 0.05f * pose.ears, 0.56f}, color, &neck, &neck);
         if (antlers) {
             const Joint leftAntler{{0.045f, 1.66f, 0.54f}, 0.0f, -0.45f, &neck};
             const Joint rightAntler{{-0.045f, 1.66f, 0.54f}, 0.0f, 0.45f, &neck};
@@ -248,7 +373,10 @@ void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait
         break;
     }
     case AnimalKind::Boar: {
-        const Emitter e(frame);
+        // Чешется — трётся боком.
+        ModelFrame rub = frame;
+        rub.roll += 0.1f * scratchWave;
+        const Emitter e(rub);
         const Joint frontLeft{{0.0f, 0.34f, 0.32f}, step};
         const Joint frontRight{{0.0f, 0.34f, 0.32f}, -step};
         const Joint backLeft{{0.0f, 0.34f, -0.4f}, -step};
@@ -258,34 +386,41 @@ void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait
         e.box({-0.22f, 0.3f, -0.55f}, {0.22f, 0.82f, 0.45f}, color);
         // Загривок выше крупа.
         e.box({-0.18f, 0.82f, -0.05f}, {0.18f, 0.9f, 0.4f}, dark);
-        const Joint head{{0.0f, 0.62f, 0.42f}, grazing ? -0.45f : 0.0f};
+        const Joint head{{0.0f, 0.62f, 0.42f}, -0.45f * pose.graze + 0.25f * pose.lookUp - 0.35f * pose.charge, 0.0f,
+                         nullptr, pose.headYaw};
         e.box({-0.15f, 0.36f, 0.4f}, {0.15f, 0.72f, 0.78f}, color, &head);
         e.box({-0.07f, 0.4f, 0.78f}, {0.07f, 0.54f, 0.9f}, {112, 92, 88, 255}, &head);
+        e.pair({0.08f, 0.7f, 0.46f}, {0.13f, 0.79f + 0.03f * pose.ears, 0.5f}, dark, &head, &head);
         break;
     }
     default: {
-        // Заяц скачет: всё тело подпрыгивает.
+        // Заяц скачет: всё тело подпрыгивает; садится столбиком, чешется задней лапой.
         ModelFrame hop = frame;
         hop.origin.y += std::abs(std::sin(gait.phase)) * 0.12f * gait.swing * frame.scale;
         const Emitter e(hop);
-        e.pair({0.04f, 0.0f, -0.15f}, {0.08f, 0.1f, -0.04f}, dark, nullptr, nullptr);
-        e.pair({0.03f, 0.0f, 0.05f}, {0.06f, 0.08f, 0.1f}, dark, nullptr, nullptr);
-        e.box({-0.08f, 0.06f, -0.17f}, {0.08f, 0.26f, 0.13f}, color);
-        e.box({-0.06f, 0.18f, 0.1f}, {0.06f, 0.31f, 0.25f}, color);
-        e.box({-0.03f, 0.14f, -0.21f}, {0.03f, 0.2f, -0.17f}, {232, 228, 220, 255});
-        const Joint leftEar{{0.0f, 0.3f, 0.15f}, 0.35f};
-        e.pair({0.01f, 0.29f, 0.13f}, {0.035f, 0.46f, 0.17f}, color, &leftEar, &leftEar);
+        const Joint body{{0.0f, 0.04f, -0.14f}, 0.9f * pose.sitUp};
+        const Joint hind{{0.0f, 0.08f, -0.1f}, 0.6f * pose.scratch * (0.5f + 0.5f * scratchWave), 0.0f, &body};
+        e.box({0.04f, 0.0f, -0.15f}, {0.08f, 0.1f, -0.04f}, dark, &hind);
+        e.box({-0.08f, 0.0f, -0.15f}, {-0.04f, 0.1f, -0.04f}, dark);
+        e.pair({0.03f, 0.0f, 0.05f}, {0.06f, 0.08f, 0.1f}, dark, &body, &body);
+        e.box({-0.08f, 0.06f, -0.17f}, {0.08f, 0.26f, 0.13f}, color, &body);
+        const Joint head{{0.0f, 0.2f, 0.12f}, -0.4f * pose.graze + 0.2f * pose.lookUp, 0.0f, &body, pose.headYaw};
+        e.box({-0.06f, 0.18f, 0.1f}, {0.06f, 0.31f, 0.25f}, color, &head);
+        e.box({-0.03f, 0.14f, -0.21f}, {0.03f, 0.2f, -0.17f}, {232, 228, 220, 255}, &body);
+        const Joint ears{{0.0f, 0.3f, 0.15f}, 0.35f - 0.35f * pose.ears, 0.0f, &head};
+        e.pair({0.01f, 0.29f, 0.13f}, {0.035f, 0.46f, 0.17f}, color, &ears, &ears);
         break;
     }
     }
 }
 
-void emitBird(const ModelFrame& frame, bool flying, float flap) {
+void emitBird(const ModelFrame& frame, bool flying, float flap, float peck) {
     constexpr Color kBird = {24, 24, 28, 255};
     const Emitter e(frame);
     e.box({-0.05f, 0.0f, -0.14f}, {0.05f, 0.09f, 0.12f}, kBird);
-    e.box({-0.04f, 0.05f, 0.1f}, {0.04f, 0.13f, 0.18f}, kBird);
-    e.box({-0.012f, 0.07f, 0.18f}, {0.012f, 0.1f, 0.22f}, {60, 58, 56, 255});
+    const Joint head{{0.0f, 0.08f, 0.1f}, flying ? 0.0f : -0.9f * peck};
+    e.box({-0.04f, 0.05f, 0.1f}, {0.04f, 0.13f, 0.18f}, kBird, &head);
+    e.box({-0.012f, 0.07f, 0.18f}, {0.012f, 0.1f, 0.22f}, {60, 58, 56, 255}, &head);
     e.box({-0.04f, 0.03f, -0.22f}, {0.04f, 0.06f, -0.14f}, kBird);
     if (flying) {
         const float angle = std::sin(flap) * 0.7f;
@@ -293,6 +428,84 @@ void emitBird(const ModelFrame& frame, bool flying, float flap) {
         const Joint right{{-0.05f, 0.07f, 0.0f}, 0.0f, -angle};
         e.pair({0.05f, 0.06f, -0.07f}, {0.32f, 0.08f, 0.08f}, kBird, &left, &right);
     }
+}
+
+void emitEmote(Vector3 base, float yaw, Emote emote, float size) {
+    if (emote == Emote::None || size <= 0.0f) {
+        return;
+    }
+    ModelFrame frame;
+    frame.origin = base;
+    frame.yaw = yaw;
+    frame.scale = size / 0.5f; // значок рисуется высотой 0,5
+    const Emitter e(frame);
+    Color color = {240, 64, 48, 255};
+    switch (emote) {
+    case Emote::Discovery:
+        color = {250, 210, 70, 255};
+        break;
+    case Emote::Question:
+        color = {120, 190, 250, 255};
+        break;
+    case Emote::Heart:
+        color = {236, 80, 120, 255};
+        break;
+    case Emote::Anger:
+        color = {230, 40, 40, 255};
+        break;
+    case Emote::Tear:
+        color = {90, 160, 240, 255};
+        break;
+    default:
+        break;
+    }
+    constexpr float d = 0.03f;
+    const auto bar = [&](float x0, float y0, float x1, float y1) {
+        e.box({x0, y0, -d}, {x1, y1, d}, color);
+    };
+    gGlow = true; // видно и ночью
+    switch (emote) {
+    case Emote::Alarm:
+    case Emote::Discovery:
+        bar(-0.05f, 0.16f, 0.05f, 0.5f);
+        bar(-0.05f, 0.0f, 0.05f, 0.1f);
+        break;
+    case Emote::Question:
+        bar(-0.13f, 0.42f, 0.13f, 0.5f);
+        bar(-0.15f, 0.36f, -0.07f, 0.46f);
+        bar(0.07f, 0.3f, 0.15f, 0.46f);
+        bar(-0.04f, 0.24f, 0.11f, 0.31f);
+        bar(-0.04f, 0.15f, 0.04f, 0.25f);
+        bar(-0.04f, 0.0f, 0.04f, 0.08f);
+        break;
+    case Emote::Heart:
+        bar(-0.17f, 0.28f, -0.01f, 0.42f);
+        bar(0.01f, 0.28f, 0.17f, 0.42f);
+        bar(-0.19f, 0.2f, 0.19f, 0.32f);
+        bar(-0.13f, 0.1f, 0.13f, 0.2f);
+        bar(-0.06f, 0.02f, 0.06f, 0.1f);
+        break;
+    case Emote::Anger:
+        // Четыре уголка вокруг середины.
+        for (const float sx : {-1.0f, 1.0f}) {
+            for (const float sy : {-1.0f, 1.0f}) {
+                const float cx = sx * 0.06f;
+                const float cy = 0.25f + sy * 0.06f;
+                bar(std::min(cx, cx + sx * 0.14f), cy - 0.02f, std::max(cx, cx + sx * 0.14f), cy + 0.02f);
+                bar(cx - 0.02f, std::min(cy, cy + sy * 0.14f), cx + 0.02f, std::max(cy, cy + sy * 0.14f));
+            }
+        }
+        break;
+    case Emote::Tear:
+        bar(-0.025f, 0.36f, 0.025f, 0.44f);
+        bar(-0.06f, 0.24f, 0.06f, 0.36f);
+        bar(-0.09f, 0.08f, 0.09f, 0.24f);
+        bar(-0.06f, 0.02f, 0.06f, 0.08f);
+        break;
+    default:
+        break;
+    }
+    gGlow = false;
 }
 
 void emitCrate(const ModelFrame& frame, Color color) {

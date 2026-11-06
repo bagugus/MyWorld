@@ -3,6 +3,7 @@
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
+//                [--pose-gallery [ROW]]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -28,6 +29,9 @@
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
 // --screenshot-delay  снять не сразу, а через S реальных секунд работы окна (режиссёр)
+// --pose-gallery витрина поз в 3D (этап 12а.11): все движения людей, зомби и зверей
+//               рядами в точке взгляда камеры — посмотреть, не дожидаясь их в мире;
+//               ROW — только этот ряд из восьми (крупно), последний ряд — звери
 
 #include "render/CameraController.h"
 #include "render/Palette.h"
@@ -72,6 +76,7 @@ int main(int argc, char** argv) {
     bool director = false;
     bool noUi = false;    // --no-ui: без окон и подписей (снимки мира)
     bool noProps = false; // --no-props: без мелочи вне леса (сравнить облик)
+    std::optional<int> poseGallery; // --pose-gallery [ROW]: витрина поз
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
@@ -123,6 +128,12 @@ int main(int argc, char** argv) {
             noUi = true;
         } else if (std::strcmp(argv[i], "--no-props") == 0) {
             noProps = true;
+        } else if (std::strcmp(argv[i], "--pose-gallery") == 0) {
+            poseGallery = -1;
+            if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0])) != 0) {
+                poseGallery = std::atoi(argv[++i]);
+            }
+            view3d = true;
         } else if (std::strcmp(argv[i], "--director") == 0) {
             director = true;
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
@@ -172,6 +183,7 @@ int main(int argc, char** argv) {
         lw::ui::loadCameraSettings(camera.settings());
         renderer3d.setFoliageYear(foliage);
         renderer3d.setPropsEnabled(!noProps);
+        renderer3d.setPoseGallery(poseGallery);
         if (orbit) {
             camera.setOrbitAngles(orbit->first, orbit->second);
         }
