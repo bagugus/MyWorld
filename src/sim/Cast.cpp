@@ -345,6 +345,20 @@ void CastTracker::review(std::uint64_t tick) {
     hero.via = bestVia;
 }
 
+float chronicleWeight(const ChronicleEvent& event, EntityId who) {
+    if (who == kInvalidId) {
+        return 0.0f;
+    }
+    const Roles roles = rolesOf(event);
+    if (who == event.subject) {
+        return roles.subject;
+    }
+    if (who == event.object) {
+        return roles.object;
+    }
+    return who == event.third ? roles.third : 0.0f;
+}
+
 const char* heroStatusName(HeroStatus status) {
     constexpr const char* kNames[] = {"alive", "dead", "turned", "retired"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(HeroStatus::Count));

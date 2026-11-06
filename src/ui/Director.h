@@ -5,6 +5,7 @@
 #include "sim/Id.h"
 #include "sim/Story.h"
 #include "ui/Camerawork.h"
+#include "ui/Captions.h"
 
 #include <cstdint>
 #include <string>
@@ -53,6 +54,13 @@ class Inspector;
 // грузом), крупный (герой); режиссёр кадрирует всё, что должно быть в кадре,
 // далёкую смену кадра делает пролётом с отъездом, в кульминации медленно
 // наезжает и замедляет время до x1, пока всё не случится (Camerawork).
+//
+// Подписи и титры (12а.6): внизу кадра — имя того, за кем следят, его
+// положение (вожак, укушен, ранен) и одна строка, что он хочет и почему
+// («идёт мстить Peter Green за то, что он обокрал его дом»); при возвращении
+// к главному герою — «ранее в сериях» и «пока нас не было»; когда камера
+// уходит от человека (или он гибнет в кадре) — итог эпизода («Mary Cole
+// погибла, защищая дом»). Итоги копятся в окне — краткое содержание сериала.
 //
 // Мир режиссёр только читает (скорость времени — не состояние мира). Выбор
 // пользователя (щелчок по другому объекту) выключает режиссёра.
@@ -155,11 +163,20 @@ private:
     void drawCast(Inspector& inspector);
     // Строки о герое сериала в подписи: эпизод, «возвращаемся», дебют.
     void drawHeroCaption(EntityId hero, Inspector& inspector);
+    // Подписи и титры (12а.6): за кем камера сейчас и что он делает; ушли от
+    // него или он погиб — итог эпизода.
+    void trackSubject();
+    void closeSubject();
+    // Титры внизу кадра: итог эпизода, «ранее в сериях», имя и намерение.
+    void drawTitles(Inspector& inspector);
+    // Раздел «Итоги эпизодов» в окне.
+    void drawSummaries(Inspector& inspector);
 
     // Эпизоды главного героя (реальные секунды, только для режиссёра).
     struct Episodes {
         int count = 0;          // сколько раз камера возвращалась к нему
         float lastSeen = 0.0f;  // когда показывали в последний раз (clock_)
+        std::uint64_t lastTick = 0; // тик мира тогда же
     };
 
     const World& world_;
@@ -207,6 +224,25 @@ private:
     bool slowmo_ = false;
     bool slowmoSpent_ = false;
     float slowmoFor_ = 0.0f;
+
+    // Подписи и титры (12а.6).
+    EntityId subject_ = kInvalidId;  // за кем камера (для итога эпизода)
+    std::uint64_t subjectSince_ = 0; // с какого тика
+    float subjectShownAt_ = 0.0f;    // с какой секунды (clock_)
+    bool subjectAlive_ = false;      // был жив, когда за ним следили
+    Witnessed subjectWatch_;         // что он делал в последний раз
+    struct Summary {
+        EntityId who = kInvalidId;
+        std::uint64_t tick = 0;
+        std::string text;
+    };
+    std::vector<Summary> summaries_; // итоги эпизодов по порядку
+    float summaryAt_ = -1.0e9f;      // когда показали последний итог (clock_)
+    // «Ранее в сериях»: к кому вернулись, когда и что показать.
+    EntityId recapHero_ = kInvalidId;
+    float recapAt_ = -1.0e9f;
+    std::vector<std::uint32_t> recapBefore_; // ранее в сериях
+    std::vector<std::uint32_t> recapSince_;  // пока нас не было
 };
 
 } // namespace ui

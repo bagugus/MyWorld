@@ -20,6 +20,9 @@ struct Name {
 // Случайные имя и фамилия из списков.
 std::string_view randomFirstName(Rng& rng);
 std::string_view randomLastName(Rng& rng);
+// Женское ли имя (по списку имён): для окончаний в подписях («погиб» —
+// «погибла»). Неизвестное имя — мужское.
+bool isFemaleName(std::string_view first);
 
 // Подпись сущности для интерфейса и сводок: «John Miller #1745», если у неё
 // есть имя, иначе «#1745».

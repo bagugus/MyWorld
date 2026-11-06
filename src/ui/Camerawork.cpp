@@ -25,7 +25,7 @@ constexpr ZoomRange kRanges[] = {
 };
 static_assert(std::size(kRanges) == static_cast<std::size_t>(ShotSize::Count));
 // Доля экрана, в которую укладывается план: по бокам окна интерфейса.
-constexpr float kFrameWidth = 0.4f;
+constexpr float kFrameWidth = 0.35f;
 constexpr float kFrameHeight = 0.55f;
 // Медленный наезд в кульминации: до kPushIn за kPushTime секунд, обратно — за kPushBack.
 constexpr float kPushIn = 1.35f;

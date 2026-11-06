@@ -54,6 +54,18 @@ std::string_view randomLastName(Rng& rng) {
     return kLastNames[rng.below(static_cast<std::uint32_t>(kLastNames.size()))];
 }
 
+bool isFemaleName(std::string_view first) {
+    // Первые kMaleNames имён списка — мужские, остальные — женские.
+    constexpr std::size_t kMaleNames = 64;
+    static_assert(kFirstNames[kMaleNames - 1][0] == 'H' && kFirstNames[kMaleNames][0] == 'M');
+    for (std::size_t i = kMaleNames; i < kFirstNames.size(); ++i) {
+        if (first == kFirstNames[i]) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::string labelOf(const entt::registry& registry, entt::entity entity, EntityId id) {
     std::string label;
     if (entity != entt::null && registry.valid(entity)) {

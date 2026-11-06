@@ -85,6 +85,9 @@ constexpr float kBreather = 20.0f;
 constexpr float kQuietEta = 240.0f;
 constexpr float kQuietOmen = 0.15f;
 constexpr float kLullInterest = 0.3f;
+// Линия, где столько ничего не происходит, а герой занят мирным делом, —
+// тоже затишье, как бы интересна она ни была.
+constexpr std::uint64_t kStaleLine = 2 * kTicksPerGameHour;
 // Затишье дольше kQuietDelay секунд — время ×kLullSpeed (если пользователь не
 // менял скорость последние kUserPace секунд).
 constexpr float kQuietDelay = 3.0f;
@@ -104,6 +107,20 @@ constexpr float kNear = 250.0f;
 constexpr float kCompany = 300.0f;
 // Сколько участников линии брать в кадр.
 constexpr std::size_t kCompanyMax = 8;
+// Подписи и титры (12а.6). Итог эпизода — сколько секунд на экране; итог
+// подводится, если за человеком следили хотя бы kMinWatch секунд (гибель в
+// кадре — всегда).
+constexpr float kSummaryTime = 9.0f;
+constexpr float kMinWatch = 6.0f;
+// «Ранее в сериях» — если героя не показывали дольше kRecapAfter секунд;
+// держится kRecapTime секунд: kRecapBefore событий до прошлого показа и
+// kRecapSince — с тех пор.
+constexpr float kRecapAfter = 45.0f;
+constexpr float kRecapTime = 14.0f;
+constexpr std::size_t kRecapBefore = 2;
+constexpr std::size_t kRecapSince = 3;
+// Сколько итогов эпизодов в окне.
+constexpr std::size_t kSummariesListed = 40;
 
 const char* heroStatusTitle(HeroStatus status) {
     constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
@@ -384,8 +401,17 @@ void Director::trackEpisode() {
         returnedAfter_ = fresh ? 0.0f : clock_ - episodes.lastSeen;
         episodeStart_ = clock_;
         episodeHero_ = shown_;
+        if (!fresh && returnedAfter_ >= kRecapAfter) {
+            // Ранее в сериях — и что случилось, пока мы были не с ним (12а.6).
+            recapHero_ = shown_;
+            recapAt_ = clock_;
+            recapBefore_ = notableEvents(world_, shown_, 0, episodes.lastTick + 1, kRecapBefore);
+            recapSince_ =
+                notableEvents(world_, shown_, episodes.lastTick + 1, world_.tick() + 1, kRecapSince);
+        }
     }
     episodes.lastSeen = clock_;
+    episodes.lastTick = world_.tick();
 }
 
 float Director::intensity() const {
@@ -475,7 +501,12 @@ bool Director::quiet() const {
             return false;
         }
     }
-    return currentInterest_ < kLullInterest;
+    if (currentInterest_ < kLullInterest) {
+        return true;
+    }
+    const Story* story = stories_.find(current_.story);
+    return story != nullptr && !current_.hasOmen && calm(current_.target) &&
+           world_.tick() - std::min(world_.tick(), story->updated) > kStaleLine;
 }
 
 void Director::pace(SimDriver& driver, float dt) {
@@ -536,6 +567,7 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
         enabled_ = false; // пользователь выбрал своё — камера его
     }
     if (!enabled_) {
+        subject_ = kInvalidId; // выключили — итога не подводим
         pace(driver, dt);
         return;
     }
@@ -544,6 +576,7 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     breather_ = std::max(0.0f, breather_ - dt);
     tension_ += (intensity() - tension_) * std::min(1.0f, dt / kTensionTime);
     trackEpisode();
+    trackSubject();
     pace(driver, dt);
     if (!refresh) {
         return;
@@ -925,6 +958,7 @@ void Director::drawPanel(Inspector& inspector) {
                      [](const auto& a, const auto& b) { return a.first > b.first; });
     ImGui::TextDisabled("линий: %zu, идут: %zu; вот-вот: %zu", all.size(), active, omens_.size());
     drawCast(inspector);
+    drawSummaries(inspector);
 
     EntityId clicked = kInvalidId;
     // Что вот-вот случится (12а.2): самые интересные предвестия.
@@ -1010,7 +1044,11 @@ void Director::drawPanel(Inspector& inspector) {
 }
 
 void Director::drawCaption(Inspector& inspector) {
-    if (!enabled_ || !current_.valid()) {
+    if (!enabled_) {
+        return;
+    }
+    drawTitles(inspector);
+    if (!current_.valid()) {
         return;
     }
     const Story* story = stories_.find(current_.story);
@@ -1106,6 +1144,146 @@ void Director::drawHeroCaption(EntityId hero, Inspector& inspector) {
     }
     if (opening && returnedAfter_ >= kMissedAfter) {
         ImGui::TextDisabled("возвращаемся к герою спустя %.0f мин", returnedAfter_ / 60.0f);
+    }
+}
+
+void Director::trackSubject() {
+    const EntityId id = shown_;
+    if (subject_ != kInvalidId) {
+        Witnessed now;
+        if (id != subject_) {
+            closeSubject(); // камера ушла
+        } else if (subjectAlive_ && !observe(world_, subject_, now)) {
+            closeSubject(); // погиб в кадре: итог сразу, камера остаётся на теле
+            return;
+        } else if (subjectAlive_) {
+            subjectWatch_ = now;
+            return;
+        } else {
+            return;
+        }
+    }
+    subject_ = id;
+    subjectSince_ = world_.tick();
+    subjectShownAt_ = clock_;
+    subjectWatch_ = {};
+    subjectAlive_ = id != kInvalidId && observe(world_, id, subjectWatch_);
+}
+
+void Director::closeSubject() {
+    const EntityId who = subject_;
+    subject_ = kInvalidId;
+    Witnessed now;
+    const bool died = subjectAlive_ && !observe(world_, who, now);
+    if (who == kInvalidId || (!died && clock_ - subjectShownAt_ < kMinWatch)) {
+        return;
+    }
+    std::string text = episodeSummary(world_, who, subjectSince_, subjectWatch_);
+    if (text.empty()) {
+        return;
+    }
+    summaries_.push_back({who, world_.tick(), std::move(text)});
+    summaryAt_ = clock_;
+}
+
+void Director::drawTitles(Inspector& inspector) {
+    const bool summary = !summaries_.empty() && clock_ - summaryAt_ < kSummaryTime;
+    const bool recap = recapHero_ == shown_ && shown_ != kInvalidId && clock_ - recapAt_ < kRecapTime &&
+                       (!recapBefore_.empty() || !recapSince_.empty());
+    const std::string intent = intentLine(world_, shown_);
+    if (!summary && !recap && intent.empty()) {
+        return;
+    }
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    ImGui::SetNextWindowPos({display.x * 0.5f, display.y - 36.0f}, ImGuiCond_Always, {0.5f, 1.0f});
+    ImGui::SetNextWindowBgAlpha(0.6f);
+    ImGui::SetNextWindowSizeConstraints({0.0f, 0.0f}, {display.x * 0.5f, display.y * 0.5f});
+    constexpr ImGuiWindowFlags kFlags = ImGuiWindowFlags_NoDecoration |
+                                        ImGuiWindowFlags_AlwaysAutoResize |
+                                        ImGuiWindowFlags_NoSavedSettings |
+                                        ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
+    EntityId clicked = kInvalidId;
+    if (ImGui::Begin("###director-titles", nullptr, kFlags)) {
+        const ImVec4 gold{1.0f, 0.82f, 0.35f, 1.0f};
+        const ImVec4 muted{0.7f, 0.78f, 0.9f, 1.0f};
+        const std::vector<ChronicleEvent>& events = world_.chronicle().events();
+        if (summary) {
+            // Итог эпизода: от кого ушли (или кто погиб в кадре).
+            ImGui::TextColored(muted, "Итог эпизода");
+            ImGui::TextColored(gold, "%s", summaries_.back().text.c_str());
+            if (recap || !intent.empty()) {
+                ImGui::Separator();
+            }
+        }
+        if (recap) {
+            const auto lines = [&](const char* title, const std::vector<std::uint32_t>& list) {
+                if (list.empty()) {
+                    return;
+                }
+                ImGui::TextColored(muted, "%s", title);
+                for (const std::uint32_t index : list) {
+                    ImGui::PushID(static_cast<int>(index));
+                    if (const EntityId id = drawChronicleEvent(events[index], kInvalidId);
+                        id != kInvalidId) {
+                        clicked = id;
+                    }
+                    ImGui::PopID();
+                }
+            };
+            lines("Ранее в сериях:", recapBefore_);
+            lines("Пока нас не было:", recapSince_);
+            if (!intent.empty()) {
+                ImGui::Separator();
+            }
+        }
+        if (!intent.empty()) {
+            // Имя крупно, ниже — положение и что он хочет.
+            ImGui::SetWindowFontScale(1.3f);
+            ImGui::TextUnformatted(idLabel(shown_).c_str());
+            ImGui::SetWindowFontScale(1.0f);
+            if (const std::string status = statusLine(world_, shown_); !status.empty()) {
+                ImGui::SameLine();
+                ImGui::TextDisabled("%s", status.c_str());
+            }
+            ImGui::TextUnformatted(intent.c_str());
+        }
+    }
+    ImGui::End();
+    if (clicked != kInvalidId) {
+        enabled_ = false; // пользователь выбрал своё
+        inspector.select(clicked);
+    }
+}
+
+void Director::drawSummaries(Inspector& inspector) {
+    char header[64];
+    std::snprintf(header, sizeof(header), "Итоги эпизодов: %zu###summaries", summaries_.size());
+    if (!ImGui::CollapsingHeader(header)) {
+        return;
+    }
+    if (summaries_.empty()) {
+        ImGui::TextDisabled("пока ни одного: итог подводится, когда камера уходит от героя");
+        return;
+    }
+    EntityId clicked = kInvalidId;
+    // Новые сверху.
+    const std::size_t shown = std::min(kSummariesListed, summaries_.size());
+    for (std::size_t i = 0; i < shown; ++i) {
+        const Summary& summary = summaries_[summaries_.size() - 1 - i];
+        ImGui::PushID(static_cast<int>(i));
+        char time[48];
+        formatGameDuration(time, sizeof(time), world_.tick() - std::min(world_.tick(), summary.tick));
+        if (ImGui::Selectable(summary.text.c_str())) {
+            clicked = summary.who;
+        }
+        if (ImGui::IsItemHovered()) {
+            ImGui::SetTooltip("%s назад", time);
+        }
+        ImGui::PopID();
+    }
+    if (clicked != kInvalidId) {
+        enabled_ = false; // пользователь выбрал своё
+        inspector.select(clicked);
     }
 }
 

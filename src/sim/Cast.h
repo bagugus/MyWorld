@@ -119,6 +119,11 @@ private:
     std::unordered_map<Pair, Link, PairHash> links_;
 };
 
+// Вес события биографии для участника who (по виду события и роли в нём;
+// 0 — не участник или событие незначимо). Им же пользуются подписи
+// режиссёра: что важного случилось с героем.
+float chronicleWeight(const ChronicleEvent& event, EntityId who);
+
 const char* heroStatusName(HeroStatus status);
 
 } // namespace lw
