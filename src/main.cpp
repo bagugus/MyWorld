@@ -3,7 +3,7 @@
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
-//                [--pose-gallery [ROW]] [--interior ID [YAW]]
+//                [--pose-gallery [ROW]] [--interior ID [YAW]] [--compose SENSE [ID [OTHER]]]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -36,6 +36,10 @@
 //               человека ID; 0 — дом, где сейчас больше всего людей не спит), курс YAW
 //               (градусы, как у --orbit), жильцы — по своим местам; посмотреть
 //               планировку, мебель и свет, не дожидаясь сцены дома в сериале
+// --compose     приём кинокамеры (этап 12а.12) на человека ID (и второго OTHER), не
+//               дожидаясь такой сцены в сериале: SENSE — daily, pan, talk, chase, fight,
+//               ambush, threat, menace, grief, helpless, family; без ID — самая близкая
+//               пара на улице (для ambush, threat, chase — человек и ближайший зомби)
 
 #include "render/CameraController.h"
 #include "render/Palette.h"
@@ -53,7 +57,10 @@
 #include "ui/Director.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
+#include "ui/CinemaCamera.h"
+#include "ui/Composition.h"
 #include "ui/PathTool.h"
+#include "ui/Showrunner.h"
 #include "ui/Ui.h"
 
 #include <raylib.h>
@@ -148,6 +155,114 @@ void showInterior(const lw::World& world, lw::WorldRenderer3D& renderer, lw::Cam
     camera.setCinemaShot(shot);
 }
 
+// --compose: смысл сцены, который снимает кинокамера.
+struct ComposeRequest {
+    lw::ui::SceneSense sense = lw::ui::SceneSense::Daily;
+    bool pan = false;
+    bool menace = false;
+    lw::EntityId hero = 0;
+    lw::EntityId other = 0;
+};
+
+std::optional<ComposeRequest> parseCompose(const char* name) {
+    using lw::ui::SceneSense;
+    const std::pair<const char*, SceneSense> names[] = {
+        {"daily", SceneSense::Daily},       {"pan", SceneSense::Daily},     {"talk", SceneSense::Talk},
+        {"chase", SceneSense::Chase},       {"fight", SceneSense::Fight},   {"ambush", SceneSense::Ambush},
+        {"threat", SceneSense::Threat},     {"menace", SceneSense::Threat}, {"grief", SceneSense::Grief},
+        {"helpless", SceneSense::Helpless}, {"family", SceneSense::Family}};
+    for (const auto& [text, sense] : names) {
+        if (std::strcmp(name, text) == 0) {
+            ComposeRequest request;
+            request.sense = sense;
+            request.pan = std::strcmp(name, "pan") == 0;
+            request.menace = std::strcmp(name, "menace") == 0;
+            return request;
+        }
+    }
+    return std::nullopt;
+}
+
+// Без ID: самая близкая пара на улице — двое живых людей, а для засады, угрозы и
+// погони — человек и зомби; для панорамы — идущий.
+void pickComposeCast(const lw::World& world, ComposeRequest& request) {
+    const entt::registry& registry = world.registry();
+    const bool zombie = request.sense == lw::ui::SceneSense::Ambush || request.sense == lw::ui::SceneSense::Chase ||
+                        (request.sense == lw::ui::SceneSense::Threat && !request.menace);
+    const bool alone = request.pan || request.sense == lw::ui::SceneSense::Daily ||
+                       request.sense == lw::ui::SceneSense::Grief || request.sense == lw::ui::SceneSense::Helpless;
+    const lw::EntityId wantedHero = request.hero;
+    float best = 1e9f;
+    for (const auto [entity, person, id, at] :
+         registry.view<const lw::Person, const lw::Id, const lw::Position>().each()) {
+        if (person.indoors || person.asleep || registry.any_of<lw::Zombie, lw::Corpse>(entity)) {
+            continue;
+        }
+        if (wantedHero != 0 && id.value != wantedHero) {
+            continue;
+        }
+        if (alone) {
+            // Для панорамы — идущий, для остального — стоящий; иначе первый.
+            const auto* velocity = registry.try_get<lw::Velocity>(entity);
+            const bool moving = velocity != nullptr && std::hypot(velocity->x, velocity->y) > 0.5f;
+            const float score = moving == request.pan ? 0.0f : 1.0f;
+            if (score < best) {
+                best = score;
+                request.hero = id.value;
+            }
+            continue;
+        }
+        world.spatial().forEachInRadius(at.x, at.y, 60.0f, [&](const lw::SpatialHit& hit) {
+            if (hit.id == id.value || registry.all_of<lw::Corpse>(hit.entity)) {
+                return;
+            }
+            const bool isZombie = registry.all_of<lw::Zombie>(hit.entity);
+            const auto* other = registry.try_get<lw::Person>(hit.entity);
+            if (zombie ? !isZombie : (isZombie || other == nullptr || other->indoors)) {
+                return;
+            }
+            if (request.other != 0 && hit.id != request.other) {
+                return;
+            }
+            const float d = std::sqrt(hit.distanceSq);
+            if (d < best) {
+                best = d;
+                request.hero = id.value;
+                request.other = hit.id;
+            }
+        });
+    }
+    TraceLog(LOG_INFO, "COMPOSE: %s, hero %llu, other %llu (%.1f)", lw::ui::sceneSenseTitle(request.sense),
+             static_cast<unsigned long long>(request.hero), static_cast<unsigned long long>(request.other), best);
+}
+
+// Кадр кинокамеры по приёму из --compose.
+void showCompose(const lw::World& world, const ComposeRequest& request, lw::ui::CinemaCamera& cinema,
+                 lw::CameraController& camera, std::optional<float> heading, float alpha, float dt) {
+    lw::ui::ShotPlan plan;
+    if (!lw::ui::positionOf(world, request.hero, alpha, plan.subject)) {
+        return;
+    }
+    plan.valid = true;
+    plan.subjectId = request.hero;
+    plan.sense = request.sense;
+    plan.size = lw::ui::ShotSize::Close;
+    if (request.other != 0 && lw::ui::positionOf(world, request.other, alpha, plan.other)) {
+        plan.otherId = request.other;
+        plan.size = lw::ui::ShotSize::Medium;
+        plan.extra.push_back(plan.other);
+    }
+    const lw::ui::SceneReading reading = lw::ui::readScene(world, request.hero);
+    plan.moving = reading.moving || request.pan;
+    plan.move = reading.moving ? Vector2{reading.moveX, reading.moveY} : Vector2{1.0f, 0.0f};
+    plan.panic = request.sense == lw::ui::SceneSense::Chase || reading.panic;
+    plan.menacing = request.menace;
+    if (camera.mode() != lw::ViewMode::Cinema) {
+        camera.setMode(lw::ViewMode::Cinema);
+    }
+    cinema.update(camera, plan, heading, false, false, dt);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -168,6 +283,7 @@ int main(int argc, char** argv) {
     std::optional<int> poseGallery; // --pose-gallery [ROW]: витрина поз
     std::optional<lw::EntityId> interiorId; // --interior ID [YAW]: комнаты здания
     float interiorYaw = 30.0f;
+    std::optional<ComposeRequest> compose; // --compose SENSE [ID [OTHER]]: приём кинокамеры
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
@@ -225,6 +341,14 @@ int main(int argc, char** argv) {
                 poseGallery = std::atoi(argv[++i]);
             }
             view3d = true;
+        } else if (std::strcmp(argv[i], "--compose") == 0 && i + 1 < argc) {
+            compose = parseCompose(argv[++i]);
+            if (compose && i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0]))) {
+                compose->hero = std::strtoull(argv[++i], nullptr, 10);
+                if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0]))) {
+                    compose->other = std::strtoull(argv[++i], nullptr, 10);
+                }
+            }
         } else if (std::strcmp(argv[i], "--interior") == 0 && i + 1 < argc) {
             interiorId = std::strtoull(argv[++i], nullptr, 10);
             if (i + 1 < argc && (std::isdigit(static_cast<unsigned char>(argv[i + 1][0])) != 0 || argv[i + 1][0] == '-') &&
@@ -310,6 +434,7 @@ int main(int argc, char** argv) {
             storyDirector.requestSeries(true); // сериал сам включает режиссёра, Esc — выключает
         }
 
+        lw::ui::CinemaCamera composer; // --compose
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
         for (int frame = 0; !WindowShouldClose(); ++frame) {
@@ -343,6 +468,13 @@ int main(int argc, char** argv) {
                 static std::pair<lw::EntityId, lw::EntityId> target = interiorTarget(world, *interiorId);
                 showInterior(world, renderer3d, camera, target, interiorYaw, frame == 0);
             }
+            if (compose && !series) {
+                if (frame == 0) {
+                    pickComposeCast(world, *compose);
+                    composer.reset();
+                }
+                showCompose(world, *compose, composer, camera, renderer3d.drawnHeading(compose->hero), alpha, dt);
+            }
             camera.setSubject(subject);
             if (frame == 0 && startView && !series) {
                 camera.setMode(*startView); // из-за плеча — когда выбранный уже известен
@@ -364,6 +496,11 @@ int main(int argc, char** argv) {
             } else if (camera.is3d()) {
                 ClearBackground(lw::kSkyColor);
                 renderer3d.setHighlight(series ? lw::kInvalidId : inspector.selected()); // в кино меток нет
+                // Цвет кадра по настроению сцены (12а.12): только в сериале.
+                const lw::ui::ColorGrade grade =
+                    compose && !series ? lw::ui::gradeOf(composer.sense(), false, 0.0f) : storyDirector.grade();
+                renderer3d.setGrade({{grade.tintR, grade.tintG, grade.tintB}, grade.desaturate, grade.contrast,
+                                     grade.vignette});
                 renderer3d.draw(world, camera, alpha);
             } else {
                 ClearBackground({16, 18, 22, 255});

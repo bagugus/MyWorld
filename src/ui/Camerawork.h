@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Id.h"
+#include "ui/Composition.h"
 
 #include <raylib.h>
 
@@ -59,6 +60,21 @@ struct ShotPlan {
     Vector4 room{};
     std::optional<float> facing;
     std::uint64_t stage = 0;
+    // Двери из комнаты героя в соседние (середины проёмов, мир x, z): кадр
+    // «через проём» — камера в соседней комнате (12а.12). Только кинокамера.
+    std::vector<Vector2> doorways;
+
+    // Смысл сцены (12а.12, ui/Composition): от него — ракурс, план и движение
+    // камеры. other — с кем сцена (собеседник, преследователь, угроза), panic —
+    // голландский угол, menacing — герой сам угроза (нижний ракурс), moving и
+    // move — куда идёт. Только кинокамера.
+    SceneSense sense = SceneSense::Daily;
+    EntityId otherId = kInvalidId;
+    Vector2 other{};
+    bool panic = false;
+    bool menacing = false;
+    bool moving = false;
+    Vector2 move{};
 };
 
 class Camerawork {

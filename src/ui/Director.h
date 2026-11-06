@@ -98,6 +98,8 @@ public:
     // Кадр сейчас целиком чёрный и мир мотается скачком (12а.10): main не
     // рисует мир — смотреть не на что, а промотка идёт быстрее.
     bool blind() const;
+    // Цвет кадра по настроению сцены (12а.12): только в сериале, иначе нулевой.
+    const ColorGrade& grade() const { return grade_; }
     // Можно ли на время сериала разворачивать окно во весь экран (не при снимке).
     void setFullscreenAllowed(bool allowed) { fullscreenAllowed_ = allowed; }
     // Комнаты зданий для сцен дома (12а.14): герой сериала дома — режиссёр
@@ -299,6 +301,9 @@ private:
     float seriesClock_ = 0.0f;       // реальные секунды с начала сериала
     float bars_ = 0.0f;              // насколько выехали полосы, 0..1
     CinemaCamera cinema_;
+    ColorGrade grade_{}; // цвет кадра сейчас: плавно идёт к настроению сцены
+    const char* loggedFraming_ = nullptr; // что писали в лог последним
+    SceneSense loggedSense_ = SceneSense::Count;
     InteriorStage* interiors_ = nullptr;
     mutable EntityId establishing_ = kInvalidId; // поселение для общего плана
 

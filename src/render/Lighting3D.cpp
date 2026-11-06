@@ -34,6 +34,11 @@ uniform mat4 lightVP;
 uniform float shadowStrength;
 uniform float shadowTexel; // метров на тексель карты теней
 uniform float shadowRange; // глубина проекции света, метров
+// Цвет кадра по настроению (кино, этап 12а.12): rgb — добавка к единице по
+// каналам, a — доля серого; x — контраст, y — виньетка, zw — размер экрана в
+// пикселях (0 — без цвета кадра).
+uniform vec4 gradeTint;
+uniform vec4 gradeFrame;
 
 // 1 — точка на свету, меньше — в тени. n — нормаль поверхности.
 float shadowAt(vec3 p, vec3 n) {
@@ -80,10 +85,27 @@ vec3 lighting(vec3 n, float shadow) {
     return ambient + lightColor * max(dot(n, lightDir), 0.0) * shadow;
 }
 
+// Цвет кадра: выцветание, оттенок, контраст (S-кривая) и тёмные углы.
+vec3 graded(vec3 c) {
+    if (gradeFrame.z <= 0.0) {
+        return c;
+    }
+    float luma = dot(c, vec3(0.299, 0.587, 0.114));
+    c = mix(c, vec3(luma), gradeTint.a);
+    c *= vec3(1.0) + gradeTint.rgb;
+    vec3 s = clamp(c, 0.0, 1.0);
+    c = mix(c, s * s * (3.0 - 2.0 * s), gradeFrame.x);
+    float aspect = gradeFrame.z / max(gradeFrame.w, 1.0);
+    vec2 uv = (gl_FragCoord.xy / gradeFrame.zw - 0.5) * vec2(aspect, 1.0);
+    float r = length(uv) / length(vec2(0.5 * aspect, 0.5));
+    c *= 1.0 - gradeFrame.y * smoothstep(0.35, 1.05, r);
+    return max(c, vec3(0.0));
+}
+
 // Дымка и туман: дальнее тонет в цвете горизонта.
 vec3 withFog(vec3 color, vec3 p) {
     float distance = length(p - viewPos);
-    return mix(color, fogColor, 1.0 - exp(-fogDensity * distance));
+    return graded(mix(color, fogColor, 1.0 - exp(-fogDensity * distance)));
 }
 )";
 
@@ -251,7 +273,7 @@ void main() {
 
     // Дымка и туман у горизонта гуще: путь сквозь нижний слой воздуха длиннее.
     float fog = 1.0 - exp(-fogDensity * 1000.0 / max(dir.y + 0.08, 0.08));
-    finalColor = vec4(mix(sky, fogColor, clamp(fog, 0.0, 1.0)), 1.0);
+    finalColor = vec4(graded(mix(sky, fogColor, clamp(fog, 0.0, 1.0))), 1.0);
 }
 )";
 
@@ -398,6 +420,14 @@ void SceneShading::apply(const Shader& shader) const {
     setFloat(shader, "shadowTexel", 2.0f * shadowRadius_ / static_cast<float>(kShadowSize));
     setFloat(shader, "shadowRange", shadowRange_);
     SetShaderValueMatrix(shader, GetShaderLocation(shader, "lightVP"), lightViewProj_);
+    const float tint[4] = {grade_.tint.x, grade_.tint.y, grade_.tint.z, grade_.desaturate};
+    const bool graded = grade_.desaturate > 0.0f || grade_.contrast > 0.0f || grade_.vignette > 0.0f ||
+                        Vector3Length(grade_.tint) > 0.0f;
+    const float frame[4] = {grade_.contrast, grade_.vignette,
+                            graded ? static_cast<float>(GetRenderWidth()) : 0.0f,
+                            graded ? static_cast<float>(GetRenderHeight()) : 0.0f};
+    SetShaderValue(shader, GetShaderLocation(shader, "gradeTint"), tint, SHADER_UNIFORM_VEC4);
+    SetShaderValue(shader, GetShaderLocation(shader, "gradeFrame"), frame, SHADER_UNIFORM_VEC4);
 }
 
 bool SceneShading::beginShadowPass(Vector3 center, float radius) {

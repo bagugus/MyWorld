@@ -832,6 +832,7 @@ void CameraController::updateShoulder(float dt, bool mouseFree) {
 }
 
 void CameraController::refresh() {
+    camera3d_.up = {0.0f, 1.0f, 0.0f}; // кинокамера может наклонить кадр (голландский угол)
     switch (mode_) {
     case ViewMode::TopDown:
         refreshTopDown();
@@ -849,7 +850,6 @@ void CameraController::refresh() {
         refreshCinema();
         break;
     }
-    camera3d_.up = {0.0f, 1.0f, 0.0f};
     camera3d_.fovy = fovY();
     camera3d_.projection = CAMERA_PERSPECTIVE;
 }
@@ -1164,6 +1164,14 @@ void CameraController::updateCinema(float dt) {
         cinema_.pitch = lerp(cinema_.pitch, cinemaGoal_.pitch, t);
         cinema_.distance = lerpLog(std::max(cinema_.distance, 0.1f), std::max(cinemaGoal_.distance, 0.1f), t);
         cinema_.fovY = lerp(cinema_.fovY, cinemaGoal_.fovY, t);
+        // Место на экране и наклон — своей плавностью: кадр не дёргается, когда
+        // герой оглянулся, но и не отстаёт от склейки.
+        const float tf = cinemaGoal_.frameSmoothing <= 1e-4f ? 1.0f
+                                                             : 1.0f - std::exp(-dt / cinemaGoal_.frameSmoothing);
+        cinema_.frameX = lerp(cinema_.frameX, cinemaGoal_.frameX, tf);
+        cinema_.frameY = lerp(cinema_.frameY, cinemaGoal_.frameY, tf);
+        cinema_.roll = lerp(cinema_.roll, cinemaGoal_.roll, tf);
+        cinema_.frameSmoothing = cinemaGoal_.frameSmoothing;
         cinema_.smoothing = cinemaGoal_.smoothing;
     }
     cinema_.pitch = std::clamp(cinema_.pitch, kCinemaMinPitch, kCinemaMaxPitch);
@@ -1272,6 +1280,31 @@ void CameraController::refreshCinema() {
     }
     camera3d_.position = eye;
     camera3d_.target = target;
+    // Композиция (этап 12а.12): точка взгляда — не в середине экрана, а на
+    // frameX, frameY (доли ширины и высоты от середины) — камера чуть
+    // поворачивается от неё; наклон кадра — поворот «верха» вокруг оси взгляда.
+    const Vector3 toTarget = Vector3Subtract(target, eye);
+    const float reachTarget = Vector3Length(toTarget);
+    if (reachTarget > 1e-3f) {
+        const Vector3 forward = Vector3Scale(toTarget, 1.0f / reachTarget);
+        Vector3 right = Vector3CrossProduct(forward, {0.0f, 1.0f, 0.0f});
+        right = Vector3Length(right) < 1e-4f ? Vector3{1.0f, 0.0f, 0.0f} : Vector3Normalize(right);
+        const Vector3 up = Vector3CrossProduct(right, forward);
+        if (std::abs(cinema_.frameX) > 1e-4f || std::abs(cinema_.frameY) > 1e-4f) {
+            const float tanV = std::tan(std::clamp(cinema_.fovY, 8.0f, 90.0f) * 0.5f * DEG2RAD);
+            const float aspect =
+                static_cast<float>(GetScreenWidth()) / std::max(1.0f, static_cast<float>(GetScreenHeight()));
+            const float sx = 2.0f * cinema_.frameX * tanV * aspect;
+            const float sy = 2.0f * cinema_.frameY * tanV;
+            const Vector3 look = Vector3Normalize(
+                Vector3Subtract(forward, Vector3Add(Vector3Scale(right, sx), Vector3Scale(up, sy))));
+            camera3d_.target = Vector3Add(eye, Vector3Scale(look, reachTarget));
+        }
+        if (std::abs(cinema_.roll) > 1e-3f) {
+            const float roll = cinema_.roll * DEG2RAD;
+            camera3d_.up = Vector3Add(Vector3Scale(up, std::cos(roll)), Vector3Scale(right, std::sin(roll)));
+        }
+    }
 
     setClipPlanes(cinema_.indoor ? 0.05 : std::min(0.04 * distance, 4.0));
     camera_.offset = screenCenter();

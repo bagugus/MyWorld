@@ -80,6 +80,8 @@ public:
     static constexpr float kNearTreeRange = 350.0f;
     // Выбранный в инспекторе: виден на любой дальности, над ним — метка.
     void setHighlight(EntityId id) { highlight_ = id; }
+    // Цвет кадра по настроению (режим «Сериал», этап 12а.12); нулевой — как есть.
+    void setGrade(const SceneShading::Grade& grade) { shading_.setGrade(grade); }
     // Куда обращено существо на экране (atan2(dx, dy), сглаженный поворот модели);
     // нет — если оно не рисовалось в прошлом кадре. Для вида из-за плеча.
     std::optional<float> drawnHeading(EntityId id) const { return animator_.heading(id); }
