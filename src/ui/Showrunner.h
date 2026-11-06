@@ -3,6 +3,7 @@
 #include "sim/Foresight.h"
 #include "sim/Id.h"
 #include "ui/Camerawork.h"
+#include "ui/Narrator.h"
 
 #include <raylib.h>
 
@@ -109,6 +110,7 @@ struct ShowInput {
     const std::vector<StoryPick>* picks = nullptr; // кандидаты по убыванию интересности
     bool refreshed = false; // кандидаты пересчитаны в этом кадре
     StoryPick current;      // кого показывает режиссёр
+    EntityId shown = kInvalidId; // о ком титр внизу кадра (рассказчик, 12а.13)
     bool lost = false;      // предвестие без линии сбылось или сорвалось
     float lostFor = 0.0f;   // сколько секунд с тех пор
     float currentInterest = 0.0f;
@@ -170,6 +172,8 @@ public:
     // Подпись монтажа слева вверху: «Тем временем…», «Передышка»; пусто — нет.
     std::string label() const;
     int episode() const { return episode_; }
+    // Голос за кадром (12а.13): знакомство, мотив сцены, связки, характер.
+    const Narrator& narrator() const { return narrator_; }
     // Строка для окна режиссёра: что сейчас делает шоураннер.
     std::string status() const;
     // Титры шоураннера прямо на кадре: карточки на чёрном, место и время,
@@ -394,6 +398,8 @@ private:
     std::string dayLine_;                // «День 9 · вечер»
     StoryPick cliff_;
     std::uint64_t lastDay_ = 0;          // день последнего вводного титра
+
+    Narrator narrator_; // рассказчик (12а.13)
 
     // Сцена.
     Scene scene_;
