@@ -150,6 +150,10 @@ if(LW_BUILD_APP)
         src/render/CameraController.h
         src/render/FieldLayout.cpp
         src/render/FieldLayout.h
+        src/render/Interior.cpp
+        src/render/Interior.h
+        src/render/InteriorStage.cpp
+        src/render/InteriorStage.h
         src/render/LandUse.cpp
         src/render/LandUse.h
         src/render/Lighting.cpp
@@ -230,4 +234,11 @@ if(LW_BUILD_TESTS)
     )
     target_link_libraries(lw_animation_tests PRIVATE lw_sim lw_options)
     add_test(NAME animation COMMAND lw_animation_tests)
+    # Комнаты внутри зданий (этап 12а.14) — без графики: планировка и рассадка.
+    add_executable(lw_interior_tests
+        tests/interior_test.cpp
+        src/render/Interior.cpp
+    )
+    target_link_libraries(lw_interior_tests PRIVATE lw_sim lw_options)
+    add_test(NAME interior COMMAND lw_interior_tests)
 endif()

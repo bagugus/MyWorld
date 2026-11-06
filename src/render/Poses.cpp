@@ -401,6 +401,72 @@ HumanPose lieBack(float t, std::uint32_t seed) {
     return p;
 }
 
+HumanPose sitChair(float t, std::uint32_t seed) {
+    HumanPose p = relaxed();
+    p.seat = kChairSeat;
+    p.leftLeg = leg(1.5f, 0.08f, 1.5f);
+    p.rightLeg = leg(1.5f, 0.08f, 1.5f);
+    if (unit(seed, 21) < 0.35f) {
+        p.rightLeg = leg(1.3f, 0.05f, 1.05f); // нога вытянута вперёд
+    }
+    p.lean = 0.06f;
+    p.leftArm = arm(0.5f, 0.04f, 1.1f);
+    p.rightArm = arm(0.5f, 0.04f, 1.1f);
+    p.headYaw = 0.25f * std::sin(t * 0.17f + 6.0f * unit(seed, 22));
+    p.headPitch = 0.05f + 0.03f * std::sin(t * 0.3f);
+    return p;
+}
+
+HumanPose sitSofa(float t, std::uint32_t seed) {
+    HumanPose p = relaxed();
+    p.seat = kSofaSeat;
+    p.leftLeg = leg(1.3f, 0.12f, 1.15f);
+    p.rightLeg = leg(1.3f, 0.12f, 1.15f);
+    if (unit(seed, 23) < 0.4f) {
+        p.rightLeg = leg(1.55f, -0.12f, 1.25f); // нога на ногу
+    }
+    p.lean = -0.2f;
+    p.leftArm = arm(0.2f, 0.4f, 0.8f); // на подлокотнике
+    p.rightArm = arm(0.55f, 0.0f, 1.0f);
+    p.headYaw = 0.2f * std::sin(t * 0.11f + 6.0f * unit(seed, 24));
+    p.headPitch = -0.05f;
+    return p;
+}
+
+HumanPose eatTable(float t) {
+    HumanPose p = sitChair(t, 0);
+    // Локти на столе, ложку — ко рту.
+    const float cycle = std::fmod(t, 3.6f);
+    const float e = smooth(cycle / 0.6f) * (1.0f - smooth((cycle - 1.3f) / 0.6f));
+    p.leftArm = arm(0.75f, -0.05f, 1.0f);
+    p.rightArm = arm(lerpf(0.75f, 1.05f, e), lerpf(-0.05f, -0.25f, e), lerpf(1.0f, 2.3f, e));
+    p.lean = 0.18f;
+    p.headPitch = lerpf(0.2f, 0.0f, e) + 0.03f * std::sin(t * 9.0f);
+    return p;
+}
+
+HumanPose talkSeated(float t, std::uint32_t seed) {
+    HumanPose p = sitChair(t, seed);
+    const HumanPose up = talk(t, seed, 0.45f);
+    p.rightArm = up.rightArm;
+    p.leftArm = arm(0.7f, -0.05f, 1.0f);
+    p.headYaw = up.headYaw;
+    p.headPitch = up.headPitch;
+    p.headTilt = up.headTilt;
+    p.lean = 0.12f;
+    return p;
+}
+
+HumanPose bandageSeated(float t) {
+    HumanPose p = sitChair(t, 0);
+    const HumanPose up = bandage(t);
+    p.leftArm = up.leftArm;
+    p.rightArm = up.rightArm;
+    p.lean = 0.3f;
+    p.headPitch = 0.4f;
+    return p;
+}
+
 HumanPose leanWall(float t, std::uint32_t seed) {
     HumanPose p = stand(t, seed);
     p.bodyPitch = 0.12f;

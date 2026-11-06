@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/Animator.h"
+#include "render/InteriorStage.h"
 #include "render/LandUse.h"
 #include "render/Lighting3D.h"
 #include "render/Props3D.h"
@@ -88,6 +89,14 @@ public:
     // LandUse раскладывает дворы, заборы, столбы и мостки.
     const std::vector<BoundingBox>& buildingBounds() const { return buildingBounds_; }
     void updateBuildingBounds(const World& world);
+    // Здание, открытое для кинокамеры (этап 12а.14): его режиссёр открывает,
+    // когда герой сцены дома, — тогда вместо коробки снаружи рисуются комнаты,
+    // жильцы сидят и лежат по местам, стены между камерой и героем спрятаны,
+    // вечером горят лампы.
+    InteriorStage& interiors() { return interior_; }
+    const InteriorStage& interiors() const { return interior_; }
+    // Камера внутри открытого здания: осадков на экране нет.
+    bool interiorView(const CameraController& camera) const;
 
 private:
     struct Part {
@@ -98,6 +107,9 @@ private:
 
     // Модель здания без облика сезона и мелочи: участок, земля под ним, дверь.
     BuildingModel buildingModel(const Building& building, EntityId id) const;
+    // Комната открытого здания: какие стены и мебель спрятать от камеры, горят
+    // ли лампы и какие из них светят.
+    void prepareInterior(const InteriorLayout& layout, Vector3 eye, const SceneLight& light);
     // Снежный покров для облика: погода или сезон вручную.
     float snowCover(const World& world) const;
     // Здания, мосты, существа, тела, грузы и вороны — в открытый rlBegin(RL_QUADS).
@@ -108,6 +120,10 @@ private:
     Terrain3D terrain_;
     Trees3D trees_;
     Props3D props_;
+    InteriorStage interior_;
+    std::vector<bool> hiddenWalls_;
+    std::vector<bool> hiddenFurniture_;
+    bool lampsOn_ = false;
     SceneShading shading_;
     std::vector<Part> bridgeParts_; // перила и опоры мостов: не меняются
     // Позы и движения существ (этап 12а.11): раз за кадр, второй проход

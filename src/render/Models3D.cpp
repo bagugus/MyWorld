@@ -77,6 +77,8 @@ Vector3 applyJoint(const Joint* joint, Vector3 p) {
 float gDissolve = 0.0f;
 // Все следующие грани светятся сами (значки эмоций).
 bool gGlow = false;
+// Все следующие грани — внутри помещения (12а.14).
+bool gIndoor = false;
 
 // Грани коробки.
 enum Faces : unsigned { kTop = 1u, kBottom = 2u, kSides = 4u, kAll = 7u };
@@ -114,7 +116,7 @@ public:
             Vector3Normalize(Vector3CrossProduct(Vector3Subtract(wb, wa), Vector3Subtract(wc, wa)));
         // Освещает шейдер (render/Lighting3D) по нормали грани.
         rlNormal3f(normal.x, normal.y, normal.z);
-        rlTexCoord2f(glow || gGlow ? 1.0f : 0.0f, gDissolve);
+        rlTexCoord2f(glow || gGlow ? 1.0f : gIndoor ? 2.0f : 0.0f, gDissolve);
         rlColor4ub(color.r, color.g, color.b, color.a);
         rlVertex3f(wa.x, wa.y, wa.z);
         rlVertex3f(wb.x, wb.y, wb.z);
@@ -701,7 +703,141 @@ void emitGableRoof(const Emitter& e, const Layout& layout, Color wall, Color roo
     e.quad({-hx, top, -hz}, {-hx, top, hz}, {-hx, yr, 0.0f}, {-hx, yr, 0.0f}, wall);
 }
 
+// Проём в осях модели: дверь или окно на стене side.
+struct LocalOpening {
+    Side side = Side::PlusZ;
+    float a0 = 0.0f;
+    float a1 = 0.0f;
+    float y0 = 0.0f;
+    float y1 = 0.0f;
+    int storey = 0;
+    bool door = false;
+    std::uint64_t bits = 0; // хеш окна: светится ли ночью
+};
+
+// Дверь и окна по этажам: равными промежутками, на первом этаже — не над дверью.
+std::vector<LocalOpening> localOpenings(const BuildingModel& model, const Shape& shape, const Layout& layout) {
+    std::vector<LocalOpening> result;
+    const float hx = layout.hx;
+    const float hz = layout.hz;
+    // Дверь: в какой стене и где вдоль неё (в осях модели).
+    const float dx = model.door.x - layout.frame.origin.x;
+    const float dz = model.door.y - layout.frame.origin.z;
+    const float lx = layout.frame.yaw == 0.0f ? dx : -dz;
+    const float lz = layout.frame.yaw == 0.0f ? dz : dx;
+    Side doorSide = Side::PlusZ;
+    float doorAlong = lx;
+    if (std::abs(lz) >= hz - 0.05f) {
+        doorSide = lz > 0.0f ? Side::PlusZ : Side::MinusZ;
+    } else {
+        doorSide = lx > 0.0f ? Side::PlusX : Side::MinusX;
+        doorAlong = lz;
+    }
+    const float doorHalf = shape.doorWidth * 0.5f;
+    result.push_back({doorSide, doorAlong - doorHalf, doorAlong + doorHalf, layout.floor,
+                      layout.floor + shape.doorHeight, 0, true, 0});
+    if (!shape.windows) {
+        return result;
+    }
+    const float windowHalf = shape.windowWidth * 0.5f;
+    const bool shop = model.kind == BuildingKind::Shop;
+    for (const Side side : {Side::PlusZ, Side::MinusZ, Side::PlusX, Side::MinusX}) {
+        const float length = side == Side::PlusZ || side == Side::MinusZ ? 2.0f * hx : 2.0f * hz;
+        const float spacing = shape.windowWidth + (shop ? 1.2f : 2.0f);
+        const int count = static_cast<int>((length - 1.0f) / spacing);
+        if (count < 1) {
+            continue;
+        }
+        const float gap = length / static_cast<float>(count);
+        for (int storey = 0; storey < shape.storeys; ++storey) {
+            const float base = layout.floor + static_cast<float>(storey) * shape.storey;
+            const float y0 = base + (shop ? 0.6f : 0.9f);
+            const float y1 = shop ? base + 2.8f : y0 + 1.3f;
+            for (int i = 0; i < count; ++i) {
+                const float along = -length * 0.5f + gap * (static_cast<float>(i) + 0.5f);
+                if (storey == 0 && side == doorSide && std::abs(along - doorAlong) < doorHalf + windowHalf + 0.2f) {
+                    continue;
+                }
+                const std::uint64_t bits = (model.seed >> 8) ^ (static_cast<std::uint64_t>(side) * 0x9E3779B1u) ^
+                                           (static_cast<std::uint64_t>(storey) * 0x85EBCA77u) ^
+                                           (static_cast<std::uint64_t>(i) * 0xC2B2AE3Du);
+                result.push_back({side, along - windowHalf, along + windowHalf, y0, y1, storey, false, bits});
+            }
+        }
+    }
+    return result;
+}
+
 } // namespace
+
+BuildingShell buildingShell(const BuildingModel& model) {
+    const Shape shape = shapeOf(model);
+    const Layout layout = layoutOf(model, shape);
+    BuildingShell shell;
+    shell.floor = layout.floor;
+    shell.storey = shape.storey;
+    shell.storeys = shape.storeys;
+    shell.wallTop = layout.wallTop;
+    return shell;
+}
+
+std::vector<WallOpening> buildingOpenings(const BuildingModel& model) {
+    const Shape shape = shapeOf(model);
+    const Layout layout = layoutOf(model, shape);
+    const float ox = layout.frame.origin.x;
+    const float oz = layout.frame.origin.z;
+    const bool turned = layout.frame.yaw != 0.0f;
+    std::vector<WallOpening> result;
+    for (const LocalOpening& local : localOpenings(model, shape, layout)) {
+        WallOpening o;
+        o.door = local.door;
+        o.y0 = local.y0;
+        o.y1 = local.y1;
+        o.storey = local.storey;
+        // Оси модели → мира: без поворота — те же; повёрнутое на 90° — X модели
+        // идёт по −Z мира, Z модели — по +X мира.
+        switch (local.side) {
+        case Side::PlusZ:
+        case Side::MinusZ: {
+            const float sign = local.side == Side::PlusZ ? 1.0f : -1.0f;
+            if (!turned) {
+                o.alongX = true;
+                o.plane = oz + sign * layout.hz;
+                o.outward = sign;
+                o.a0 = ox + local.a0;
+                o.a1 = ox + local.a1;
+            } else {
+                o.alongX = false;
+                o.plane = ox + sign * layout.hz;
+                o.outward = sign;
+                o.a0 = oz - local.a1;
+                o.a1 = oz - local.a0;
+            }
+            break;
+        }
+        case Side::PlusX:
+        case Side::MinusX: {
+            const float sign = local.side == Side::PlusX ? 1.0f : -1.0f;
+            if (!turned) {
+                o.alongX = false;
+                o.plane = ox + sign * layout.hx;
+                o.outward = sign;
+                o.a0 = oz + local.a0;
+                o.a1 = oz + local.a1;
+            } else {
+                o.alongX = true;
+                o.plane = oz - sign * layout.hx;
+                o.outward = -sign;
+                o.a0 = ox + local.a0;
+                o.a1 = ox + local.a1;
+            }
+            break;
+        }
+        }
+        result.push_back(o);
+    }
+    return result;
+}
 
 float buildingTop(const BuildingModel& model) {
     const Shape shape = shapeOf(model);
@@ -759,22 +895,13 @@ void emitBuilding(const BuildingModel& model) {
         return;
     }
 
-    // Дверь: в какой стене и где вдоль неё (в осях модели).
-    const float dx = model.door.x - layout.frame.origin.x;
-    const float dz = model.door.y - layout.frame.origin.z;
-    const float lx = layout.frame.yaw == 0.0f ? dx : -dz;
-    const float lz = layout.frame.yaw == 0.0f ? dz : dx;
-    Side doorSide = Side::PlusZ;
-    float doorAlong = lx;
-    if (std::abs(lz) >= hz - 0.05f) {
-        doorSide = lz > 0.0f ? Side::PlusZ : Side::MinusZ;
-    } else {
-        doorSide = lx > 0.0f ? Side::PlusX : Side::MinusX;
-        doorAlong = lz;
-    }
+    // Дверь и окна — тем же списком, что и комнаты внутри (buildingOpenings).
+    const std::vector<LocalOpening> openings = localOpenings(model, shape, layout);
+    const LocalOpening& door = openings.front();
+    const Side doorSide = door.side;
+    const float doorAlong = (door.a0 + door.a1) * 0.5f;
     const float doorHalf = shape.doorWidth * 0.5f;
-    emitOnWall(e, layout, doorSide, doorAlong - doorHalf, doorAlong + doorHalf, layout.floor,
-               layout.floor + shape.doorHeight, mix(wall, shape.doorColor, model.detail));
+    emitOnWall(e, layout, doorSide, door.a0, door.a1, door.y0, door.y1, mix(wall, shape.doorColor, model.detail));
     if (model.doorGround < layout.floor - 0.15f) {
         // Крыльцо до земли у двери.
         emitAtWall(e, layout, doorSide, doorAlong - doorHalf - 0.3f, doorAlong + doorHalf + 0.3f, 1.0f,
@@ -787,40 +914,14 @@ void emitBuilding(const BuildingModel& model) {
         emitAtWall(e, layout, doorSide, doorAlong - 2.0f, doorAlong + 2.0f, 0.15f, y, y + 0.6f, sign);
     }
 
-    // Окна по этажам: равными промежутками, на первом этаже — не над дверью.
-    if (!shape.windows) {
-        return;
-    }
-    const float windowHalf = shape.windowWidth * 0.5f;
-    const bool shop = model.kind == BuildingKind::Shop;
-    for (const Side side : {Side::PlusZ, Side::MinusZ, Side::PlusX, Side::MinusX}) {
-        const float length = side == Side::PlusZ || side == Side::MinusZ ? 2.0f * hx : 2.0f * hz;
-        const float spacing = shape.windowWidth + (shop ? 1.2f : 2.0f);
-        const int count = static_cast<int>((length - 1.0f) / spacing);
-        if (count < 1) {
-            continue;
-        }
-        const float gap = length / static_cast<float>(count);
-        for (int storey = 0; storey < shape.storeys; ++storey) {
-            const float base = layout.floor + static_cast<float>(storey) * shape.storey;
-            const float y0 = base + (shop ? 0.6f : 0.9f);
-            const float y1 = shop ? base + 2.8f : y0 + 1.3f;
-            for (int i = 0; i < count; ++i) {
-                const float along = -length * 0.5f + gap * (static_cast<float>(i) + 0.5f);
-                if (storey == 0 && side == doorSide && std::abs(along - doorAlong) < doorHalf + windowHalf + 0.2f) {
-                    continue;
-                }
-                // Ночью светится часть окон — по хешу окна, одни и те же.
-                const std::uint64_t bits = (model.seed >> 8) ^ (static_cast<std::uint64_t>(side) * 0x9E3779B1u) ^
-                                           (static_cast<std::uint64_t>(storey) * 0x85EBCA77u) ^
-                                           (static_cast<std::uint64_t>(i) * 0xC2B2AE3Du);
-                const bool glow = model.lights > 0.0f &&
-                                  static_cast<float>((bits * 0x2545F4914F6CDD1DULL) >> 40 & 0xFFFFu) / 65535.0f <
-                                      model.lights;
-                emitOnWall(e, layout, side, along - windowHalf, along + windowHalf, y0, y1,
-                           glow ? shaded(kWindowLight, model.detail) : mix(wall, kGlassColor, model.detail), glow);
-            }
-        }
+    // Окна по этажам. Ночью светится часть окон — по хешу окна, одни и те же.
+    for (std::size_t i = 1; i < openings.size(); ++i) {
+        const LocalOpening& window = openings[i];
+        const bool glow = model.lights > 0.0f &&
+                          static_cast<float>((window.bits * 0x2545F4914F6CDD1DULL) >> 40 & 0xFFFFu) / 65535.0f <
+                              model.lights;
+        emitOnWall(e, layout, window.side, window.a0, window.a1, window.y0, window.y1,
+                   glow ? shaded(kWindowLight, model.detail) : mix(wall, kGlassColor, model.detail), glow);
     }
 }
 
@@ -852,6 +953,372 @@ void emitBeacon(Vector3 tip, float size, Color color) {
 
 void setModelFade(float visible) {
     gDissolve = 1.0f - std::clamp(visible, 0.0f, 1.0f);
+}
+
+void setModelIndoor(bool indoor) {
+    gIndoor = indoor;
+}
+
+// --- Комнаты внутри (этап 12а.14) ------------------------------------------------
+
+namespace {
+
+constexpr Color kCeilingColor = {226, 224, 216, 255};
+constexpr Color kFrameColor = {228, 228, 220, 255};
+constexpr Color kThresholdColor = {118, 98, 76, 255};
+constexpr Color kLampOn = {255, 226, 160, 255};
+constexpr Color kLampOff = {214, 204, 180, 255};
+constexpr Color kDarkColor = {40, 38, 36, 255};
+constexpr Color kBrassColor = {186, 156, 90, 255};
+constexpr Color kLinenColor = {232, 230, 220, 255};
+
+Color colorOf(Rgb c) {
+    return {c.r, c.g, c.b, 255};
+}
+
+// Брус стены по осям мира: грани со стороны lo и hi — своими обоями.
+void emitWallBox(const Emitter& e, bool alongX, Vector3 min, Vector3 max, Color lo, Color hi) {
+    const float x0 = min.x;
+    const float y0 = min.y;
+    const float z0 = min.z;
+    const float x1 = max.x;
+    const float y1 = max.y;
+    const float z1 = max.z;
+    const Color ends = mix(lo, hi, 0.5f);
+    const Color south = alongX ? hi : ends; // грань +Z
+    const Color north = alongX ? lo : ends; // грань −Z
+    const Color east = alongX ? ends : hi;  // грань +X
+    const Color west = alongX ? ends : lo;  // грань −X
+    e.quad({x0, y1, z0}, {x0, y1, z1}, {x1, y1, z1}, {x1, y1, z0}, ends);
+    e.quad({x0, y0, z0}, {x1, y0, z0}, {x1, y0, z1}, {x0, y0, z1}, ends);
+    e.quad({x0, y0, z1}, {x1, y0, z1}, {x1, y1, z1}, {x0, y1, z1}, south);
+    e.quad({x1, y0, z0}, {x0, y0, z0}, {x0, y1, z0}, {x1, y1, z0}, north);
+    e.quad({x1, y0, z1}, {x1, y0, z0}, {x1, y1, z0}, {x1, y1, z1}, east);
+    e.quad({x0, y0, z0}, {x0, y0, z1}, {x0, y1, z1}, {x0, y1, z0}, west);
+}
+
+// Коробка стены от a0 до a1 вдоль, по высоте от y0 до y1 (мир), поперёк — lo..hi.
+void emitWallPiece(const Emitter& e, const InteriorWall& wall, float a0, float a1, float y0, float y1) {
+    if (a1 - a0 < 1e-3f || y1 - y0 < 1e-3f) {
+        return;
+    }
+    const Vector3 min = wall.alongX ? Vector3{a0, y0, wall.lo} : Vector3{wall.lo, y0, a0};
+    const Vector3 max = wall.alongX ? Vector3{a1, y1, wall.hi} : Vector3{wall.hi, y1, a1};
+    emitWallBox(e, wall.alongX, min, max, colorOf(wall.colorLo), colorOf(wall.colorHi));
+}
+
+// Рама окна посреди толщины стены: подоконник, перекладины, средник.
+void emitWindowFrame(const Emitter& e, const InteriorWall& wall, const WallGap& gap, float floor) {
+    const float mid = (wall.lo + wall.hi) * 0.5f;
+    constexpr float t = 0.05f;
+    const auto bar = [&](float a0, float a1, float y0, float y1, float depth, Color color) {
+        const Vector3 min = wall.alongX ? Vector3{a0, floor + y0, mid - depth} : Vector3{mid - depth, floor + y0, a0};
+        const Vector3 max = wall.alongX ? Vector3{a1, floor + y1, mid + depth} : Vector3{mid + depth, floor + y1, a1};
+        e.box(min, max, color);
+    };
+    bar(gap.a0, gap.a1, gap.y0, gap.y0 + t, 0.16f, kFrameColor); // подоконник
+    bar(gap.a0, gap.a1, gap.y1 - t, gap.y1, 0.04f, kFrameColor);
+    bar(gap.a0, gap.a0 + t, gap.y0, gap.y1, 0.04f, kFrameColor);
+    bar(gap.a1 - t, gap.a1, gap.y0, gap.y1, 0.04f, kFrameColor);
+    const float c = (gap.a0 + gap.a1) * 0.5f;
+    bar(c - t * 0.5f, c + t * 0.5f, gap.y0, gap.y1, 0.04f, kFrameColor);
+    bar(gap.a0, gap.a1, gap.y0 + (gap.y1 - gap.y0) * 0.62f, gap.y0 + (gap.y1 - gap.y0) * 0.62f + t * 0.8f, 0.04f,
+        kFrameColor);
+}
+
+void emitWall(const Emitter& e, const InteriorWall& wall, float floor, float height, bool shadowPass) {
+    std::vector<WallGap> gaps = wall.gaps;
+    std::sort(gaps.begin(), gaps.end(), [](const WallGap& a, const WallGap& b) { return a.a0 < b.a0; });
+    const float y0 = floor - 0.02f;
+    const float y1 = floor + height + 0.02f;
+    float a = wall.a0;
+    for (const WallGap& gap : gaps) {
+        const float g0 = std::clamp(gap.a0, wall.a0, wall.a1);
+        const float g1 = std::clamp(gap.a1, wall.a0, wall.a1);
+        if (g1 <= a) {
+            continue;
+        }
+        emitWallPiece(e, wall, a, g0, y0, y1);
+        emitWallPiece(e, wall, g0, g1, y0, floor + gap.y0);
+        emitWallPiece(e, wall, g0, g1, floor + gap.y1, y1);
+        if (gap.window && !shadowPass) {
+            emitWindowFrame(e, wall, gap, floor);
+        }
+        a = g1;
+    }
+    emitWallPiece(e, wall, a, wall.a1, y0, y1);
+}
+
+// Книги на полке: корешки разной высоты и цвета.
+void emitBooks(const Emitter& e, float x0, float x1, float y, float depth, std::uint32_t seed) {
+    static constexpr Color kSpines[] = {{150, 48, 40, 255}, {50, 84, 130, 255}, {70, 110, 64, 255},
+                                        {180, 150, 80, 255}, {96, 60, 90, 255}, {200, 196, 180, 255}};
+    float x = x0 + 0.02f;
+    std::uint32_t s = seed | 1u;
+    while (x < x1 - 0.05f) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        const float w = 0.025f + static_cast<float>(s % 40u) / 1000.0f;
+        const float h = 0.16f + static_cast<float>((s >> 8) % 90u) / 1000.0f;
+        if ((s >> 20) % 7u == 0u) {
+            x += 0.1f; // пустое место
+            continue;
+        }
+        e.box({x, y, -depth * 0.45f}, {std::min(x + w, x1 - 0.02f), y + h, depth * 0.35f},
+              kSpines[(s >> 16) % std::size(kSpines)]);
+        x += w + 0.004f;
+    }
+}
+
+void emitFurniture(const Furniture& f, float floor, float ceiling, bool lampsOn, bool shadowPass) {
+    ModelFrame frame;
+    frame.origin = {f.x, floor + f.base, f.z};
+    frame.yaw = f.facing;
+    const Emitter e(frame);
+    const float w = f.width * 0.5f;
+    const float d = f.depth * 0.5f;
+    const float h = f.height;
+    const Color c = colorOf(f.color);
+    const Color dark = shaded(c, 0.7f);
+    const Color light = shaded(c, 1.15f);
+    const auto legs = [&](float x, float z, float top, float size, Color color) {
+        for (const float sx : {-1.0f, 1.0f}) {
+            for (const float sz : {-1.0f, 1.0f}) {
+                const float lx = sx * (x - size);
+                const float lz = sz * (z - size);
+                e.box({lx - size, 0.0f, lz - size}, {lx + size, top, lz + size}, color);
+            }
+        }
+    };
+    switch (f.kind) {
+    case FurnitureKind::Bed:
+        if (h < 0.6f) { // нары в камере
+            e.box({-w, 0.0f, -d}, {w, h, d}, c);
+            break;
+        }
+        e.box({-w, 0.0f, -d}, {w, 0.3f, d}, kWoodColor);
+        e.box({-w + 0.04f, 0.3f, -d + 0.06f}, {w - 0.04f, 0.5f, d - 0.04f}, kLinenColor);
+        e.box({-w + 0.02f, 0.42f, -d + 0.6f}, {w - 0.02f, 0.55f, d - 0.02f}, c);
+        if (!shadowPass) {
+            if (f.width > 1.2f) {
+                e.box({-w + 0.1f, 0.5f, -d + 0.12f}, {-0.05f, 0.6f, -d + 0.48f}, kLinenColor);
+                e.box({0.05f, 0.5f, -d + 0.12f}, {w - 0.1f, 0.6f, -d + 0.48f}, kLinenColor);
+            } else {
+                e.box({-w + 0.1f, 0.5f, -d + 0.12f}, {w - 0.1f, 0.6f, -d + 0.48f}, kLinenColor);
+            }
+        }
+        e.box({-w, 0.0f, -d}, {w, h, -d + 0.07f}, shaded(kWoodColor, 0.85f));
+        break;
+    case FurnitureKind::Table:
+        e.box({-w, h - 0.04f, -d}, {w, h, d}, c);
+        legs(w - 0.04f, d - 0.04f, h - 0.04f, 0.025f, dark);
+        break;
+    case FurnitureKind::Desk:
+        e.box({-w, h - 0.04f, -d}, {w, h, d}, c);
+        legs(w - 0.03f, d - 0.03f, h - 0.04f, 0.02f, {80, 80, 84, 255});
+        e.box({-w + 0.03f, h - 0.3f, d - 0.04f}, {w - 0.03f, h - 0.04f, d - 0.02f}, dark);
+        break;
+    case FurnitureKind::Chair:
+        e.box({-0.21f, 0.42f, -0.21f}, {0.21f, 0.46f, 0.21f}, c);
+        legs(0.2f, 0.2f, 0.42f, 0.02f, dark);
+        e.box({-0.21f, 0.46f, -0.22f}, {0.21f, h, -0.18f}, c);
+        break;
+    case FurnitureKind::Sofa:
+    case FurnitureKind::Armchair:
+        e.box({-w, 0.08f, -d}, {w, 0.42f, d}, c);
+        e.box({-w, 0.08f, -d}, {w, h, -d + 0.22f}, dark);
+        e.box({-w, 0.08f, -d}, {-w + 0.18f, 0.62f, d}, dark);
+        e.box({w - 0.18f, 0.08f, -d}, {w, 0.62f, d}, dark);
+        if (!shadowPass) {
+            e.box({-w + 0.18f, 0.42f, -d + 0.22f}, {w - 0.18f, 0.47f, d - 0.03f}, light);
+            legs(w - 0.04f, d - 0.04f, 0.08f, 0.03f, kDarkColor);
+        }
+        break;
+    case FurnitureKind::Wardrobe:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        if (!shadowPass) {
+            e.box({-0.006f, 0.05f, d}, {0.006f, h - 0.05f, d + 0.01f}, dark);
+            e.box({-0.08f, 1.0f, d}, {-0.05f, 1.15f, d + 0.03f}, kBrassColor);
+            e.box({0.05f, 1.0f, d}, {0.08f, 1.15f, d + 0.03f}, kBrassColor);
+        }
+        break;
+    case FurnitureKind::Counter:
+    case FurnitureKind::Stove:
+    case FurnitureKind::Sink: {
+        const bool tall = h > 0.95f; // прилавок, стойка
+        e.box({-w, 0.08f, -d}, {w, h - 0.04f, d}, c);
+        e.box({-w + 0.02f, 0.0f, -d}, {w - 0.02f, 0.08f, d - 0.06f}, kDarkColor);
+        const Color top = f.kind == FurnitureKind::Stove ? Color{56, 56, 58, 255}
+                          : tall                         ? shaded(c, 0.85f)
+                                                         : Color{166, 156, 140, 255};
+        e.box({-w, h - 0.04f, -d}, {w, h, d + 0.02f}, top);
+        if (shadowPass) {
+            break;
+        }
+        if (f.kind == FurnitureKind::Stove) {
+            for (const float bx : {-0.14f, 0.14f}) {
+                for (const float bz : {-0.12f, 0.12f}) {
+                    e.box({bx - 0.08f, h, bz - 0.08f}, {bx + 0.08f, h + 0.012f, bz + 0.08f}, kDarkColor);
+                }
+            }
+            e.box({-w + 0.06f, 0.2f, d}, {w - 0.06f, 0.65f, d + 0.01f}, {30, 30, 34, 255});
+        } else if (f.kind == FurnitureKind::Sink) {
+            e.box({-w + 0.08f, h - 0.035f, -d + 0.1f}, {w - 0.08f, h + 0.004f, d - 0.08f}, kSteelColor);
+            e.box({-0.02f, h, -d + 0.04f}, {0.02f, h + 0.25f, -d + 0.08f}, kSteelColor);
+        } else if (!tall) {
+            e.box({-0.004f, 0.12f, d}, {0.004f, h - 0.08f, d + 0.008f}, dark);
+        }
+        break;
+    }
+    case FurnitureKind::Fridge:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        if (!shadowPass) {
+            e.box({-w + 0.02f, h * 0.62f, d}, {w - 0.02f, h * 0.62f + 0.01f, d + 0.006f}, shaded(c, 0.75f));
+            e.box({w - 0.1f, h * 0.68f, d}, {w - 0.07f, h * 0.9f, d + 0.04f}, kSteelColor);
+        }
+        break;
+    case FurnitureKind::Shelf: {
+        e.box({-w, 0.0f, -d}, {-w + 0.03f, h, d}, c);
+        e.box({w - 0.03f, 0.0f, -d}, {w, h, d}, c);
+        e.box({-w, 0.0f, -d}, {w, h, -d + 0.02f}, dark);
+        const int boards = std::max(3, static_cast<int>(h / 0.4f));
+        for (int i = 0; i <= boards; ++i) {
+            const float y = std::min(h - 0.03f, static_cast<float>(i) * h / static_cast<float>(boards));
+            e.box({-w, y, -d}, {w, y + 0.03f, d}, c);
+            if (!shadowPass && i < boards) {
+                Emitter inner(frame);
+                emitBooks(inner, -w + 0.03f, w - 0.03f, y + 0.03f, f.depth, f.seed + static_cast<std::uint32_t>(i) * 977u);
+            }
+        }
+        break;
+    }
+    case FurnitureKind::Nightstand:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        if (!shadowPass) {
+            e.box({-w + 0.04f, h - 0.16f, d}, {w - 0.04f, h - 0.15f, d + 0.006f}, dark);
+            e.box({-0.06f, h, -0.06f}, {0.06f, h + 0.25f, 0.06f}, kLampOff);
+        }
+        break;
+    case FurnitureKind::TvStand:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        e.box({-0.55f, h, -0.06f}, {0.55f, h + 0.62f, 0.02f}, {22, 22, 24, 255});
+        break;
+    case FurnitureKind::Rug:
+        if (!shadowPass) {
+            e.box({-w, 0.0f, -d}, {w, h, d}, c, nullptr, kTop);
+            e.box({-w + 0.12f, h, -d + 0.12f}, {w - 0.12f, h + 0.002f, d - 0.12f}, shaded(c, 1.2f), nullptr, kTop);
+        }
+        break;
+    case FurnitureKind::Tub:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        if (!shadowPass) {
+            e.box({-w + 0.08f, h - 0.005f, -d + 0.08f}, {w - 0.08f, h + 0.002f, d - 0.08f}, {168, 186, 196, 255},
+                  nullptr, kTop);
+        }
+        break;
+    case FurnitureKind::Lamp: {
+        if (shadowPass) {
+            break;
+        }
+        // Шнур до потолка и абажур; горит — светится сам.
+        const float top = ceiling - frame.origin.y;
+        e.box({-0.01f, h, -0.01f}, {0.01f, top, 0.01f}, kDarkColor);
+        e.quad({-w, 0.0f, -d}, {w, 0.0f, -d}, {w, 0.0f, d}, {-w, 0.0f, d}, lampsOn ? kLampOn : kLampOff, nullptr,
+               lampsOn);
+        e.box({-w, 0.0f, -d}, {w, h, d}, lampsOn ? shaded(kLampOn, 0.9f) : kLampOff, nullptr, kSides | kTop);
+        break;
+    }
+    case FurnitureKind::Board:
+        e.box({-w - 0.05f, -0.05f, -d}, {w + 0.05f, h + 0.05f, d}, kWoodColor);
+        e.box({-w, 0.0f, -d}, {w, h, d + 0.01f}, c);
+        break;
+    case FurnitureKind::Bars: {
+        e.box({-w, 0.0f, -d}, {w, 0.05f, d}, c);
+        e.box({-w, h - 0.05f, -d}, {w, h, d}, c);
+        for (float x = -w; x <= w + 1e-3f; x += 0.14f) {
+            e.box({x - 0.015f, 0.0f, -0.015f}, {x + 0.015f, h, 0.015f}, c);
+        }
+        break;
+    }
+    case FurnitureKind::Bales:
+        for (float y = 0.0f; y < h - 1e-3f; y += 0.6f) {
+            e.box({-w, y, -d}, {w, y + 0.58f, d}, c);
+            if (!shadowPass) {
+                for (const float x : {-w * 0.5f, w * 0.5f}) {
+                    e.box({x - 0.02f, y, -d - 0.005f}, {x + 0.02f, y + 0.585f, d + 0.005f}, shaded(c, 0.7f));
+                }
+            }
+        }
+        break;
+    case FurnitureKind::Crate:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        if (!shadowPass) {
+            e.box({-w - 0.005f, h * 0.45f, -d - 0.005f}, {w + 0.005f, h * 0.55f, d + 0.005f}, dark);
+        }
+        break;
+    case FurnitureKind::Stall:
+        e.box({-w, 0.0f, -d}, {w, h, d}, c);
+        break;
+    case FurnitureKind::Door:
+        e.box({-w - 0.06f, 0.0f, -d}, {w + 0.06f, h + 0.06f, d}, shaded(c, 1.25f));
+        e.box({-w, 0.0f, -d}, {w, h, d + 0.02f}, c);
+        if (!shadowPass) {
+            e.box({w - 0.16f, 1.0f, d + 0.02f}, {w - 0.06f, 1.04f, d + 0.07f}, kBrassColor);
+        }
+        break;
+    case FurnitureKind::Steps: {
+        constexpr int kSteps = 14;
+        for (int i = 0; i < kSteps; ++i) {
+            const float z0 = -d + f.depth * static_cast<float>(i) / kSteps;
+            e.box({-w, 0.0f, z0}, {w, h * static_cast<float>(i + 1) / kSteps, d}, c);
+        }
+        e.box({w - 0.04f, 0.0f, -d}, {w, h + 0.9f, -d + 0.04f}, kSteelColor);
+        break;
+    }
+    }
+}
+
+} // namespace
+
+void emitInterior(const InteriorLayout& layout, const InteriorLook& look) {
+    const bool savedIndoor = gIndoor;
+    gIndoor = true;
+    const ModelFrame world;
+    const Emitter e(world);
+    const float floor = layout.floor;
+    const float height = layout.ceiling - layout.floor;
+    // Пол: подложка под всем этажом (видна в проёмах дверей) и пол каждой комнаты.
+    if (!look.shadowPass) {
+        e.box({layout.x0, floor - 0.32f, layout.z0}, {layout.x1, floor - 0.005f, layout.z1}, kThresholdColor,
+              nullptr, kTop);
+        for (const InteriorRoom& room : layout.rooms) {
+            e.box({room.x0, floor - 0.3f, room.z0}, {room.x1, floor, room.z1}, colorOf(room.floor), nullptr, kTop);
+        }
+        // Потолок изнутри — нижняя грань плиты.
+        e.box({layout.outerX0, layout.ceiling, layout.outerZ0}, {layout.outerX1, layout.ceiling + 0.25f, layout.outerZ1},
+              kCeilingColor, nullptr, kBottom);
+    } else {
+        // В карту теней — плита потолка целиком: свет заходит только в окна.
+        e.box({layout.outerX0, layout.ceiling, layout.outerZ0}, {layout.outerX1, layout.ceiling + 0.25f, layout.outerZ1},
+              kCeilingColor);
+        e.box({layout.outerX0, floor - 0.3f, layout.outerZ0}, {layout.outerX1, floor - 0.01f, layout.outerZ1},
+              kCeilingColor, nullptr, kBottom | kSides);
+    }
+    for (std::size_t i = 0; i < layout.walls.size(); ++i) {
+        if (!look.shadowPass && look.hiddenWalls != nullptr && i < look.hiddenWalls->size() && (*look.hiddenWalls)[i]) {
+            continue;
+        }
+        emitWall(e, layout.walls[i], floor, height, look.shadowPass);
+    }
+    for (std::size_t i = 0; i < layout.furniture.size(); ++i) {
+        if (!look.shadowPass && look.hiddenFurniture != nullptr && i < look.hiddenFurniture->size() &&
+            (*look.hiddenFurniture)[i]) {
+            continue;
+        }
+        emitFurniture(layout.furniture[i], floor, layout.ceiling, look.lampsOn, look.shadowPass);
+    }
+    gIndoor = savedIndoor;
 }
 
 } // namespace lw

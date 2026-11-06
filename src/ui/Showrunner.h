@@ -336,6 +336,9 @@ private:
     // Монтаж ожидания: реакция близких на гибель знакомого.
     void trackLosses(const World& world);
     bool reaction(const ShowInput& in, StoryPick& pick, std::string& text);
+    // Семья (или группа на базе) знакомого зрителю дома за общим столом —
+    // «Семья Miller ужинает» (12а.14); false — нет.
+    bool familyMeal(const ShowInput& in, StoryPick& pick, std::string& text);
     // Кадр-пауза, уместный сейчас; false — нет.
     bool chooseInterlude(const ShowInput& in, Interlude& out) const;
     void startInterlude(Interlude interlude, ShowOrders& orders);
@@ -399,6 +402,7 @@ private:
     std::vector<Loss> losses_;           // недавние потери знакомых
     std::size_t lossCursor_ = 0;         // с какой записи летописи искать потери
     std::vector<std::pair<EntityId, EntityId>> reacted_; // (погибший, близкий) — уже показали
+    std::vector<std::pair<EntityId, std::uint64_t>> meals_; // (дом, тик) — общий стол уже показали
     Interlude interlude_;
     bool lastInterlude_ = false;         // прошлый кадр — пауза: второй подряд нельзя
     bool timelapse_ = false;             // кадр-пауза идёт таймлапсом

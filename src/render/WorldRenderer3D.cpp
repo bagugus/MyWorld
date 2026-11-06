@@ -58,6 +58,8 @@ constexpr float kShadowMinRadius = 40.0f;
 constexpr float kShadowMaxRadius = 1600.0f;
 constexpr float kShadowStep = 1.2f;
 constexpr float kShadowsOff = 4000.0f;
+// Внутри помещения рассеянный свет неба — эта доля от уличного (12а.14).
+constexpr float kIndoorAmbient = 0.95f;
 // Дымка — слой у земли: с высоты H метров её видно в 1 + H / kHazeHeight раз меньше.
 constexpr float kHazeHeight = 1500.0f;
 
@@ -224,7 +226,8 @@ void emitPoseGallery(Vector3 center, const Terrain3D& terrain, float t, int only
 } // namespace
 
 WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
-    : land_(map), terrain_(map, textures, land_), trees_(map, terrain_, land_), props_(map, terrain_, land_) {
+    : land_(map), terrain_(map, textures, land_), trees_(map, terrain_, land_), props_(map, terrain_, land_),
+      interior_(terrain_) {
     // Перила — по краям настила над открытой водой, опоры — через клетку до дна.
     const auto key = [&map](Cell cell) {
         return static_cast<std::int64_t>(cell.y) * map.width() + cell.x;
@@ -304,27 +307,114 @@ void WorldRenderer3D::setDrawDistance(float meters) {
 }
 
 BuildingModel WorldRenderer3D::buildingModel(const Building& building, EntityId id) const {
-    BuildingModel model;
-    model.kind = building.kind;
-    model.x0 = static_cast<float>(building.origin.x) * Map::kCellSize;
-    model.z0 = static_cast<float>(building.origin.y) * Map::kCellSize;
-    model.x1 = model.x0 + static_cast<float>(building.width) * Map::kCellSize;
-    model.z1 = model.z0 + static_cast<float>(building.height) * Map::kCellSize;
-    // Стоит на нижнем углу участка, высота отсчитывается от верхнего.
-    model.low = terrain_.groundAt(model.x0, model.z0);
-    model.high = model.low;
-    for (const Vector2 corner : {Vector2{model.x1, model.z0}, Vector2{model.x0, model.z1},
-                                 Vector2{model.x1, model.z1}}) {
-        const float ground = terrain_.groundAt(corner.x, corner.y);
-        model.low = std::min(model.low, ground);
-        model.high = std::max(model.high, ground);
+    return buildingModelOf(building, id, terrain_);
+}
+
+bool WorldRenderer3D::interiorView(const CameraController& camera) const {
+    const InteriorLayout* layout = interior_.layout();
+    if (layout == nullptr || !camera.is3d()) {
+        return false;
     }
-    // Дверь — на стене напротив клетки входа.
-    const Vector2 doorCell = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
-    model.door = {std::clamp(doorCell.x, model.x0, model.x1), std::clamp(doorCell.y, model.z0, model.z1)};
-    model.doorGround = terrain_.groundAt(doorCell.x, doorCell.y);
-    model.seed = mixBits(id);
-    return model;
+    const Vector3 eye = camera.camera3d().position;
+    return eye.x > layout->outerX0 && eye.x < layout->outerX1 && eye.z > layout->outerZ0 && eye.z < layout->outerZ1 &&
+           eye.y > layout->floor - 0.5f && eye.y < layout->ceiling + 0.5f;
+}
+
+void WorldRenderer3D::prepareInterior(const InteriorLayout& layout, Vector3 eye, const SceneLight& light) {
+    // Кого камера должна видеть: того, за кем смотрим, и тех, кто с ним в комнате.
+    std::vector<Vector2> subjects;
+    const Placement* focus = interior_.placementOf(interior_.focus());
+    if (focus != nullptr) {
+        subjects.push_back({focus->x, focus->z});
+        for (const Placement& other : interior_.placements()) {
+            if (&other != focus && other.room == focus->room) {
+                subjects.push_back({other.x, other.z});
+            }
+        }
+    } else {
+        subjects.push_back({(layout.x0 + layout.x1) * 0.5f, (layout.z0 + layout.z1) * 0.5f});
+    }
+    // Отрезок от глаза до кого-то из них пересекает прямоугольник (с запасом margin)?
+    const auto crosses = [&](float x0, float z0, float x1, float z1, float margin) {
+        x0 -= margin;
+        z0 -= margin;
+        x1 += margin;
+        z1 += margin;
+        if (eye.x > x0 && eye.x < x1 && eye.z > z0 && eye.z < z1) {
+            return true; // глаз внутри — заслонит всё
+        }
+        for (const Vector2 target : subjects) {
+            const float origin[2] = {eye.x, eye.z};
+            const float dir[2] = {target.x - eye.x, target.y - eye.z};
+            const float lo[2] = {x0, z0};
+            const float hi[2] = {x1, z1};
+            float enter = 0.0f;
+            float leave = 1.0f;
+            bool miss = false;
+            for (int axis = 0; axis < 2 && !miss; ++axis) {
+                if (std::abs(dir[axis]) < 1e-6f) {
+                    miss = origin[axis] < lo[axis] || origin[axis] > hi[axis];
+                    continue;
+                }
+                float t1 = (lo[axis] - origin[axis]) / dir[axis];
+                float t2 = (hi[axis] - origin[axis]) / dir[axis];
+                if (t1 > t2) {
+                    std::swap(t1, t2);
+                }
+                enter = std::max(enter, t1);
+                leave = std::min(leave, t2);
+            }
+            // Не у самой цели: сидит у стены — стену не прятать.
+            if (!miss && enter < leave && enter < 0.92f) {
+                return true;
+            }
+        }
+        return false;
+    };
+    hiddenWalls_.assign(layout.walls.size(), false);
+    for (std::size_t i = 0; i < layout.walls.size(); ++i) {
+        const InteriorWall& wall = layout.walls[i];
+        const float x0 = wall.alongX ? wall.a0 : wall.lo;
+        const float x1 = wall.alongX ? wall.a1 : wall.hi;
+        const float z0 = wall.alongX ? wall.lo : wall.a0;
+        const float z1 = wall.alongX ? wall.hi : wall.a1;
+        hiddenWalls_[i] = crosses(x0, z0, x1, z1, 0.3f);
+    }
+    hiddenFurniture_.assign(layout.furniture.size(), false);
+    for (std::size_t i = 0; i < layout.furniture.size(); ++i) {
+        const Furniture& f = layout.furniture[i];
+        const bool tall = f.height + f.base > 1.15f && f.kind != FurnitureKind::Door && f.kind != FurnitureKind::Board;
+        if (f.kind == FurnitureKind::Lamp) {
+            hiddenFurniture_[i] = Vector2Distance({eye.x, eye.z}, {f.x, f.z}) < 0.6f; // перед объективом
+        } else if (tall) {
+            hiddenFurniture_[i] = crosses(f.minX(), f.minZ(), f.maxX(), f.maxZ(), 0.1f);
+        }
+    }
+    // Лампы — вечером и ночью, если кто-то дома не спит.
+    const bool awake = std::any_of(interior_.placements().begin(), interior_.placements().end(),
+                                   [](const Placement& p) { return p.what != Occupation::Sleep; });
+    const float dusk = std::clamp((light.night - 0.05f) / 0.5f, 0.0f, 1.0f);
+    lampsOn_ = awake && dusk > 0.15f;
+    std::vector<SceneShading::Lamp> lamps;
+    if (lampsOn_) {
+        std::vector<const InteriorLamp*> order;
+        for (const InteriorLamp& lamp : layout.lamps) {
+            order.push_back(&lamp);
+        }
+        const Vector2 center = subjects.front();
+        const int room = focus != nullptr ? focus->room : -1;
+        std::sort(order.begin(), order.end(), [&](const InteriorLamp* a, const InteriorLamp* b) {
+            const float da = Vector2Distance({a->x, a->z}, center) - (a->room == room ? 100.0f : 0.0f);
+            const float db = Vector2Distance({b->x, b->z}, center) - (b->room == room ? 100.0f : 0.0f);
+            return da < db;
+        });
+        const float strength = 0.4f + 0.45f * dusk;
+        for (std::size_t i = 0; i < order.size() && i < static_cast<std::size_t>(SceneShading::kMaxLamps); ++i) {
+            lamps.push_back({{order[i]->x, order[i]->y, order[i]->z}, 6.5f,
+                             {1.0f * strength, 0.76f * strength, 0.48f * strength}});
+        }
+    }
+    shading_.setLamps(lamps, kIndoorAmbient);
 }
 
 void WorldRenderer3D::updateBuildingBounds(const World& world) {
@@ -351,6 +441,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     const Vector3 eye = view.position;
     ++frame_;
     updateBuildingBounds(world);
+    interior_.update(world);
     dt_ = std::min(GetFrameTime(), 0.1f);
     animator_.beginFrame(world, dt_, alpha);
     const float snow = snowCover(world);
@@ -360,6 +451,12 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     const SceneLight light = sceneLightAt(environment, world.weather());
     const float height = std::max(0.0f, eye.y - terrain_.surfaceAt(eye.x, eye.z));
     shading_.setLight(light, eye, 1.0f / (1.0f + height / kHazeHeight));
+    if (const InteriorLayout* layout = interior_.layout()) {
+        prepareInterior(*layout, eye, light);
+    } else {
+        lampsOn_ = false;
+        shading_.setLamps({}, kIndoorAmbient);
+    }
 
     // Где ночью горит свет: дома, где кто-то не спит, и открытая работа.
     litBuildings_.clear();
@@ -498,8 +595,20 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         buildingsDrawn_ = 0;
         creaturesDrawn_ = 0;
     }
+    const InteriorLayout* interior = interior_.layout();
     for (const auto [entity, building] : registry.view<const Building>().each()) {
         const EntityId id = registry.get<Id>(entity).value;
+        if (interior != nullptr && id == interior_.building()) {
+            // Открытое здание — комнатами изнутри (в карту теней — стены с окнами и потолок).
+            InteriorLook look;
+            look.hiddenWalls = &hiddenWalls_;
+            look.hiddenFurniture = &hiddenFurniture_;
+            look.lampsOn = lampsOn_;
+            look.shadowPass = shadowPass;
+            emitInterior(*interior, look);
+            buildingsDrawn_ += shadowPass ? 0 : 1;
+            continue;
+        }
         BuildingModel model = buildingModel(building, id);
         const Vector2 center = {(model.x0 + model.x1) * 0.5f, (model.z0 + model.z1) * 0.5f};
         const float top = buildingTop(model);
@@ -611,15 +720,29 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             continue;
         }
         const auto* person = registry.try_get<Person>(entity);
+        const Placement* placed = nullptr;
         if (person != nullptr && person->indoors) {
-            continue; // в доме: снаружи не видно
+            // В доме снаружи не видно; в открытом здании — на своём месте в комнате.
+            placed = interior != nullptr ? interior_.placementOf(id) : nullptr;
+            if (placed == nullptr) {
+                continue;
+            }
+            at = {placed->x, placed->z};
+            velocity = {0.0f, 0.0f};
         }
         // Поза и движение — по занятию (render/Animator); тела падают, зомби встают.
-        const Figure& figure = animator_.animate(world, entity, id, at.x, at.y, velocity.x, velocity.y);
+        const Figure& figure = animator_.animate(world, entity, id, at.x, at.y, velocity.x, velocity.y, placed);
         const Vector2 drawn = {at.x + figure.offsetX, at.y + figure.offsetY};
         ModelFrame frame;
-        frame.origin = {drawn.x, terrain_.standAt(drawn.x, drawn.y), drawn.y};
-        frame.yaw = figure.heading;
+        if (placed != nullptr) {
+            // Лёжа — на матрасе или диване; сидя — сиденье уже в позе.
+            frame.origin = {drawn.x, interior->floor + placed->height * lyingness(figure.human), drawn.y};
+            // На боку тело поворачивается вокруг продольной оси: голова — к изголовью.
+            frame.yaw = figure.heading - figure.human.bodyRoll;
+        } else {
+            frame.origin = {drawn.x, terrain_.standAt(drawn.x, drawn.y), drawn.y};
+            frame.yaw = figure.heading;
+        }
         creaturesDrawn_ += shadowPass ? 0 : 1;
 
         if (figure.body == Figure::Body::AnimalCorpse || figure.body == Figure::Body::Animal) {
@@ -664,7 +787,9 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         if (const auto* weapon = registry.try_get<Weapon>(entity)) {
             look.weapon = weapon->kind;
         }
+        setModelIndoor(placed != nullptr);
         emitHuman(frame, look, figure.human);
+        setModelIndoor(false);
 
         // Значок эмоции над головой — в важный момент: всплывает, качается и тает.
         if (!shadowPass && figure.emote != Emote::None && distance < kEmoteRange) {

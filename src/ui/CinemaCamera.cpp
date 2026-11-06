@@ -90,6 +90,18 @@ constexpr float kBlockedTime = 0.6f;
 // успокаивается (иначе — то же кружение).
 constexpr float kDodgeRest = 3.0f;
 constexpr float kBlockedStep = 30.0f;
+// В комнате (12а.14): крупно — с пары-тройки метров широким объективом, средний
+// план — все в комнате; курс — где хватает места, ближе к трём четвертям спереди.
+constexpr float kRoomCloseDistance = 2.8f;
+constexpr float kRoomClosePitch = 8.0f;
+constexpr float kRoomCloseFov = 50.0f;
+constexpr float kRoomMediumPitch = 14.0f;
+constexpr float kRoomMediumFov = 60.0f;
+constexpr float kRoomMin = 2.4f;
+constexpr float kRoomMax = 6.5f;
+constexpr float kRoomAngle = 40.0f;
+constexpr float kRoomSmoothing = 0.6f;
+constexpr float kRoomLookHeight = 1.3f;
 float wrapDegrees(float angle) {
     return std::remainder(angle, 360.0f);
 }
@@ -110,11 +122,33 @@ float fitDistance(float radius, float fov, float pitch) {
     return std::max(across, deep) * kFitMargin;
 }
 
+// Сколько можно пройти от точки from по направлению dir, не выходя из
+// прямоугольника box (x0, z0, x1, z1); снаружи — 0.
+float exitDistance(Vector2 from, Vector2 dir, Vector4 box) {
+    if (from.x < box.x || from.x > box.z || from.y < box.y || from.y > box.w) {
+        return 0.0f;
+    }
+    float t = 1e9f;
+    if (dir.x > 1e-5f) {
+        t = std::min(t, (box.z - from.x) / dir.x);
+    } else if (dir.x < -1e-5f) {
+        t = std::min(t, (box.x - from.x) / dir.x);
+    }
+    if (dir.y > 1e-5f) {
+        t = std::min(t, (box.w - from.y) / dir.y);
+    } else if (dir.y < -1e-5f) {
+        t = std::min(t, (box.y - from.y) / dir.y);
+    }
+    return t;
+}
+
 } // namespace
 
 void CinemaCamera::reset() {
     pendingCut_ = true;
     started_ = false;
+    indoor_ = false;
+    stage_ = 0;
     pushIn_ = 1.0f;
     pullOut_ = 1.0f;
     blocked_ = 0.0f;
@@ -163,7 +197,8 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
     }
     const float reach = Vector2Distance(plan.subject, farthest);
 
-    const bool cutting = pendingCut_ || !started_;
+    // Вошли в дом или вышли, пересел герой в комнате — склейка.
+    const bool cutting = pendingCut_ || !started_ || plan.indoor != indoor_ || (plan.indoor && plan.stage != stage_);
     pendingCut_ = false;
     if (cutting) {
         dodged_ = false;
@@ -183,6 +218,65 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
     CinemaShot shot;
     shot.anchorId = plan.subjectId;
     shot.anchor = plan.subject;
+    if (plan.indoor) {
+        // В комнате: крупно — герой, средний — все, кто с ним в комнате.
+        const bool close = plan.size == ShotSize::Close;
+        const float fov = close ? kRoomCloseFov : kRoomMediumFov;
+        const float pitch = close ? kRoomClosePitch : kRoomMediumPitch;
+        const float distance =
+            close ? kRoomCloseDistance : std::clamp(fitDistance(radius, fov, pitch), kRoomMin, kRoomMax);
+        if (cutting) {
+            // Курс: спереди-сбоку от героя (двое и больше — сбоку от линии
+            // между ними), но туда, где в комнате хватает места.
+            float preferred = yaw_;
+            if (!close && reach > 1.0f) {
+                preferred = yawOf(Vector2Subtract(farthest, plan.subject)) + 90.0f * side_;
+            } else if (plan.facing) {
+                preferred = *plan.facing * RAD2DEG + side_ * kRoomAngle;
+            }
+            const float needed = distance * std::cos(pitch * DEG2RAD);
+            float bestScore = -1e9f;
+            float best = preferred;
+            for (int k = 0; k < 24; ++k) {
+                const float offset = static_cast<float>((k + 1) / 2) * 15.0f * (k % 2 == 0 ? 1.0f : -1.0f);
+                const float yaw = preferred + offset;
+                const Vector2 dir = {std::sin(yaw * DEG2RAD), std::cos(yaw * DEG2RAD)};
+                const float inRoom = exitDistance(center, dir, plan.room);
+                const float inStorey = exitDistance(center, dir, plan.bounds);
+                const float score = -std::abs(offset) / 90.0f + 2.0f * std::min(inRoom / needed, 1.0f) +
+                                    0.8f * std::min(inStorey / needed, 1.0f);
+                if (score > bestScore + 1e-3f) {
+                    bestScore = score;
+                    best = yaw;
+                }
+            }
+            yaw_ = wrapDegrees(best);
+        }
+        shot.height = plan.lookHeight > 0.0f ? plan.lookHeight : kRoomLookHeight;
+        shot.pitch = pitch;
+        shot.fovY = fov / pushIn_;
+        shot.distance = distance;
+        shot.smoothing = kRoomSmoothing;
+        shot.offset = Vector2Subtract(center, plan.subject);
+        shot.yaw = yaw_;
+        shot.indoor = true;
+        shot.floor = plan.floor;
+        shot.ceiling = plan.ceiling;
+        shot.bounds = plan.bounds;
+        if (cutting) {
+            shot.cut = true; // встык: снаружи — в комнату, к другому месту
+            settle_ = 0.0f;
+            blackout_ = started_ ? blackout_ : 1.0f;
+        }
+        indoor_ = true;
+        stage_ = plan.stage;
+        started_ = true;
+        dodged_ = false;
+        blocked_ = 0.0f;
+        camera.setCinemaShot(shot);
+        return;
+    }
+    indoor_ = false;
     const float spread = plan.size == ShotSize::Wide ? kWideSpread : kMediumSpread;
     if (plan.vista > 0.0f) {
         // Кадр-пауза: вдаль, без облёта.

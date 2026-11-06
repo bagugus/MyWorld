@@ -54,6 +54,8 @@ constexpr float kCinemaWallGap = 0.4f;     // метров: глаз не бли
 constexpr float kCinemaMinDistance = 1.2f; // метров от точки взгляда
 constexpr float kCinemaMinPitch = -30.0f;  // нижний ракурс
 constexpr float kCinemaMaxPitch = 82.0f;
+// В комнате глаз не ближе этого к стенам и полу, метры (12а.14).
+constexpr float kCinemaRoomGap = 0.2f;
 // Препятствие между глазом и точкой взгляда: сперва камера поднимается над
 // ним на столько градусов наклона (по очереди), если не помогло — подъезжает ближе.
 constexpr float kCinemaLifts[] = {0.0f, 8.0f, 16.0f, 26.0f, 38.0f, 52.0f};
@@ -1166,6 +1168,35 @@ void CameraController::updateCinema(float dt) {
     }
     cinema_.pitch = std::clamp(cinema_.pitch, kCinemaMinPitch, kCinemaMaxPitch);
     cinema_.fovY = std::clamp(cinema_.fovY, 8.0f, 90.0f);
+    cinema_.indoor = cinemaGoal_.indoor;
+    cinema_.floor = cinemaGoal_.floor;
+    cinema_.ceiling = cinemaGoal_.ceiling;
+    cinema_.bounds = cinemaGoal_.bounds;
+
+    if (cinema_.indoor) {
+        // В комнате: глаз — внутри коробки этажа, стены между ним и героем
+        // прячет отрисовка (WorldRenderer3D), поэтому только упор в коробку.
+        const Vector2 focus = Vector2Add(cinema_.anchor, cinema_.offset);
+        const Vector3 target = {focus.x, cinema_.floor + cinema_.height, focus.y};
+        const Vector3 dir = orbitDirection(cinema_.yaw, cinema_.pitch);
+        const float origin[3] = {target.x, target.y, target.z};
+        const float direction[3] = {dir.x, dir.y, dir.z};
+        const float lo[3] = {cinema_.bounds.x + kCinemaRoomGap, cinema_.floor + 0.3f, cinema_.bounds.y + kCinemaRoomGap};
+        const float hi[3] = {cinema_.bounds.z - kCinemaRoomGap, cinema_.ceiling - 0.15f, cinema_.bounds.w - kCinemaRoomGap};
+        float reach = cinema_.distance;
+        for (int axis = 0; axis < 3; ++axis) {
+            if (direction[axis] > 1e-5f) {
+                reach = std::min(reach, (hi[axis] - origin[axis]) / direction[axis]);
+            } else if (direction[axis] < -1e-5f) {
+                reach = std::min(reach, (lo[axis] - origin[axis]) / direction[axis]);
+            }
+        }
+        cinemaWantedLift_ = 0.0f;
+        cinemaLift_ = 0.0f;
+        cinemaReach_ = std::max(reach, 0.4f);
+        cinemaSnap_ = false;
+        return;
+    }
 
     // Препятствие между глазом и точкой: на сколько подняться, чтобы его не было.
     const Vector2 focus = Vector2Add(cinema_.anchor, cinema_.offset);
@@ -1212,10 +1243,16 @@ void CameraController::updateCinema(float dt) {
 }
 
 bool CameraController::cinemaBlocked() const {
+    if (cinema_.indoor) {
+        return false;
+    }
     return cinemaWantedLift_ > kCinemaBlockedLift || cinemaReach_ < cinema_.distance * kCinemaBlockedReach;
 }
 
 bool CameraController::cinemaClearFrom(float yaw) const {
+    if (cinema_.indoor) {
+        return true;
+    }
     const Vector2 focus = Vector2Add(cinema_.anchor, cinema_.offset);
     const Vector3 target = {focus.x, surfaceAt(focus) + cinema_.height, focus.y};
     const Clearance free = clearance(target, orbitDirection(yaw, cinema_.pitch), cinema_.distance);
@@ -1224,15 +1261,19 @@ bool CameraController::cinemaClearFrom(float yaw) const {
 
 void CameraController::refreshCinema() {
     const Vector2 focus = Vector2Add(cinema_.anchor, cinema_.offset);
-    const Vector3 target = {focus.x, surfaceAt(focus) + cinema_.height, focus.y};
+    const float base = cinema_.indoor ? cinema_.floor : surfaceAt(focus);
+    const Vector3 target = {focus.x, base + cinema_.height, focus.y};
     const float pitch = std::min(cinema_.pitch + cinemaLift_, kCinemaMaxPitch);
-    const float distance = std::max(std::min(cinema_.distance, cinemaReach_), kCinemaMinDistance);
+    const float distance = cinema_.indoor ? std::max(std::min(cinema_.distance, cinemaReach_), 0.4f)
+                                          : std::max(std::min(cinema_.distance, cinemaReach_), kCinemaMinDistance);
     Vector3 eye = Vector3Add(target, Vector3Scale(orbitDirection(cinema_.yaw, pitch), distance));
-    eye.y = std::max(eye.y, surfaceAt({eye.x, eye.z}) + kCinemaClearance);
+    if (!cinema_.indoor) {
+        eye.y = std::max(eye.y, surfaceAt({eye.x, eye.z}) + kCinemaClearance);
+    }
     camera3d_.position = eye;
     camera3d_.target = target;
 
-    setClipPlanes(std::min(0.04 * distance, 4.0));
+    setClipPlanes(cinema_.indoor ? 0.05 : std::min(0.04 * distance, 4.0));
     camera_.offset = screenCenter();
     camera_.target = {std::clamp(focus.x, 0.0f, worldWidth_), std::clamp(focus.y, 0.0f, worldHeight_)};
     camera_.rotation = 0.0f;

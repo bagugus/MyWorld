@@ -119,6 +119,28 @@ in float fragGlow;
 in float fragDissolve;
 out vec4 finalColor;
 
+// Внутри помещения (этап 12а.14): рассеянный свет неба приглушён (texcoord.x = 2),
+// лампы — точечный тёплый свет с мягким спадом.
+uniform float indoorAmbient;
+uniform int lampCount;
+uniform vec4 lampPos[4];   // xyz и радиус, метры
+uniform vec3 lampColor[4];
+
+// bounce — доля отражённого света: в комнате стены и потолок подсвечивают
+// друг друга, поэтому и потолок над абажуром не чёрный.
+vec3 lamps(vec3 p, vec3 n, float bounce) {
+    vec3 sum = vec3(0.0);
+    for (int i = 0; i < lampCount; ++i) {
+        vec3 d = lampPos[i].xyz - p;
+        float distance = length(d);
+        float fall = clamp(1.0 - distance / lampPos[i].w, 0.0, 1.0);
+        float wrap = dot(n, d / max(distance, 1e-3)) * 0.6 + 0.4;
+        float fill = clamp(1.0 - distance / (1.4 * lampPos[i].w), 0.0, 1.0);
+        sum += lampColor[i] * (fall * fall * max(wrap, 0.0) + bounce * fill);
+    }
+    return sum;
+}
+
 const float kBayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
                                    3.0, 11.0, 1.0, 9.0, 15.0, 7.0, 13.0, 5.0);
 
@@ -130,11 +152,25 @@ void main() {
         }
     }
     vec3 color;
-    if (fragGlow > 0.5) {
+    if (fragGlow > 0.5 && fragGlow < 1.5) {
         color = fragColor.rgb;
     } else {
         vec3 n = normalize(fragNormal);
-        color = fragColor.rgb * lighting(n, shadowAt(fragPosition, n));
+        float shadow = shadowAt(fragPosition, n);
+        vec3 light;
+        float bounce = 0.0;
+        if (fragGlow > 1.5) {
+            // Внутри небо видно только в окна: рассеянный свет слабее и без
+            // синевы снизу (пол и потолок освещены одинаково).
+            // Днём солнце, отражённое от пола и стен, светит через окна во всю комнату.
+            vec3 sky = mix(ambientGround, ambientSky, 0.6) * indoorAmbient + lightColor * 0.22 +
+                       vec3(0.07, 0.08, 0.12); // ночью в комнате различимо, как в кино
+            light = sky * (0.8 + 0.2 * n.y) + lightColor * max(dot(n, lightDir), 0.0) * shadow;
+            bounce = 0.22;
+        } else {
+            light = lighting(n, shadow);
+        }
+        color = fragColor.rgb * (light + lamps(fragPosition, n, bounce));
     }
     finalColor = vec4(withFog(color, fragPosition), fragColor.a);
 }
@@ -309,6 +345,10 @@ Shader SceneShading::loadShader(const char* vertex, const char* fragmentBody) {
 
 SceneShading::SceneShading() {
     modelShader_ = loadShader(kModelVs, kModelFs);
+    lampCountLoc_ = GetShaderLocation(modelShader_, "lampCount");
+    lampPosLoc_ = GetShaderLocation(modelShader_, "lampPos");
+    lampColorLoc_ = GetShaderLocation(modelShader_, "lampColor");
+    indoorAmbientLoc_ = GetShaderLocation(modelShader_, "indoorAmbient");
     skyShader_ = loadShader(kSkyVs, kSkyFs);
     detail_ = makeDetailTexture();
 
@@ -446,8 +486,30 @@ void SceneShading::drawSky(const Camera3D& camera, float time) {
     EndShaderMode();
 }
 
+void SceneShading::setLamps(const std::vector<Lamp>& lamps, float indoorAmbient) {
+    lamps_.assign(lamps.begin(), lamps.begin() + static_cast<std::ptrdiff_t>(std::min<std::size_t>(lamps.size(), kMaxLamps)));
+    indoorAmbient_ = indoorAmbient;
+}
+
 void SceneShading::beginModels() const {
     apply(modelShader_);
+    const int count = static_cast<int>(lamps_.size());
+    float positions[kMaxLamps * 4] = {};
+    float colors[kMaxLamps * 3] = {};
+    for (int i = 0; i < count; ++i) {
+        const Lamp& lamp = lamps_[static_cast<std::size_t>(i)];
+        positions[i * 4 + 0] = lamp.position.x;
+        positions[i * 4 + 1] = lamp.position.y;
+        positions[i * 4 + 2] = lamp.position.z;
+        positions[i * 4 + 3] = lamp.radius;
+        colors[i * 3 + 0] = lamp.color.x;
+        colors[i * 3 + 1] = lamp.color.y;
+        colors[i * 3 + 2] = lamp.color.z;
+    }
+    SetShaderValue(modelShader_, lampCountLoc_, &count, SHADER_UNIFORM_INT);
+    SetShaderValueV(modelShader_, lampPosLoc_, positions, SHADER_UNIFORM_VEC4, kMaxLamps);
+    SetShaderValueV(modelShader_, lampColorLoc_, colors, SHADER_UNIFORM_VEC3, kMaxLamps);
+    SetShaderValue(modelShader_, indoorAmbientLoc_, &indoorAmbient_, SHADER_UNIFORM_FLOAT);
     BeginShaderMode(modelShader_);
 }
 

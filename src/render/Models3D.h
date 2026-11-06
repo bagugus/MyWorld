@@ -1,11 +1,13 @@
 #pragma once
 
+#include "render/Interior.h"
 #include "render/Poses.h"
 #include "sim/Components.h"
 
 #include <raylib.h>
 
 #include <cstdint>
+#include <vector>
 
 namespace lw {
 
@@ -13,7 +15,8 @@ namespace lw {
 // дверью, люди и зомби из частей, звери, птицы, тела, ящики. Модель — набор
 // коробок и граней без текстуры; у каждой грани — нормаль (rlNormal3f), по
 // которой её освещает шейдер моделей (render/Lighting3D, этап 11.4); светящиеся
-// сами грани (окна ночью) помечены rlTexCoord2f(1, 0).
+// сами грани (окна ночью) помечены rlTexCoord2f(1, 0), грани внутри
+// помещения (12а.14) — rlTexCoord2f(2, 0).
 //
 // Все emit* выводят четырёхугольники в уже открытый rlBegin(RL_QUADS) с
 // текстурой по умолчанию; грани идут против часовой стрелки снаружи.
@@ -84,6 +87,35 @@ struct BuildingModel {
 // Высота крыши здания над землёй (для отсечения).
 float buildingTop(const BuildingModel& model);
 void emitBuilding(const BuildingModel& model);
+
+// Коробка здания (этап 12а.14): пол первого этажа, высота и число этажей —
+// по ним строится планировка внутри (render/Interior).
+struct BuildingShell {
+    float floor = 0.0f;   // пол первого этажа, мир
+    float storey = 3.0f;  // высота этажа, м
+    int storeys = 1;
+    float wallTop = 0.0f; // верх стен
+};
+BuildingShell buildingShell(const BuildingModel& model);
+
+// Проёмы в наружных стенах (render/Interior, WallOpening), в осях мира: те же,
+// что рисует emitBuilding снаружи, чтобы окна в комнате совпадали с окнами дома.
+std::vector<WallOpening> buildingOpenings(const BuildingModel& model);
+
+// Что из планировки прятать и как светить (этап 12а.14).
+struct InteriorLook {
+    const std::vector<bool>* hiddenWalls = nullptr;     // по индексу InteriorLayout::walls
+    const std::vector<bool>* hiddenFurniture = nullptr; // по индексу InteriorLayout::furniture
+    bool lampsOn = false;  // абажуры светятся
+    bool shadowPass = false; // в карту теней: стены, пол, потолок, без мелочи
+};
+// Комнаты изнутри: пол, потолок, стены с проёмами дверей и окон, мебель.
+// Грани помечены как «внутри» (рассеянный свет приглушён, render/Lighting3D).
+void emitInterior(const InteriorLayout& layout, const InteriorLook& look);
+
+// Следующие грани — внутри помещения: рассеянный свет неба на них приглушён
+// (люди в комнате). Пишется в первую текстурную координату грани.
+void setModelIndoor(bool indoor);
 
 // Коробка по осям мира от min до max (с дном, если bottom).
 void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom = false);
