@@ -36,7 +36,7 @@ constexpr float kBeaconPixels = 16.0f;
 constexpr float kBeaconMinSize = 0.35f;
 constexpr Color kBeaconColor = {255, 236, 120, 255};
 // Окна, двери и крыльцо — когда метр на экране не меньше этого, пикселей.
-constexpr float kDetailPixels = 1.0f;
+constexpr float kDetailPixels = 3.0f;
 // Стая в полёте — над деревьями (самые высокие — около 30 м).
 constexpr float kFlightHeight = 32.0f;
 // Настил моста — толщиной в полметра, клетка дороги над водой.
@@ -392,6 +392,7 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
     const Camera3D& view = camera.camera3d();
     const Vector3 eye = view.position;
     const Vector3 forward = Vector3Normalize(Vector3Subtract(view.target, eye));
+    const float nearPlane = static_cast<float>(rlGetCullDistanceNear());
     // Что не нужно этому проходу: в кадре — целиком позади камеры, в тени — вне
     // квадрата карты теней.
     const auto skip = [&](Vector3 point, float size) {
@@ -418,9 +419,16 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             continue;
         }
         model.snow = snow;
-        // Мелочь на стенах тени не отбрасывает.
-        model.detailed = !shadowPass && camera.zoomAt(center) >= kDetailPixels &&
-                         Vector3Distance(eye, {center.x, model.low, center.y}) < drawDistance_;
+        // Мелочь на стенах тени не отбрасывает. Окно меньше нескольких пикселей
+        // мелькало бы при движении камеры: у предела детали тают в цвет стены.
+        const float pixels = camera.zoomAt(center);
+        const float distance = Vector3Distance(eye, {center.x, model.low, center.y});
+        model.detailed = !shadowPass && pixels >= kDetailPixels && distance < drawDistance_;
+        model.detail = std::clamp((pixels - kDetailPixels) / kDetailPixels, 0.0f, 1.0f);
+        // Окно — плоскость у самой стены. Вдали буфер глубины различает
+        // только слои в d² / (near · 2²⁴) друг от друга; окно отходит от стены
+        // на втрое больше, иначе стена и окно мерцают, перекрывая друг друга.
+        model.decalOut = std::max(0.04f, 3.0f * distance * distance / (nearPlane * 16777216.0f));
         model.lights = !shadowPass && litBuildings_.contains(id) ? lights_ : 0.0f;
         emitBuilding(model);
         buildingsDrawn_ += shadowPass ? 0 : 1;

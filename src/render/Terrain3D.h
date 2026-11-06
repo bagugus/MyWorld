@@ -94,6 +94,7 @@ private:
         std::array<Mesh, kLevels> water{};
         std::array<bool, kLevels> built{};
         std::array<std::uint32_t, kLevels> lastUsed{};
+        int level = -1; // уровень, выбранный в прошлом кадре (для гистерезиса)
     };
     struct Visible {
         int tile = 0;

@@ -14,6 +14,8 @@ namespace {
 
 // Карта теней: 4096² на квадрат до 2 × 1600 м — вблизи тексель в сантиметры.
 constexpr int kShadowSize = 4096;
+// Шаг направления света для карты теней, градусов.
+constexpr float kShadowDirStep = 0.2f;
 // Детальная текстура: шум четырёх видов в каналах, повторяется без швов.
 constexpr int kDetailSize = 256;
 
@@ -47,11 +49,22 @@ float shadowAt(vec3 p, vec3 n) {
     }
     float slope = sqrt(1.0 - cosine * cosine) / max(cosine, 0.15);
     float bias = (0.05 + shadowTexel * min(slope, 6.0)) / shadowRange;
-    vec2 texel = 1.0 / vec2(textureSize(shadowMap, 0));
+    // PCF с билинейными весами: девять выборок 2×2, сдвинутых на тексель, —
+    // это 4×4 текселя, крайние с весом по дробной части. Край тени сдвигается
+    // плавно вместе с точкой, а не ступенькой в тексель: не мерцает, когда
+    // камера или солнце двигаются.
+    ivec2 size = textureSize(shadowMap, 0);
+    vec2 t = s.xy * vec2(size) - 0.5;
+    vec2 cell = floor(t);
+    vec2 f = t - cell;
+    float reference = s.z - bias;
     float lit = 0.0;
-    for (int y = -1; y <= 1; ++y) {
-        for (int x = -1; x <= 1; ++x) {
-            lit += step(s.z - bias, texture(shadowMap, s.xy + vec2(x, y) * texel).r);
+    for (int y = -1; y <= 2; ++y) {
+        float wy = y == -1 ? 1.0 - f.y : (y == 2 ? f.y : 1.0);
+        for (int x = -1; x <= 2; ++x) {
+            float wx = x == -1 ? 1.0 - f.x : (x == 2 ? f.x : 1.0);
+            ivec2 texel = clamp(ivec2(cell) + ivec2(x, y), ivec2(0), size - 1);
+            lit += wx * wy * step(reference, texelFetch(shadowMap, texel, 0).r);
         }
     }
     lit /= 9.0;
@@ -174,7 +187,11 @@ void main() {
         vec3 grid = dir * 420.0;
         vec3 cell = floor(grid);
         vec3 center = cell + 0.25 + 0.5 * vec3(hash(cell + 1.0), hash(cell + 2.0), hash(cell + 3.0));
-        float point = 1.0 - smoothstep(0.08, 0.3, length(grid - center));
+        // Звезда не мельче пикселя: иначе при повороте камеры она то попадает
+        // в пиксель, то нет, и небо мигает. Шире — тусклее: яркость та же.
+        float pixel = length(fwidth(grid));
+        float radius = max(0.3, 0.9 * pixel);
+        float point = (1.0 - smoothstep(0.08, radius, length(grid - center))) * min(1.0, 0.3 / radius);
         float star = step(0.993, hash(cell)) * point * (0.35 + 0.65 * hash(cell + 7.0));
         sky += vec3(star * night * (1.0 - cloudCover) * smoothstep(0.0, 0.1, dir.y));
     }
@@ -344,7 +361,13 @@ void SceneShading::apply(const Shader& shader) const {
 }
 
 bool SceneShading::beginShadowPass(Vector3 center, float radius) {
-    const Vector3 toLight = light_.lightDir;
+    // Направление света для теней меняется ступенями: солнце движется каждый
+    // кадр, и карта теней, перерисованная под чуть другим углом, дрожала бы
+    // краями. Шаг мал — тень переступает на сантиметры, глазу не видно.
+    if (Vector3DotProduct(shadowDir_, light_.lightDir) < std::cos(kShadowDirStep * DEG2RAD)) {
+        shadowDir_ = light_.lightDir;
+    }
+    const Vector3 toLight = shadowDir_;
     shadowsOn_ = shadowDepth_ != 0 && light_.shadowStrength > 0.01f && radius > 0.0f && toLight.y > 0.02f;
     if (!shadowsOn_) {
         return false;

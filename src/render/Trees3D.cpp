@@ -163,7 +163,15 @@ void main() {
     bool leafy = fragPart > 1.5;
     float clump = 0.0;
     if (leafy) {
-        clump = hash(floor(fragRest * (lod < 0.5 ? 6.0 : 1.0)));
+        float clumpSize = lod < 0.5 ? 1.0 / 6.0 : 1.0;
+        clump = hash(floor(fragRest / clumpSize));
+        // Клочок мельче пары пикселей при движении камеры то попадал бы в
+        // пиксель, то нет — крона искрилась. Вдали вместо клочьев — та же доля
+        // пикселей по матрице Байера (сдвинутой, чтобы не совпасть с растворением):
+        // узор стоит на экране и не мерцает.
+        float clumpPixels = clumpSize / max(length(fwidth(fragRest)), 1e-4);
+        float dithered = (kBayer[((cell.y + 2) & 3) * 4 + ((cell.x + 1) & 3)] + 0.5) / 16.0;
+        clump = mix(dithered, clump, smoothstep(1.5, 4.0, clumpPixels));
         float twigs = lod < 0.5 ? 0.3 * smoothstep(40.0, 200.0, length(fragRest - viewPos)) : 0.45;
         if (clump >= max(fragFoliage.x, twigs)) {
             discard;
