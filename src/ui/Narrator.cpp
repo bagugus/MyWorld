@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -31,10 +32,10 @@ constexpr float kRemarkRepeat = 900.0f;
 // Ту же фразу — не чаще, реальных секунд.
 constexpr float kRepeatLine = 600.0f;
 // Фраза держится: основа плюс время на чтение, но в пределах.
-constexpr float kLineBase = 1.6f;
-constexpr float kCharsPerSecond = 15.0f;
+constexpr float kLineBase = 2.0f;
+constexpr float kCharsPerSecond = 12.0f; // зритель читает не спеша
 constexpr float kLineMin = 4.0f;
-constexpr float kLineMax = 10.0f;
+constexpr float kLineMax = 15.0f;
 constexpr float kLineFade = 0.5f;
 constexpr float kLineGap = 0.6f;
 // Воспоминание для знакомства — не слабее этого.
@@ -327,38 +328,143 @@ const Memory* kindnessFrom(const World& world, entt::entity holder, EntityId oth
     return best;
 }
 
-// Характер двумя словами: «смелый и нелюдимый»; пусто — ничего яркого.
-std::string character(const Traits& traits, bool f) {
+// Род в шаблоне: {он}, {его}, {ему}, {него}, {ним}, {нём} — местоимения
+// человека; {мужская|женская} — форма слова. С большой буквы — {Он}, {Его}.
+std::string fill(std::string_view text, bool f) {
+    std::string out;
+    out.reserve(text.size() + 16);
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] != '{') {
+            out += text[i];
+            continue;
+        }
+        const std::size_t close = text.find('}', i);
+        if (close == std::string_view::npos) {
+            out += text.substr(i);
+            break;
+        }
+        const std::string_view token = text.substr(i + 1, close - i - 1);
+        if (const std::size_t bar = token.find('|'); bar != std::string_view::npos) {
+            out += f ? token.substr(bar + 1) : token.substr(0, bar);
+        } else {
+            struct Pronoun {
+                std::string_view key;
+                const char* male;
+                const char* female;
+            };
+            static constexpr Pronoun kPronouns[] = {
+                {"он", "он", "она"},   {"Он", "Он", "Она"},   {"его", "его", "её"},
+                {"Его", "Его", "Её"},  {"ему", "ему", "ей"},  {"Ему", "Ему", "Ей"},
+                {"него", "него", "неё"}, {"ним", "ним", "ней"}, {"нём", "нём", "ней"},
+            };
+            bool found = false;
+            for (const Pronoun& pronoun : kPronouns) {
+                if (pronoun.key == token) {
+                    out += f ? pronoun.female : pronoun.male;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                out += text.substr(i, close - i + 1);
+            }
+        }
+        i = close;
+    }
+    return out;
+}
+
+// Вариант фразы — по id и месту в тексте: у каждого героя свой голос, но тот
+// же самый от раза к разу.
+std::size_t variant(EntityId id, std::uint32_t salt, std::size_t count) {
+    std::uint64_t x =
+        (static_cast<std::uint64_t>(id) << 8) ^ (static_cast<std::uint64_t>(salt) * 0x9E3779B97F4A7C15ull);
+    x ^= x >> 31;
+    x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 29;
+    return static_cast<std::size_t>(x % count);
+}
+
+// Профессия: «продавщица» и «продавщицей» (работает кем).
+struct Trade {
+    std::string name;
+    std::string instr;
+};
+
+Trade tradeOf(Profession profession, bool f) {
+    switch (profession) {
+    case Profession::Shopkeeper:
+        return f ? Trade{"продавщица", "продавщицей"} : Trade{"продавец", "продавцом"};
+    case Profession::Farmer:
+        return {"фермер", "фермером"};
+    case Profession::Doctor:
+        return {"врач", "врачом"};
+    case Profession::PoliceOfficer:
+        return {"полицейский", "в полиции"};
+    case Profession::Teacher:
+        return f ? Trade{"учительница", "учительницей"} : Trade{"учитель", "учителем"};
+    default:
+        return {professionName(profession), professionName(profession)};
+    }
+}
+
+// Последняя нота воспоминания: «Такое не забывают.»; пусто — без неё.
+std::string memoryCoda(MemoryKind kind, bool toSelf, bool f) {
+    if (!toSelf) {
+        return {};
+    }
+    switch (kind) {
+    case MemoryKind::Robbed:
+    case MemoryKind::Betrayed:
+    case MemoryKind::Assaulted:
+    case MemoryKind::Abandoned:
+    case MemoryKind::Expelled:
+        return " Такое не забывают.";
+    case MemoryKind::Saved:
+        return " Этот долг не отдать.";
+    case MemoryKind::Bereaved:
+        return fill(" С тех пор что-то в {нём} погасло.", f);
+    case MemoryKind::Turned:
+        return " Это лицо будет сниться долго.";
+    case MemoryKind::Helped:
+        return " Добро теперь — редкость.";
+    default:
+        return {};
+    }
+}
+
+// Характер одной-двумя фразами по самым ярким чертам; пусто — ничего яркого.
+std::string character(const Traits& traits, bool f, std::size_t most = 2) {
     struct Word {
         float value;
-        const char* high[2];
-        const char* low[2];
+        const char* high;
+        const char* low;
     };
     const Word words[] = {
-        {traits.bravery, {"смелый", "смелая"}, {"робкий", "робкая"}},
-        {traits.altruism, {"добрый", "добрая"}, {"чёрствый", "чёрствая"}},
-        {traits.greed, {"жадный", "жадная"}, {"бескорыстный", "бескорыстная"}},
-        {traits.aggression, {"вспыльчивый", "вспыльчивая"}, {"кроткий", "кроткая"}},
-        {traits.sociability, {"общительный", "общительная"}, {"нелюдимый", "нелюдимая"}},
-        {traits.curiosity, {"любопытный", "любопытная"}, {"нелюбопытный", "нелюбопытная"}},
-        {traits.prudence, {"запасливый", "запасливая"}, {"беспечный", "беспечная"}},
-        {traits.leadership, {"властный", "властная"}, {"покладистый", "покладистая"}},
+        {traits.bravery, "Страх {ему} почти незнаком.", "{Он} боится — темноты, дорог, чужих шагов."},
+        {traits.altruism, "Последним куском {он} поделится с другим.", "Чужая беда {его} не трогает."},
+        {traits.greed, "{Ему} всегда мало.", "Вещи для {него} мало значат."},
+        {traits.aggression, "Вспыхивает от одного слова.", "Мухи не обидит."},
+        {traits.sociability, "Без людей {он} вянет.", "Людей сторонится."},
+        {traits.curiosity, "{Его} вечно тянет за горизонт.", "Дальше своей улицы не ходит."},
+        {traits.prudence, "Всё откладывает на чёрный день.", "О завтрашнем дне не думает."},
+        {traits.leadership, "{Привык|Привыкла}, что {его} слушают.", "{Привык|Привыкла}, что решают за {него}."},
     };
-    // Два самых ярких, по порядку таблицы при равенстве.
+    // Две самые яркие, по порядку таблицы при равенстве.
     std::vector<std::pair<float, const char*>> picked;
     for (const Word& word : words) {
         const float shift = word.value - 0.5f;
         if (std::abs(shift) >= kMarked) {
-            picked.emplace_back(std::abs(shift), shift > 0.0f ? word.high[f ? 1 : 0] : word.low[f ? 1 : 0]);
+            picked.emplace_back(std::abs(shift), shift > 0.0f ? word.high : word.low);
         }
     }
     std::stable_sort(picked.begin(), picked.end(), [](const auto& a, const auto& b) { return a.first > b.first; });
     if (picked.empty()) {
         return {};
     }
-    std::string line = picked[0].second;
-    if (picked.size() > 1) {
-        line += std::string(" и ") + picked[1].second;
+    std::string line = fill(picked[0].second, f);
+    if (picked.size() > 1 && most > 1) {
+        line += " " + fill(picked[1].second, f);
     }
     return line;
 }
@@ -454,10 +560,10 @@ std::string introduction(const World& world, EntityId id) {
         if (corpse->kind != CorpseKind::Human) {
             return {};
         }
-        return std::string(g(f, "Его", "Её")) + " мы уже не застали " + g(f, "живым", "живой") + ".";
+        return fill("{Его|Её} мы уже не застали {живым|живой}. Осталось только имя.", f);
     }
     if (registry.all_of<Zombie>(entity)) {
-        return std::string("Когда-то ") + g(f, "его", "её") + " звали так. Теперь это зомби.";
+        return fill("Когда-то {его} звали так. Теперь от {него} осталась только оболочка.", f);
     }
     const auto* person = registry.try_get<Person>(entity);
     if (person == nullptr) {
@@ -470,20 +576,24 @@ std::string introduction(const World& world, EntityId id) {
     const EntityId home = person->formerHome != kInvalidId ? person->formerHome : person->home;
     const Town town = townOf(world, home);
     const auto* job = registry.try_get<Job>(entity);
-    const bool collapsed = worldPhase(world) >= WorldPhase::Collapse;
+    const WorldPhase phase = worldPhase(world);
     const bool employed = job != nullptr && job->profession != Profession::None;
     if (employed) {
-        std::string trade = professionName(job->profession);
-        if (f && job->profession == Profession::Shopkeeper) {
-            trade = "продавщица";
-        } else if (f && job->profession == Profession::Teacher) {
-            trade = "учительница";
+        const Trade trade = tradeOf(job->profession, f);
+        const std::string from = town.from.empty() ? std::string() : " из " + town.from;
+        const std::string in = town.in.empty() ? std::string() : " " + town.in;
+        std::string line;
+        if (phase >= WorldPhase::Collapse) {
+            line = variant(id, 1, 2) == 0
+                       ? fill("Когда-то {был|была} ", f) + trade.instr + in + ". Теперь это ничего не значит."
+                       : capitalize(trade.name) + from + " — в прошлой жизни, которой больше нет.";
+        } else if (phase >= WorldPhase::Outbreak) {
+            line = capitalize(trade.name) + from + ". Ещё неделю назад это что-то значило.";
+        } else {
+            line = variant(id, 1, 2) == 0 ? "Работает " + trade.instr + in + " — как вчера, как год назад."
+                                          : capitalize(trade.name) + from + ". Жизнь идёт своим чередом.";
         }
-        std::string line = collapsed ? "В прошлом " + trade : capitalize(trade);
-        if (!town.from.empty()) {
-            line += " из " + town.from;
-        }
-        sentences.push_back(line + ".");
+        sentences.push_back(line);
     }
     // Где живёт — если не сказано вместе с работой.
     const std::string where = employed || town.in.empty() ? std::string() : " " + town.in;
@@ -496,9 +606,15 @@ std::string introduction(const World& world, EntityId id) {
         }
         const Group& info = registry.get<Group>(group);
         if (info.leader == id) {
-            sentences.push_back("Ведёт группу из " + std::to_string(info.members.size()) + " человек.");
+            const int others = static_cast<int>(info.members.size()) - 1;
+            sentences.push_back(others > 0 ? fill("За {ним} идут ещё ", f) + people(others) +
+                                                 fill(" — и {он} за них в ответе.", f)
+                                           : std::string("Собирает людей вокруг себя."));
         } else {
-            sentences.push_back("Держится группы " + fullName(world, info.leader) + ".");
+            sentences.push_back(variant(id, 2, 2) == 0
+                                    ? fill("{Его} семья теперь — группа ", f) + fullName(world, info.leader) + "."
+                                    : fill("{Прибился|Прибилась} к группе ", f) + fullName(world, info.leader) +
+                                          ": вместе выжить легче.");
         }
     } else if (person->home != kInvalidId) {
         std::vector<EntityId> mates;
@@ -522,15 +638,17 @@ std::string introduction(const World& world, EntityId id) {
             family.resize(3);
             family.back() = "другие";
         }
-        if (family.size() == 1) {
-            sentences.push_back("Живёт" + where + " вдвоём с " + family.front() + ".");
-        } else if (!family.empty()) {
-            sentences.push_back("Живёт" + where + " с семьёй: " + listNames(family) + ".");
+        if (!family.empty()) {
+            const std::string at = where.empty() ? "Дома" : "Дома," + where + ",";
+            sentences.push_back(at + fill(" {его} ", f) + (family.size() == 1 ? "ждёт " : "ждут ") +
+                                listNames(family) + ".");
         } else if (!others.empty()) {
             others.resize(std::min<std::size_t>(others.size(), 2));
-            sentences.push_back("Живёт" + where + " под одной крышей с " + listNames(others) + ".");
+            sentences.push_back("Делит крышу" + where + " с " + listNames(others) + ".");
         } else {
-            sentences.push_back(std::string(g(f, "Живёт один", "Живёт одна")) + where + ".");
+            sentences.push_back(variant(id, 3, 2) == 0
+                                    ? fill("Живёт {один|одна}", f) + where + " — тишина в доме давно стала привычной."
+                                    : fill("Живёт {один|одна}", f) + where + ", и вечерами слышно только ветер.");
         }
     }
 
@@ -538,32 +656,35 @@ std::string introduction(const World& world, EntityId id) {
     if (const Memory* memory = notableMemory(world, entity)) {
         const std::string clause = memoryClause(world, id, *memory, fullName(world, memory->who));
         if (!clause.empty()) {
-            std::string line = agoPhrase(memory->tick, world.tick()) + " " + clause;
+            const std::string ago = agoPhrase(memory->tick, world.tick());
+            std::string line = ago + " " + clause + ".";
             const bool witnessed = memory->victim != kInvalidId && memory->victim != id &&
                                    memory->source == kInvalidId && memory->kind != MemoryKind::Killed;
             if (witnessed) {
-                line = agoPhrase(memory->tick, world.tick()) + " у " + (f ? "неё" : "него") + " на глазах " + clause;
+                line = ago + fill(" у {него} на глазах ", f) + clause + ".";
             }
             if (memory->source != kInvalidId && named(world, memory->source)) {
-                line = agoPhrase(memory->tick, world.tick()) + " " + he(f) + " " + g(f, "узнал", "узнала") +
-                       " от " + fullName(world, memory->source) + ": " + clause;
+                line = ago + fill(" {он} {узнал|узнала} от ", f) + fullName(world, memory->source) + ": " + clause +
+                       ".";
             }
-            sentences.push_back(line + ".");
+            const bool toSelf = memory->victim == kInvalidId || memory->victim == id;
+            sentences.push_back(line + memoryCoda(memory->kind, toSelf && memory->source == kInvalidId, f));
         }
     } else if (const auto* traits = registry.try_get<Traits>(entity)) {
-        if (const std::string words = character(*traits, f); !words.empty()) {
-            sentences.push_back(std::string(g(f, "Человек ", "Женщина ")) + words + ".");
+        // Знакомство и так длинное — тогда одна черта.
+        if (std::string words = character(*traits, f, sentences.size() >= 2 ? 1 : 2); !words.empty()) {
+            sentences.push_back(std::move(words));
         }
     }
 
     // Укус — главное, что о нём надо знать.
     if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && wounds->infection > 0.0f) {
         const std::uint64_t at = bittenAt(world, id);
-        std::string line = std::string(g(f, "Укушен", "Укушена"));
+        std::string line = fill("{Укушен|Укушена}", f);
         if (at != 0) {
             line += " " + agoLower(at, world.tick());
         }
-        sentences.push_back(line + (wounds->infection >= 0.5f ? " — и уже в лихорадке." : "."));
+        sentences.push_back(line + (wounds->infection >= 0.5f ? " — и жар уже поднимается." : ". Пока никто не знает."));
     }
 
     std::string text;
@@ -592,10 +713,14 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
                 } else {
                     clause = memoryClause(world, hero, *memory, of ? "та" : "тот");
                 }
-                return name + " не может простить " + other + ": " + clause + ". Теперь " + he(hf) + " идёт за " +
+                if (variant(hero, 10, 2) == 0) {
+                    return name + fill(" так и не {простил|простила} ", hf) + other + ": " + clause +
+                           fill(". Сегодня {он} идёт сводить счёты.", hf);
+                }
+                return name + " не может простить " + other + ": " + clause + fill(". Теперь {он} идёт за ", hf) +
                        withHim(of) + ".";
             }
-            return name + " идёт свести счёты с " + other + ".";
+            return name + " идёт к " + other + ". Старые счёты пора закрыть.";
         }
         case ForesightKind::Theft: {
             const entt::entity self = entityOf(world, hero);
@@ -604,55 +729,55 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
                 const entt::entity group = entityOf(world, person->group);
                 if (group != entt::null && registry.all_of<Group>(group) &&
                     registry.get<Group>(group).leader == omen->other) {
-                    return name + " " + g(hf, "решил", "решила") + " уйти из группы " + fullName(world, omen->other) +
-                           " — и не с пустыми руками.";
+                    return name + " уходит из группы " + fullName(world, omen->other) +
+                           " — тихо, не прощаясь, и не с пустыми руками.";
                 }
             }
-            std::string why;
+            const std::string house =
+                named(world, omen->other) ? "дому " + fullName(world, omen->other) : std::string("чужому дому");
             if (const auto* needs = self != entt::null ? registry.try_get<Needs>(self) : nullptr;
                 needs != nullptr && needs->hunger >= kPressing) {
-                why = name + " " + g(hf, "голоден", "голодна") + ", а своего ничего не осталось";
-            } else if (const auto* traits = self != entt::null ? registry.try_get<Traits>(self) : nullptr;
-                       traits != nullptr && traits->greed >= kStrongTrait) {
-                why = name + " давно " + g(hf, "присматривался", "присматривалась") + " к чужому добру";
-            } else {
-                why = name + " " + g(hf, "решился", "решилась");
+                return "Голод сильнее совести: " + name + " идёт к " + house + ".";
             }
-            if (named(world, omen->other)) {
-                return why + ". Дом " + fullName(world, omen->other) + " — совсем рядом.";
+            if (const auto* traits = self != entt::null ? registry.try_get<Traits>(self) : nullptr;
+                traits != nullptr && traits->greed >= kStrongTrait) {
+                return name + fill(" давно {присматривался|присматривалась} к ", hf) + house +
+                       fill(". Сегодня {он} {решился|решилась}.", hf);
             }
-            return why + ".";
+            return name + fill(" {решился|решилась}. Путь лежит к ", hf) + house + ".";
         }
         case ForesightKind::Raid: {
             const entt::entity village = entityOf(world, omen->other);
             const auto* settlement = village != entt::null ? registry.try_get<Settlement>(village) : nullptr;
             if (settlement == nullptr) {
-                return "Орда снялась с места.";
+                return "Орда снялась с места. Куда её понесёт — не знает никто.";
             }
-            std::string line = "Орда бредёт к " + settlement->name + ".";
+            const std::string to =
+                std::string(settlement->kind == SettlementKind::Town ? "городу " : "деревне ") + settlement->name;
+            std::string line = "Орда бредёт к " + to + ".";
             if (omen->crowd > 0) {
-                line += " Там " + people(omen->crowd) + ", и никто ещё не знает.";
+                line += " Там " + people(omen->crowd) + " — и никто ещё не знает, что идёт к ним.";
             }
             return line;
         }
         case ForesightKind::Turning: {
             const entt::entity body = entityOf(world, hero);
             if (body != entt::null && registry.all_of<Corpse>(body)) {
-                return name + " " + g(hf, "умер", "умерла") + " от укуса. Скоро тело встанет.";
+                return name + fill(" {умер|умерла} от укуса. Но это ещё не конец.", hf);
             }
             const std::uint64_t at = bittenAt(world, hero);
             std::string line = name + " укусили";
             if (at != 0) {
                 line += " " + agoLower(at, world.tick());
             }
-            return line + ". Лихорадка уже началась, а рядом люди.";
+            return line + ". Жар поднимается, а вокруг — люди, которые ничего не знают.";
         }
         case ForesightKind::CacheRace:
             if (named(world, omen->other)) {
-                return "С неба упал груз. " + name + " и " + firstName(world, omen->other) +
-                       " идут к нему — успеет кто-то один.";
+                return "Груз упал с неба. " + name + " и " + firstName(world, omen->other) +
+                       " идут к нему — и каждый надеется успеть первым.";
             }
-            return "С неба упал груз, и " + name + " спешит к нему.";
+            return "Груз упал с неба, и " + name + " спешит к нему, пока не опередили.";
         default:
             break;
         }
@@ -666,11 +791,12 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
             if (const Memory* memory = self != entt::null ? grudgeAgainst(world, self, story->other) : nullptr) {
                 const std::string clause = memoryClause(world, story->hero, *memory, fullName(world, story->other));
                 if (!clause.empty()) {
-                    return name + " не " + g(hf, "забыл", "забыла") + ": " + clause + ".";
+                    return name + " помнит: " + clause + ". Такое не прощают.";
                 }
             }
             if (named(world, story->other)) {
-                return "Между " + name + " и " + fullName(world, story->other) + " — старая обида.";
+                return "Между " + name + " и " + fullName(world, story->other) +
+                       " — старая обида. Она никуда не делась.";
             }
             break;
         }
@@ -683,10 +809,11 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
                 };
                 if (info.members.size() == 2) {
                     const EntityId other = info.members[0] == info.leader ? info.members[1] : info.members[0];
-                    return nameOf(info.leader) + " и " + nameOf(other) + " теперь держатся вместе. Надолго ли?";
+                    return nameOf(info.leader) + " и " + nameOf(other) +
+                           " теперь держатся вместе. Вдвоём легче — пока.";
                 }
                 return nameOf(info.leader) + " держит вместе " + people(static_cast<int>(info.members.size())) +
-                       ". Надолго ли?";
+                       ". Надолго ли хватит этого союза?";
             }
             break;
         }
@@ -699,10 +826,10 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
             if (at != 0) {
                 line += " " + agoLower(at, world.tick());
             }
-            return line + ". Сколько ещё " + toHim(hf) + " осталось?";
+            return line + fill(". Сколько {ему} осталось — не знает никто.", hf);
         }
         case StoryKind::Salvage:
-            return "Где-то упал груз. Об этом знает " + name + ".";
+            return "Где-то упал груз, и " + name + " знает, где.";
         default:
             break;
         }
@@ -725,23 +852,23 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
     case Action::Hunt:
     case Action::Buy:
         if (needs->hunger >= kPressing) {
-            return name + " " + g(f, "голоден", "голодна") + ", а дома почти ничего не осталось.";
+            return "Голод гонит " + name + " из дома: запасы кончились.";
         }
         break;
     case Action::Drink:
         if (needs->thirst >= kPressing) {
-            return name + " давно не " + g(f, "пил", "пила") + ".";
+            return name + fill(" давно не {пил|пила}. Губы потрескались.", f);
         }
         break;
     case Action::Socialize:
         if (needs->loneliness >= kPressing) {
-            return name + " " + g(f, "устал", "устала") + " быть " + g(f, "один", "одна") + ".";
+            return name + fill(" {устал|устала} от тишины пустого дома.", f);
         }
         break;
     case Action::GoHome:
     case Action::Flee:
         if (needs->fear >= kPressing) {
-            return name + " " + g(f, "напуган", "напугана") + ".";
+            return name + fill(" {напуган|напугана}. Каждая тень кажется угрозой.", f);
         }
         break;
     default:
@@ -813,7 +940,9 @@ std::string bridge(const World& world, EntityId from, EntityId to) {
         return {};
     }
     const std::string intent = intentLine(world, to);
-    std::string line = "Тем временем " + fullName(world, to) + ", " + relation;
+    static constexpr const char* kOpenings[] = {"Тем временем", "А в это время", "В это же самое время"};
+    std::string line = std::string(kOpenings[variant(from ^ to, 20, std::size(kOpenings))]) + " " +
+                       fullName(world, to) + ", " + relation;
     if (!intent.empty()) {
         line += ", " + intent;
     }
@@ -1022,14 +1151,14 @@ void Narrator::update(const World& world, EntityId subject, float dt, bool visib
         const bool f = female(world, subject_);
         const std::string name = firstName(world, subject_);
         if ((fresh & kFever) != 0) {
-            say("У " + name + " начинается лихорадка.");
+            say("У " + name + " начинается жар. Времени всё меньше.");
         } else if ((fresh & kBitten) != 0) {
-            say(name + " укусили.");
+            say("Зубы всё-таки достали " + name + ".");
         }
         if ((fresh & kDying) != 0) {
-            say(name + " при смерти.");
+            say(name + " при смерти. Каждый вдох даётся с трудом.");
         } else if ((fresh & kBleeding) != 0) {
-            say(name + " " + g(f, "ранен", "ранена") + " и истекает кровью.");
+            say(name + fill(" {ранен|ранена} — кровь не останавливается.", f));
         }
         // Поступок выдаёт характер.
         Remark kind = Remark::Count;

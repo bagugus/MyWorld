@@ -100,8 +100,9 @@ void testTexts() {
         CHECK(!text.empty());
         CHECK(!contains(text, "#"));
         const bool female = lw::isFemaleName(world.registry().get<lw::Name>(entity).first);
-        CHECK(!(female && contains(text, "Живёт один.")));
-        CHECK(!(!female && contains(text, "Живёт одна.")));
+        CHECK(!(female && contains(text, "Живёт один")));
+        CHECK(!(!female && contains(text, "Живёт одна")));
+        CHECK(!contains(text, "{")); // шаблон рода раскрыт целиком
     }
 
     // Петер обокрал дом Джона: Джон это помнит.
@@ -124,12 +125,12 @@ void testTexts() {
     omen.hero = johnId;
     omen.other = peterId;
     const std::string why = lw::ui::motive(world, nullptr, &omen, johnId);
-    CHECK(contains(why, "не может простить"));
+    CHECK(contains(why, "прост")); // «не может простить» или «так и не простил»
     CHECK(contains(why, fullName(world, peter)));
 
     // Связка: от Джона к Петеру — «которого Джон не может простить».
     const std::string link = lw::ui::bridge(world, johnId, peterId);
-    CHECK(contains(link, "Тем временем"));
+    CHECK(!link.empty());
     CHECK(contains(link, "не может простить"));
     // От Петера к Джону — свои счёты.
     CHECK(contains(lw::ui::bridge(world, peterId, johnId), "свои счёты"));

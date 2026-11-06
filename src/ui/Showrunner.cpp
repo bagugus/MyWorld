@@ -52,6 +52,8 @@ constexpr float kSceneDull = 0.08f;
 // досмотреть хотя бы kAnswerHold и не больше kAftermath секунд.
 constexpr float kAnswerHold = 4.0f;
 constexpr float kAftermath = 10.0f;
+// Сцена, которой пора кончаться, ждёт рассказчика не дольше, реальных секунд (12а.13).
+constexpr float kNarrationHold = 25.0f;
 // Ожидания (12а.9). К отложенной сцене возвращаются за kReturnLead реальных
 // секунд до развязки; развязка ближе kHoldLead — в сцене «что-то идёт»
 // (досматривают). Одну и ту же развязку откладывают не больше kWaitReturns раз
@@ -2432,8 +2434,9 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
     }
     const World& world = *in.world;
     trackLosses(world);
-    // Голос за кадром (12а.13): его часы идут, пока видны титры героя.
-    narrator_.update(world, in.shown, dt, !hidesTitles() && in.shown != kInvalidId);
+    // Голос за кадром (12а.13): говорит только в самой сцене — не в затемнении,
+    // где фразу оборвёт чёрный кадр, и не в перебивке.
+    narrator_.update(world, in.shown, dt, phase_ == ShowPhase::Scene && in.shown != kInvalidId);
     switch (phase_) {
     case ShowPhase::Opening: {
         const float length = recap_.empty() ? kOpeningCard : kRecapTime + kOpeningCard;
@@ -2558,6 +2561,13 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
                     break;
                 }
             }
+        }
+        if (over && !hurry && narrator_.speaking() && scene.narrationHold < kNarrationHold &&
+            scene.deadFor <= 0.0f) {
+            // Рассказчик не договорил (12а.13): дать дочитать — затемнение ждёт,
+            // но не дольше kNarrationHold; срочное в другом месте не ждёт.
+            scene.narrationHold += dt;
+            over = false;
         }
         if (over) {
             markHome(in, in.current.target); // быт этого дома досмотрели
