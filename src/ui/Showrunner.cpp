@@ -21,6 +21,7 @@
 #include <raymath.h>
 
 #include <algorithm>
+#include <unordered_map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -71,6 +72,8 @@ constexpr float kKeyCell = 40.0f;
 // Реакция близких: потеря знакомого не старше kLossWindow тиков, не больше
 // kReactionsPerLoss реакций, близкий — небезразличен не меньше kReactionConcern.
 constexpr std::uint64_t kLossWindow = 4 * kTicksPerGameHour;
+// Общий стол в одном доме показывают не чаще раза в столько (12а.14).
+constexpr std::uint64_t kMealGap = 8 * kTicksPerGameHour;
 constexpr int kReactionsPerLoss = 2;
 constexpr float kReactionConcern = 0.35f;
 constexpr std::size_t kLossesKept = 6;
@@ -1385,6 +1388,11 @@ void Showrunner::proceed(const ShowInput& in, ShowOrders& orders) {
         startCutaway(in, ironic, std::move(text), false, orders);
         return;
     }
+    // Дома у знакомого — общий стол (12а.14).
+    if (familyMeal(in, ironic, text)) {
+        startCutaway(in, ironic, std::move(text), false, orders);
+        return;
+    }
     float value = 0.0f;
     const StoryPick* top = best(in, value);
     lastBest_ = value;
@@ -1497,7 +1505,17 @@ Showrunner::Look Showrunner::lookOf(const ShowInput& in) const {
         look.state = 4;
     }
     Vector2 at{};
-    if (look.state != 1 || look.indoors || !positionOf(world, id, 1.0f, at)) {
+    if (look.state == 1 && look.indoors) {
+        // Дома: пришёл или ушёл кто-то из домашних — перемена (12а.14).
+        const EntityId home = registry.get<Person>(entity).home;
+        for (const auto [other, person] : registry.view<const Person>().each()) {
+            if (other != entity && person.indoors && person.home == home && ++look.company >= 3) {
+                break;
+            }
+        }
+        return look;
+    }
+    if (look.state != 1 || !positionOf(world, id, 1.0f, at)) {
         return look;
     }
     // Кто рядом: пришёл или ушёл кто-то — тоже перемена.
@@ -1633,7 +1651,13 @@ ShotSize Showrunner::sizeOf(const ShowInput& in, const StoryPick& pick) const {
     const entt::entity entity = pick.target != kInvalidId ? in.world->find(pick.target) : entt::null;
     const auto* person = entity != entt::null ? in.world->registry().try_get<Person>(entity) : nullptr;
     if (person != nullptr && person->indoors && size == ShotSize::Close) {
-        size = ShotSize::Medium; // в 3D в кадре весь дом
+        // В комнате (12а.14): с домашними рядом — средний план, один — крупный.
+        for (const auto [other, mate] : in.world->registry().view<const Person>().each()) {
+            if (other != entity && mate.indoors && mate.home == person->home) {
+                size = ShotSize::Medium;
+                break;
+            }
+        }
     }
     return size;
 }
@@ -2012,6 +2036,84 @@ bool Showrunner::reaction(const ShowInput& in, StoryPick& pick, std::string& tex
         return true;
     }
     return false;
+}
+
+bool Showrunner::familyMeal(const ShowInput& in, StoryPick& pick, std::string& text) {
+    const World& world = *in.world;
+    const entt::registry& registry = world.registry();
+    const std::uint64_t now = world.tick();
+    std::erase_if(meals_, [now](const auto& meal) { return now - std::min(now, meal.second) > kMealGap; });
+    // Дома, не спят; кто ест — за столом, остальные садятся к нему.
+    struct Table {
+        std::vector<EntityId> people;
+        bool eating = false;
+        EntityId known = kInvalidId;
+    };
+    std::unordered_map<EntityId, Table> tables;
+    for (const auto [entity, person, id] : registry.view<const Person, const Id>().each()) {
+        if (!person.indoors || person.asleep || person.home == kInvalidId) {
+            continue;
+        }
+        Table& table = tables[person.home];
+        table.people.push_back(id.value);
+        const auto* mind = registry.try_get<Mind>(entity);
+        table.eating = table.eating || (mind != nullptr && mind->action == Action::Eat);
+        if ((isHero(id.value) || isKnown(id.value)) &&
+            (table.known == kInvalidId || (isHero(id.value) && !isHero(table.known)))) {
+            table.known = id.value;
+        }
+    }
+    EntityId home = kInvalidId;
+    const Table* best = nullptr;
+    for (const auto& [building, table] : tables) {
+        if (table.people.size() < 2 || !table.eating || table.known == kInvalidId ||
+            std::any_of(meals_.begin(), meals_.end(), [&](const auto& meal) { return meal.first == building; })) {
+            continue;
+        }
+        const bool better = best == nullptr || isHero(table.known) > isHero(best->known) ||
+                            (isHero(table.known) == isHero(best->known) &&
+                             (table.people.size() > best->people.size() ||
+                              (table.people.size() == best->people.size() && building < home)));
+        if (better) {
+            best = &table;
+            home = building;
+        }
+    }
+    if (best == nullptr) {
+        return false;
+    }
+    // Одна фамилия — «семья», иначе — по именам.
+    std::string family;
+    bool same = true;
+    for (const EntityId id : best->people) {
+        const entt::entity entity = world.find(id);
+        const auto* name = entity != entt::null ? registry.try_get<Name>(entity) : nullptr;
+        if (name == nullptr) {
+            same = false;
+        } else if (family.empty()) {
+            family = name->last;
+        } else {
+            same = same && name->last == family;
+        }
+    }
+    const int hour = calendarAt(now).hour;
+    const char* meal = hour >= 5 && hour < 11 ? (same ? "завтракает" : "завтракают")
+                       : hour >= 11 && hour < 17 ? (same ? "обедает" : "обедают")
+                                                 : (same ? "ужинает" : "ужинают");
+    if (same && !family.empty()) {
+        text = "Семья " + family + " " + meal + " вместе.";
+    } else {
+        text = nameOf(world, best->known);
+        const EntityId other = best->people.front() != best->known ? best->people.front() : best->people.back();
+        text += best->people.size() > 2 ? " и ещё " + std::to_string(best->people.size() - 1) + " за одним столом."
+                                        : " и " + nameOf(world, other) + " " + meal + " вместе.";
+    }
+    pick = {};
+    pick.visit = pick.target = best->known;
+    pick.hero = isHero(best->known) ? best->known : kInvalidId;
+    pick.interest = kSceneDull;
+    meals_.emplace_back(home, now);
+    return true;
 }
 
 bool Showrunner::chooseInterlude(const ShowInput& in, Interlude& out) const {

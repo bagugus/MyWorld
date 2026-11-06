@@ -9,6 +9,7 @@
 #include "sim/World.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <utility>
 
@@ -67,6 +68,13 @@ enum class Act : std::uint8_t {
     SitStump,
     LieBack,
     LeanWall,
+    // В комнате (12а.14).
+    SitChair,
+    SitSofa,
+    EatTable,
+    TalkSeated,
+    BandageSeated,
+    Cook,
     // Ест, пьёт, спит.
     EatStand,
     EatSit,
@@ -562,6 +570,18 @@ HumanPose humanPose(Act act, std::uint32_t variant, float t, Gait gait, std::uin
         return pose::lieBack(t, seed);
     case Act::LeanWall:
         return pose::leanWall(t, seed);
+    case Act::SitChair:
+        return pose::sitChair(t, seed);
+    case Act::SitSofa:
+        return pose::sitSofa(t, seed);
+    case Act::EatTable:
+        return pose::eatTable(t);
+    case Act::TalkSeated:
+        return pose::talkSeated(t, seed);
+    case Act::BandageSeated:
+        return pose::bandageSeated(t);
+    case Act::Cook:
+        return pose::counter(t, seed);
     case Act::EatStand:
         return pose::eat(t, false);
     case Act::EatSit:
@@ -656,7 +676,7 @@ HumanPose humanPose(Act act, std::uint32_t variant, float t, Gait gait, std::uin
 } // namespace
 
 void Animator::chooseHuman(const World& world, entt::entity entity, State& state, float x, float y, float speed,
-                           Choice& choice) {
+                           Choice& choice, const Placement* indoor) {
     const entt::registry& registry = world.registry();
     const auto* person = registry.try_get<Person>(entity);
     const auto* mind = registry.try_get<Mind>(entity);
@@ -848,6 +868,61 @@ void Animator::chooseHuman(const World& world, entt::entity entity, State& state
         };
         return static_cast<std::uint32_t>(weighted(weights, kGestureCount, choiceUnit(epoch, 51)));
     };
+
+    // --- Дома, в комнате (12а.14): поза — по месту ---
+    if (indoor != nullptr) {
+        if ((person != nullptr && person->asleep) || indoor->what == Occupation::Sleep) {
+            choice.act = unitOf(seed ^ state.starts, 60) < 0.5f ? Act::SleepBack : Act::SleepCurled;
+            return;
+        }
+        const bool seated = indoor->kind == SpotKind::Seat || indoor->kind == SpotKind::Desk;
+        if (state.mourning) {
+            choice.act = seated || indoor->kind == SpotKind::Sofa ? Act::SitChair : Act::StandGrief;
+            return;
+        }
+        if (fear > 0.8f && !seated && indoor->kind != SpotKind::Sofa) {
+            choice.act = Act::Cower;
+            return;
+        }
+        switch (indoor->kind) {
+        case SpotKind::Bed:
+            choice.act = Act::LieBack;
+            break;
+        case SpotKind::Seat:
+        case SpotKind::Desk:
+            if (action == Action::Eat || action == Action::Drink) {
+                choice.act = Act::EatTable;
+                choice.prop = action == Action::Drink ? Prop::Bottle : Prop::Food;
+            } else if (action == Action::Treat) {
+                choice.act = Act::BandageSeated;
+                choice.prop = Prop::Bandage;
+            } else if (indoor->meal || action == Action::Socialize) {
+                // За общим столом: то говорит, то слушает.
+                choice.act = choiceUnit(epochOf(6.0f, 110), 111) < 0.45f ? Act::TalkSeated : Act::SitChair;
+            } else {
+                choice.act = Act::SitChair;
+            }
+            break;
+        case SpotKind::Sofa:
+            choice.act = Act::SitSofa;
+            break;
+        case SpotKind::Stove:
+            choice.act = Act::Cook;
+            break;
+        default:
+            if (action == Action::Socialize || action == Action::Share || action == Action::Trade) {
+                choice.act = Act::Talk;
+                choice.variant = static_cast<std::uint32_t>(
+                    weighted(std::array<float, kTalkCount>{3.0f, 1.0f, 0.6f + sociability, 2.0f}.data(), kTalkCount,
+                             choiceUnit(epochOf(3.5f, 112), 113)));
+            } else {
+                choice.act = Act::Stand;
+                choice.variant = gesture(false);
+            }
+            break;
+        }
+        return;
+    }
 
     // --- Сон ---
     if (person != nullptr && person->asleep) {
@@ -1298,7 +1373,7 @@ void Animator::chooseAnimal(const World& world, entt::entity entity, State& stat
 }
 
 const Figure& Animator::animate(const World& world, entt::entity entity, EntityId id, float x, float y, float vx,
-                                float vy) {
+                                float vy, const Placement* indoor) {
     auto [it, inserted] = states_.try_emplace(id);
     if (inserted) {
         it->second = std::make_unique<State>();
@@ -1377,7 +1452,7 @@ const Figure& Animator::animate(const World& world, entt::entity entity, EntityI
     Choice choice;
     switch (body) {
     case Figure::Body::Human:
-        chooseHuman(world, entity, state, x, y, speed, choice);
+        chooseHuman(world, entity, state, x, y, speed, choice, indoor);
         break;
     case Figure::Body::Zombie:
         chooseZombie(world, entity, state, x, y, speed, choice);
@@ -1403,7 +1478,9 @@ const Figure& Animator::animate(const World& world, entt::entity entity, EntityI
         figure.heading = std::remainder(figure.heading, kTau);
     };
     const bool corpseBody = body == Figure::Body::HumanCorpse || body == Figure::Body::AnimalCorpse;
-    if (!corpseBody && choice.act != Act::Rise) {
+    if (indoor != nullptr) {
+        figure.heading = indoor->heading; // место в комнате задаёт, куда смотреть
+    } else if (!corpseBody && choice.act != Act::Rise) {
         if (speed > kMoving && !(choice.face && choice.faceMoving)) {
             turnTo(std::atan2(vx, vy));
         } else if (choice.face) {
@@ -1430,6 +1507,10 @@ const Figure& Animator::animate(const World& world, entt::entity entity, EntityI
         } else {
             state.offX += dx / d * step;
             state.offY += dy / d * step;
+        }
+        if (indoor != nullptr) {
+            state.offX = 0.0f; // в комнате — ровно на своём месте
+            state.offY = 0.0f;
         }
         figure.offsetX = state.offX;
         figure.offsetY = state.offY;

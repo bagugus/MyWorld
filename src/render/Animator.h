@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render/Interior.h"
 #include "render/Poses.h"
 #include "sim/Id.h"
 
@@ -53,9 +54,10 @@ public:
     void beginFrame(const World& world, float dt, float alpha);
     // Облик существа в этом кадре: повторный вызов в том же кадре (тень и
     // кадр) возвращает уже посчитанный. x, y — где оно рисуется, vx, vy —
-    // скорость симуляции, м/с.
+    // скорость симуляции, м/с. indoor — место в комнате (12а.14): человек дома
+    // сидит на стуле, лежит в кровати, стоит у плиты — лицом, куда велит место.
     const Figure& animate(const World& world, entt::entity entity, EntityId id, float x, float y, float vx,
-                          float vy);
+                          float vy, const Placement* indoor = nullptr);
     // Куда обращено существо, если оно рисовалось в прошлом кадре.
     std::optional<float> heading(EntityId id) const;
     // Секунды часов анимации.
@@ -91,7 +93,7 @@ private:
     std::optional<Rect> wallNear(const World& world, float x, float y) const;
 
     void chooseHuman(const World& world, entt::entity entity, State& state, float x, float y, float speed,
-                     Choice& choice);
+                     Choice& choice, const Placement* indoor);
     void chooseZombie(const World& world, entt::entity entity, State& state, float x, float y, float speed,
                       Choice& choice);
     void chooseAnimal(const World& world, entt::entity entity, State& state, float x, float y, float speed,

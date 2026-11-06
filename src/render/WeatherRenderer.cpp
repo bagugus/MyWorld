@@ -61,10 +61,10 @@ void WeatherRenderer::update(float realDt, bool running) {
     }
 }
 
-void WeatherRenderer::draw(const Environment& environment, const Weather& weather, bool lit) const {
+void WeatherRenderer::draw(const Environment& environment, const Weather& weather, bool lit, bool indoors) const {
     const float light = environment.light;
 
-    if (weather.precipitation > 0.02f) {
+    if (weather.precipitation > 0.02f && !indoors) {
         drawPrecipitation(weather, isSnowing(environment.temperature));
     }
 

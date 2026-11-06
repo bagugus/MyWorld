@@ -5,6 +5,7 @@
 #include <raylib.h>
 
 #include <string>
+#include <vector>
 
 namespace lw {
 
@@ -48,6 +49,17 @@ public:
     // Небо на весь экран: вызывать до BeginMode3D. time — секунды для облаков.
     void drawSky(const Camera3D& camera, float time);
 
+    // Лампы в комнате (этап 12а.14): точечный свет для моделей — не больше
+    // kMaxLamps; indoorAmbient — доля рассеянного света неба на гранях внутри
+    // помещения (rlTexCoord2f(2, 0)).
+    struct Lamp {
+        Vector3 position{};
+        float radius = 5.0f;
+        Vector3 color{};
+    };
+    static constexpr int kMaxLamps = 4;
+    void setLamps(const std::vector<Lamp>& lamps, float indoorAmbient);
+
     // Модели: всё, что выводится батчем rlgl между begin и end, освещается
     // (нормаль — rlNormal3f, свечение — rlTexCoord2f(1, 0)).
     void beginModels() const;
@@ -66,6 +78,12 @@ private:
     float fogDensity_ = 0.0f;
 
     Shader modelShader_{};
+    int lampCountLoc_ = -1;
+    int lampPosLoc_ = -1;
+    int lampColorLoc_ = -1;
+    int indoorAmbientLoc_ = -1;
+    std::vector<Lamp> lamps_;
+    float indoorAmbient_ = 0.55f;
     Shader skyShader_{};
     Texture2D detail_{};
 

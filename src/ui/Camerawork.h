@@ -48,6 +48,17 @@ struct ShotPlan {
     // точки взгляда низко, почти у горизонта, неподвижно, со стороны viewFrom:
     // рассвет, гроза, туман над рекой, орда вдали. Только кинокамера.
     float vista = 0.0f;
+    // Сцена в комнате (12а.14): кинокамера стоит внутри здания. bounds — где
+    // ей можно стоять (весь этаж: x0, z0, x1, z1 мира), room — комната героя,
+    // facing — куда он обращён (atan2(dx, dz)), пол и потолок — мир; stage —
+    // планировка и место героя: сменились — склейка. Только кинокамера.
+    bool indoor = false;
+    float floor = 0.0f;
+    float ceiling = 0.0f;
+    Vector4 bounds{};
+    Vector4 room{};
+    std::optional<float> facing;
+    std::uint64_t stage = 0;
 };
 
 class Camerawork {

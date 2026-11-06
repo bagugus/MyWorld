@@ -133,6 +133,14 @@ HumanPose sitKnees(float t, std::uint32_t seed);    // на земле, обхв
 HumanPose sitStump(float t, std::uint32_t seed);    // на чурбаке, локти на коленях
 HumanPose lieBack(float t, std::uint32_t seed);     // лёжа на спине, руки за головой
 HumanPose leanWall(float t, std::uint32_t seed);    // прислонился спиной к стене
+// В комнате (этап 12а.14): на стуле высотой kChairSeat, на диване.
+inline constexpr float kChairSeat = 0.46f;
+inline constexpr float kSofaSeat = 0.44f;
+HumanPose sitChair(float t, std::uint32_t seed);    // на стуле, руки на коленях
+HumanPose sitSofa(float t, std::uint32_t seed);     // на диване, откинувшись
+HumanPose eatTable(float t);                        // за столом: локти на столе, ест
+HumanPose talkSeated(float t, std::uint32_t seed);  // за столом: говорит, жестикулирует
+HumanPose bandageSeated(float t);                   // на стуле: перевязывает руку
 
 HumanPose eat(float t, bool sitting);
 HumanPose drinkBottle(float t);

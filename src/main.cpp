@@ -3,7 +3,7 @@
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
-//                [--pose-gallery [ROW]]
+//                [--pose-gallery [ROW]] [--interior ID [YAW]]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -32,6 +32,10 @@
 // --pose-gallery витрина поз в 3D (этап 12а.11): все движения людей, зомби и зверей
 //               рядами в точке взгляда камеры — посмотреть, не дожидаясь их в мире;
 //               ROW — только этот ряд из восьми (крупно), последний ряд — звери
+// --interior    комнаты здания в 3D (этап 12а.14): кинокамера внутри здания ID (или дома
+//               человека ID; 0 — дом, где сейчас больше всего людей не спит), курс YAW
+//               (градусы, как у --orbit), жильцы — по своим местам; посмотреть
+//               планировку, мебель и свет, не дожидаясь сцены дома в сериале
 
 #include "render/CameraController.h"
 #include "render/Palette.h"
@@ -55,11 +59,96 @@
 #include <raylib.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
+#include <unordered_map>
 #include <utility>
+
+namespace {
+
+// --interior: какое здание открыть и за кем смотреть. id — здание или человек;
+// 0 — жилой дом, где сейчас больше всего людей дома и не спят (ужин — лучше).
+std::pair<lw::EntityId, lw::EntityId> interiorTarget(const lw::World& world, lw::EntityId id) {
+    const entt::registry& registry = world.registry();
+    if (id != 0) {
+        const entt::entity entity = world.find(id);
+        if (entity != entt::null && registry.all_of<lw::Person>(entity)) {
+            return {registry.get<lw::Person>(entity).home, id};
+        }
+        lw::EntityId focus = lw::kInvalidId;
+        for (const auto [other, person, otherId] : registry.view<const lw::Person, const lw::Id>().each()) {
+            if (person.home == id && (focus == lw::kInvalidId || otherId.value < focus)) {
+                focus = otherId.value;
+            }
+        }
+        return {id, focus};
+    }
+    std::unordered_map<lw::EntityId, float> score;
+    std::unordered_map<lw::EntityId, lw::EntityId> focus;
+    for (const auto [entity, person, otherId] : registry.view<const lw::Person, const lw::Id>().each()) {
+        if (!person.indoors || person.home == lw::kInvalidId) {
+            continue;
+        }
+        const auto* mind = registry.try_get<lw::Mind>(entity);
+        const bool eating = mind != nullptr && mind->action == lw::Action::Eat;
+        float& value = score[person.home];
+        value += person.asleep ? 0.6f : eating ? 2.5f : 1.5f;
+        if (!person.asleep && (focus.find(person.home) == focus.end() || eating)) {
+            focus[person.home] = otherId.value;
+        } else if (focus.find(person.home) == focus.end()) {
+            focus[person.home] = otherId.value;
+        }
+    }
+    lw::EntityId best = lw::kInvalidId;
+    float bestScore = 0.0f;
+    for (const auto& [building, value] : score) {
+        if (value > bestScore || (value == bestScore && building < best)) {
+            bestScore = value;
+            best = building;
+        }
+    }
+    return {best, best != lw::kInvalidId ? focus[best] : lw::kInvalidId};
+}
+
+// Кинокамера внутри открытого здания: на того, за кем смотрим, курсом yaw.
+void showInterior(const lw::World& world, lw::WorldRenderer3D& renderer, lw::CameraController& camera,
+                  std::pair<lw::EntityId, lw::EntityId> target, float yaw, bool first) {
+    lw::InteriorStage& stage = renderer.interiors();
+    stage.open(target.first, target.second);
+    stage.update(world);
+    const lw::InteriorLayout* layout = stage.layout();
+    if (layout == nullptr) {
+        return;
+    }
+    lw::CinemaShot shot;
+    shot.indoor = true;
+    shot.floor = layout->floor;
+    shot.ceiling = layout->ceiling;
+    shot.bounds = {layout->x0, layout->z0, layout->x1, layout->z1};
+    if (const lw::Placement* placed = stage.placementOf(target.second)) {
+        shot.anchorId = target.second;
+        shot.anchor = {placed->x, placed->z};
+        shot.height = placed->what == lw::Occupation::Sleep ? 0.75f : placed->height > 0.3f ? 1.0f : 1.3f;
+    } else {
+        shot.anchor = {(layout->x0 + layout->x1) * 0.5f, (layout->z0 + layout->z1) * 0.5f};
+        shot.height = 1.2f;
+    }
+    shot.yaw = yaw;
+    shot.pitch = 14.0f;
+    shot.distance = 4.0f;
+    shot.fovY = 62.0f;
+    shot.smoothing = 0.0f;
+    shot.cut = first;
+    if (camera.mode() != lw::ViewMode::Cinema) {
+        camera.setMode(lw::ViewMode::Cinema);
+    }
+    camera.setCinemaShot(shot);
+}
+
+} // namespace
 
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
@@ -77,6 +166,8 @@ int main(int argc, char** argv) {
     bool noUi = false;    // --no-ui: без окон и подписей (снимки мира)
     bool noProps = false; // --no-props: без мелочи вне леса (сравнить облик)
     std::optional<int> poseGallery; // --pose-gallery [ROW]: витрина поз
+    std::optional<lw::EntityId> interiorId; // --interior ID [YAW]: комнаты здания
+    float interiorYaw = 30.0f;
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
@@ -132,6 +223,13 @@ int main(int argc, char** argv) {
             poseGallery = -1;
             if (i + 1 < argc && std::isdigit(static_cast<unsigned char>(argv[i + 1][0])) != 0) {
                 poseGallery = std::atoi(argv[++i]);
+            }
+            view3d = true;
+        } else if (std::strcmp(argv[i], "--interior") == 0 && i + 1 < argc) {
+            interiorId = std::strtoull(argv[++i], nullptr, 10);
+            if (i + 1 < argc && (std::isdigit(static_cast<unsigned char>(argv[i + 1][0])) != 0 || argv[i + 1][0] == '-') &&
+                argv[i + 1][1] != '-') {
+                interiorYaw = std::strtof(argv[++i], nullptr);
             }
             view3d = true;
         } else if (std::strcmp(argv[i], "--director") == 0) {
@@ -206,6 +304,7 @@ int main(int argc, char** argv) {
             inspector.setFollow(true);
         }
         lw::ui::Director storyDirector(world);
+        storyDirector.setInteriors(&renderer3d.interiors()); // сцены дома — в комнатах (12а.14)
         storyDirector.setFullscreenAllowed(screenshot == nullptr); // снимок — в окне того же размера
         if (director) {
             storyDirector.requestSeries(true); // сериал сам включает режиссёра, Esc — выключает
@@ -240,6 +339,10 @@ int main(int argc, char** argv) {
             storyDirector.updateCamera(camera, subject ? std::optional<float>(subject->heading) : std::nullopt,
                                        alpha, dt);
             const bool series = storyDirector.series();
+            if (interiorId && !series) {
+                static std::pair<lw::EntityId, lw::EntityId> target = interiorTarget(world, *interiorId);
+                showInterior(world, renderer3d, camera, target, interiorYaw, frame == 0);
+            }
             camera.setSubject(subject);
             if (frame == 0 && startView && !series) {
                 camera.setMode(*startView); // из-за плеча — когда выбранный уже известен
@@ -269,7 +372,7 @@ int main(int argc, char** argv) {
                 EndMode2D();
             }
             if (!blind) {
-                weatherRenderer.draw(environment, world.weather(), camera.is3d());
+                weatherRenderer.draw(environment, world.weather(), camera.is3d(), renderer3d.interiorView(camera));
             }
             if (!series) {
                 // Отладочные слои — поверх погоды, чтобы их было видно и ночью.

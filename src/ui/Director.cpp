@@ -1,6 +1,7 @@
 #include "ui/Director.h"
 
 #include "render/CameraController.h"
+#include "render/InteriorStage.h"
 #include "sim/Calendar.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
@@ -798,7 +799,40 @@ ShotPlan Director::planOf(float alpha) const {
         }
     }
     if (series_) {
-        // В 3D человека в доме не видно: в кадре весь дом, со стороны двери.
+        // Герой дома (12а.14): камера в комнате — он на своём месте, рядом те,
+        // кто с ним в комнате (общий стол).
+        const InteriorLayout* layout = interiors_ != nullptr ? interiors_->layout() : nullptr;
+        const Placement* placed = interiors_ != nullptr ? interiors_->placementOf(current_.target) : nullptr;
+        if (layout != nullptr && placed != nullptr) {
+            plan.indoor = true;
+            plan.subject = {placed->x, placed->z};
+            plan.extra.clear();
+            for (const Placement& other : interiors_->placements()) {
+                if (other.id != placed->id && other.room == placed->room) {
+                    plan.extra.push_back({other.x, other.z});
+                }
+            }
+            plan.size = plan.extra.empty() ? ShotSize::Close : ShotSize::Medium;
+            plan.floor = layout->floor;
+            plan.ceiling = layout->ceiling;
+            plan.bounds = {layout->x0, layout->z0, layout->x1, layout->z1};
+            if (placed->room >= 0) {
+                const InteriorRoom& room = layout->rooms[static_cast<std::size_t>(placed->room)];
+                plan.room = {room.x0, room.z0, room.x1, room.z1};
+            } else {
+                plan.room = plan.bounds;
+            }
+            plan.facing = placed->heading;
+            // Точка взгляда: лежащий — у подушки, сидящий — грудь сидящего.
+            const bool lying = placed->what == Occupation::Sleep;
+            const bool seated = placed->kind == SpotKind::Seat || placed->kind == SpotKind::Sofa ||
+                                placed->kind == SpotKind::Desk;
+            plan.lookHeight = lying ? 0.75f : seated ? 1.0f : 1.35f;
+            plan.stage = (static_cast<std::uint64_t>(interiors_->version()) << 32) ^
+                         (static_cast<std::uint64_t>(placed->spot + 2) << 16) ^ (lying ? 1u : 0u);
+            return plan;
+        }
+        // Комнат нет (не открыли): в кадре весь дом, со стороны двери.
         const entt::registry& registry = world_.registry();
         const entt::entity entity = world_.find(current_.target);
         const auto* person = entity != entt::null ? registry.try_get<Person>(entity) : nullptr;
@@ -885,6 +919,9 @@ void Director::enterSeries(CameraController& camera) {
 
 void Director::leaveSeries(CameraController& camera) {
     series_ = false;
+    if (interiors_ != nullptr) {
+        interiors_->close(); // дома снова снаружи
+    }
     bars_ = 0.0f;
     timelapse_ = false; // скорость пользователя вернёт pace
     show_.stop(); // паузу и промотку шоураннера снимет ближайший update
@@ -910,6 +947,24 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
         }
     }
     const bool climax = slowmo_ || urgent(current_);
+    if (interiors_ != nullptr && series_) {
+        // Герой сцены дома — открыть его дом (12а.14); на вводном общем плане и
+        // в кадре-паузе дом — снаружи.
+        EntityId home = kInvalidId;
+        if (!show_.interlude() && !show_.establishing() && current_.valid()) {
+            const entt::entity entity = world_.find(current_.target);
+            const auto* person = entity != entt::null ? world_.registry().try_get<Person>(entity) : nullptr;
+            if (person != nullptr && person->indoors && person->home != kInvalidId) {
+                home = person->home;
+            }
+        }
+        if (home != kInvalidId) {
+            interiors_->open(home, current_.target);
+        } else {
+            interiors_->close();
+        }
+        interiors_->update(world_);
+    }
     if (!series_) {
         if (!enabled_) {
             camerawork_.idle();
