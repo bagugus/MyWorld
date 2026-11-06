@@ -401,8 +401,31 @@ void WorldRenderer3D::prepareInterior(const InteriorLayout& layout, Vector3 eye,
     } else {
         subjects.push_back({(layout.x0 + layout.x1) * 0.5f, (layout.z0 + layout.z1) * 0.5f});
     }
+    // Взгляд на target проходит сквозь дверной проём стены (кадр «через проём»,
+    // 12а.12): такую стену не прятать — она и есть рамка кадра.
+    const auto throughDoor = [&](const InteriorWall& wall, Vector2 target) {
+        const float origin[2] = {eye.x, eye.z};
+        const float dir[2] = {target.x - eye.x, target.y - eye.z};
+        const int across = wall.alongX ? 1 : 0;
+        const int along = 1 - across;
+        if (std::abs(dir[across]) < 1e-5f) {
+            return false;
+        }
+        const float t = ((wall.lo + wall.hi) * 0.5f - origin[across]) / dir[across];
+        if (t <= 0.0f || t >= 1.0f) {
+            return false;
+        }
+        const float at = origin[along] + t * dir[along];
+        for (const WallGap& gap : wall.gaps) {
+            if (!gap.window && gap.y0 < 0.05f && at > gap.a0 + 0.12f && at < gap.a1 - 0.12f) {
+                return true;
+            }
+        }
+        return false;
+    };
     // Отрезок от глаза до кого-то из них пересекает прямоугольник (с запасом margin)?
-    const auto crosses = [&](float x0, float z0, float x1, float z1, float margin) {
+    const auto crosses = [&](float x0, float z0, float x1, float z1, float margin,
+                             const InteriorWall* wall = nullptr) {
         x0 -= margin;
         z0 -= margin;
         x1 += margin;
@@ -411,6 +434,9 @@ void WorldRenderer3D::prepareInterior(const InteriorLayout& layout, Vector3 eye,
             return true; // глаз внутри — заслонит всё
         }
         for (const Vector2 target : subjects) {
+            if (wall != nullptr && throughDoor(*wall, target)) {
+                continue;
+            }
             const float origin[2] = {eye.x, eye.z};
             const float dir[2] = {target.x - eye.x, target.y - eye.z};
             const float lo[2] = {x0, z0};
@@ -445,7 +471,7 @@ void WorldRenderer3D::prepareInterior(const InteriorLayout& layout, Vector3 eye,
         const float x1 = wall.alongX ? wall.a1 : wall.hi;
         const float z0 = wall.alongX ? wall.lo : wall.a0;
         const float z1 = wall.alongX ? wall.hi : wall.a1;
-        hiddenWalls_[i] = crosses(x0, z0, x1, z1, 0.3f);
+        hiddenWalls_[i] = crosses(x0, z0, x1, z1, 0.3f, &wall);
     }
     hiddenFurniture_.assign(layout.furniture.size(), false);
     for (std::size_t i = 0; i < layout.furniture.size(); ++i) {

@@ -60,6 +60,17 @@ public:
     static constexpr int kMaxLamps = 4;
     void setLamps(const std::vector<Lamp>& lamps, float indoorAmbient);
 
+    // Цвет кадра по настроению (кино, этап 12а.12): tint — добавка к единице по
+    // каналам, desaturate — доля серого, contrast — S-кривая, vignette —
+    // затемнение углов. Всё нулевое — кадр как есть. Действует со следующего apply.
+    struct Grade {
+        Vector3 tint{};
+        float desaturate = 0.0f;
+        float contrast = 0.0f;
+        float vignette = 0.0f;
+    };
+    void setGrade(const Grade& grade) { grade_ = grade; }
+
     // Модели: всё, что выводится батчем rlgl между begin и end, освещается
     // (нормаль — rlNormal3f, свечение — rlTexCoord2f(1, 0)).
     void beginModels() const;
@@ -84,6 +95,7 @@ private:
     int indoorAmbientLoc_ = -1;
     std::vector<Lamp> lamps_;
     float indoorAmbient_ = 0.55f;
+    Grade grade_{};
     Shader skyShader_{};
     Texture2D detail_{};
 

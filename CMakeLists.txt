@@ -188,6 +188,8 @@ if(LW_BUILD_APP)
         src/ui/Captions.h
         src/ui/CinemaCamera.cpp
         src/ui/CinemaCamera.h
+        src/ui/Composition.cpp
+        src/ui/Composition.h
         src/ui/ChronicleView.cpp
         src/ui/ChronicleView.h
         src/ui/Director.cpp
@@ -241,4 +243,12 @@ if(LW_BUILD_TESTS)
     )
     target_link_libraries(lw_interior_tests PRIVATE lw_sim lw_options)
     add_test(NAME interior COMMAND lw_interior_tests)
+    # Ракурсы и композиция (этап 12а.12) — без графики: смысл сцены, правило
+    # 180°, правило третей, цвет по настроению.
+    add_executable(lw_composition_tests
+        tests/composition_test.cpp
+        src/ui/Composition.cpp
+    )
+    target_link_libraries(lw_composition_tests PRIVATE lw_sim lw_options)
+    add_test(NAME composition COMMAND lw_composition_tests)
 endif()

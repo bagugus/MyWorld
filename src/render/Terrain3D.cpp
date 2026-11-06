@@ -479,7 +479,7 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
             // С этапа 11.9 вода реки опущена глубже (русло врезано, LandUse::
             // channelInset), а угол на границе с пресной водой — заметно ниже
             // воды: кромка уходит в сухую клетку, выше — откос берега.
-            float land = 0.0f;
+            float landSum = 0.0f;
             int lands = 0;
             float bed = 0.0f;
             float level = 0.0f;
@@ -503,13 +503,13 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
                         lake = lake || water == Water::Lake;
                         ++wet;
                     }
-                    land += elevation;
+                    landSum += elevation;
                     ++lands;
                 }
             }
             const std::size_t i = vertexIndex(vx, vy);
             if (wet == 0) {
-                ground_[i] = land / static_cast<float>(lands);
+                ground_[i] = landSum / static_cast<float>(lands);
             } else {
                 water_[i] = level / static_cast<float>(wet);
                 ground_[i] = bed / static_cast<float>(wet);

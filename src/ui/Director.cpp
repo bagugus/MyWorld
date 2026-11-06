@@ -2,6 +2,8 @@
 
 #include "render/CameraController.h"
 #include "render/InteriorStage.h"
+#include "render/Lighting.h"
+#include "sim/Climate.h"
 #include "sim/Calendar.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
@@ -36,6 +38,8 @@ namespace {
 
 // Режиссёр держит линию хотя бы столько реальных секунд, прежде чем сменить
 // её на более интересную (если линия не оборвалась): камера не дёргается.
+// Цвет кадра меняется к новому настроению за столько секунд (~63 %).
+constexpr float kGradeTime = 1.5f;
 constexpr float kMinHold = 20.0f;
 // Новая линия должна быть заметно интереснее текущей.
 constexpr float kSwitchMargin = 1.3f;
@@ -799,6 +803,28 @@ ShotPlan Director::planOf(float alpha) const {
         }
     }
     if (series_) {
+        // Смысл сцены (12а.12): разговор, погоня, засада, горе… — от него ракурс и
+        // план; с кем сцена — в кадре.
+        const SceneReading reading = readScene(world_, current_.target);
+        plan.sense = reading.sense;
+        plan.panic = reading.panic;
+        plan.menacing = reading.menacing;
+        plan.moving = reading.moving;
+        plan.move = {reading.moveX, reading.moveY};
+        if (reading.other != kInvalidId) {
+            plan.otherId = reading.other;
+            if (!positionOf(reading.other, alpha, plan.other)) {
+                plan.other = {reading.otherX, reading.otherY};
+            }
+            if (plan.size == ShotSize::Close) {
+                plan.size = ShotSize::Medium;
+            }
+            if (plan.size == ShotSize::Medium &&
+                std::none_of(plan.extra.begin(), plan.extra.end(),
+                             [&](Vector2 at) { return Vector2Distance(at, plan.other) < 0.5f; })) {
+                plan.extra.push_back(plan.other);
+            }
+        }
         // Герой дома (12а.14): камера в комнате — он на своём месте, рядом те,
         // кто с ним в комнате (общий стол).
         const InteriorLayout* layout = interiors_ != nullptr ? interiors_->layout() : nullptr;
@@ -813,12 +839,51 @@ ShotPlan Director::planOf(float alpha) const {
                 }
             }
             plan.size = plan.extra.empty() ? ShotSize::Close : ShotSize::Medium;
+            // С кем сцена — только если он в той же комнате (там он и сидит).
+            plan.otherId = kInvalidId;
+            for (const Placement& other : interiors_->placements()) {
+                if (other.id == reading.other && other.room == placed->room && other.id != placed->id) {
+                    plan.otherId = other.id;
+                    plan.other = {other.x, other.z};
+                }
+            }
+            if (plan.otherId == kInvalidId && !plan.extra.empty() &&
+                (plan.sense == SceneSense::Family || plan.sense == SceneSense::Talk)) {
+                // Домашний рядом за столом — собеседник.
+                for (const Placement& other : interiors_->placements()) {
+                    if (other.id != placed->id && other.room == placed->room) {
+                        plan.otherId = other.id;
+                        plan.other = {other.x, other.z};
+                        break;
+                    }
+                }
+            }
+            plan.moving = false;
             plan.floor = layout->floor;
             plan.ceiling = layout->ceiling;
             plan.bounds = {layout->x0, layout->z0, layout->x1, layout->z1};
             if (placed->room >= 0) {
                 const InteriorRoom& room = layout->rooms[static_cast<std::size_t>(placed->room)];
                 plan.room = {room.x0, room.z0, room.x1, room.z1};
+                // Двери в соседние комнаты: кадр «через проём».
+                constexpr float kDoorReach = 0.35f;
+                for (const InteriorWall& wall : layout->walls) {
+                    if (wall.outer) {
+                        continue;
+                    }
+                    for (const WallGap& gap : wall.gaps) {
+                        if (gap.window || gap.y0 > 0.05f) {
+                            continue;
+                        }
+                        const float along = (gap.a0 + gap.a1) * 0.5f;
+                        const float across = (wall.lo + wall.hi) * 0.5f;
+                        const Vector2 door = wall.alongX ? Vector2{along, across} : Vector2{across, along};
+                        if (door.x >= room.x0 - kDoorReach && door.x <= room.x1 + kDoorReach &&
+                            door.y >= room.z0 - kDoorReach && door.y <= room.z1 + kDoorReach) {
+                            plan.doorways.push_back(door);
+                        }
+                    }
+                }
             } else {
                 plan.room = plan.bounds;
             }
@@ -919,6 +984,7 @@ void Director::enterSeries(CameraController& camera) {
 
 void Director::leaveSeries(CameraController& camera) {
     series_ = false;
+    grade_ = {}; // вне сериала кадр как есть
     if (interiors_ != nullptr) {
         interiors_->close(); // дома снова снаружи
     }
@@ -997,6 +1063,20 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
     }
     shot_ = plan.size;
     cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, show_.finale(), dt);
+    // В лог — смена приёма: ход съёмки видно по запуску со снимком.
+    if (cinema_.framingTitle() != loggedFraming_ || cinema_.sense() != loggedSense_) {
+        loggedFraming_ = cinema_.framingTitle();
+        loggedSense_ = cinema_.sense();
+        TraceLog(LOG_INFO, "SHOT: %.0f с, %s, %s, %s", seriesClock_, sceneSenseTitle(loggedSense_), loggedFraming_,
+                 frame::clean(idLabel(plan.subjectId)).c_str());
+    }
+    // Цвет и виньетка по настроению сцены (12а.12): ночью холоднее; после
+    // склейки из чёрного — сразу, иначе плавно.
+    const float night = sceneLightAt(environmentAt(world_), world_.weather()).night;
+    const SceneSense mood = show_.interlude() || show_.establishing() ? SceneSense::Daily : cinema_.sense();
+    const ColorGrade wanted = gradeOf(mood, plan.panic, night);
+    const float t = cinema_.blackout() > 0.5f ? 1.0f : 1.0f - std::exp(-dt / kGradeTime);
+    grade_ = mixGrade(grade_, wanted, t);
 }
 
 Director::Pick Director::pickOf(const Story& story) const {
@@ -1072,6 +1152,10 @@ void Director::drawPanel(Inspector& inspector) {
         ImGui::TextDisabled("план: %s%s%s", shotSizeTitle(shot_),
                             camerawork_.flying() ? ", пролёт" : "",
                             camerawork_.pushIn() > 1.05f ? ", наезд" : "");
+        if (series_) {
+            // Ракурсы и композиция (12а.12): о чём сцена и каким приёмом снята.
+            ImGui::TextDisabled("сцена: %s; приём: %s", sceneSenseTitle(cinema_.sense()), cinema_.framingTitle());
+        }
     }
 
     const std::uint64_t now = world_.tick();
