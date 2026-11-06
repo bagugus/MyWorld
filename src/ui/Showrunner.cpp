@@ -14,6 +14,7 @@
 #include "ui/Captions.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
+#include "ui/Narrator.h"
 #include "ui/SeriesFrame.h"
 #include "ui/StoryText.h"
 #include "ui/Ui.h"
@@ -1145,6 +1146,14 @@ StoryPick Showrunner::visitPick(const ShowInput& in) const {
 
 void Showrunner::startScene(const ShowInput& in, const StoryPick& pick, ShowOrders& orders, bool calm, bool hurry) {
     const World& world = *in.world;
+    // Рассказчик (12а.13): связка от прошлого героя, знакомство, мотив сцены.
+    // Та же сцена дальше (склейка во времени) — без новых слов; после скачка
+    // («Четыре часа спустя») «тем временем» не говорят.
+    if (pick.target != kInvalidId && !(last_.valid() && pick.same(last_))) {
+        const Story* story = in.stories->find(pick.story);
+        narrator_.beginScene(world, jumpText_.empty() ? last_.target : kInvalidId, pick.target,
+                             motive(world, story, pick.hasOmen ? &pick.omen : nullptr, pick.target));
+    }
     scene_ = {};
     scene_.pick = pick;
     scene_.calm = calm;
@@ -2423,6 +2432,8 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
     }
     const World& world = *in.world;
     trackLosses(world);
+    // Голос за кадром (12а.13): его часы идут, пока видны титры героя.
+    narrator_.update(world, in.shown, dt, !hidesTitles() && in.shown != kInvalidId);
     switch (phase_) {
     case ShowPhase::Opening: {
         const float length = recap_.empty() ? kOpeningCard : kRecapTime + kOpeningCard;

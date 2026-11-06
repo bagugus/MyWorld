@@ -198,6 +198,8 @@ if(LW_BUILD_APP)
         src/ui/Format.h
         src/ui/Inspector.cpp
         src/ui/Inspector.h
+        src/ui/Narrator.cpp
+        src/ui/Narrator.h
         src/ui/PathTool.cpp
         src/ui/PathTool.h
         src/ui/SeriesFrame.cpp
@@ -251,4 +253,16 @@ if(LW_BUILD_TESTS)
     )
     target_link_libraries(lw_composition_tests PRIVATE lw_sim lw_options)
     add_test(NAME composition COMMAND lw_composition_tests)
+    if(TARGET lw_imgui)
+        # Рассказчик (этап 12а.13) — без графики: знакомство, мотив сцены, связки,
+        # реплики о характере, очередь голоса за кадром. Format.cpp тянет ImGui.
+        add_executable(lw_narrator_tests
+            tests/narrator_test.cpp
+            src/ui/Captions.cpp
+            src/ui/Format.cpp
+            src/ui/Narrator.cpp
+        )
+        target_link_libraries(lw_narrator_tests PRIVATE lw_sim lw_imgui lw_options)
+        add_test(NAME narrator COMMAND lw_narrator_tests)
+    endif()
 endif()

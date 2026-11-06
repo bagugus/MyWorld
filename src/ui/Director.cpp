@@ -672,6 +672,7 @@ void Director::updateShow(Inspector& inspector, SimDriver& driver, float dt, boo
     in.picks = &showPicks_;
     in.refreshed = refresh;
     in.current = current_;
+    in.shown = shown_;
     in.lost = lost_;
     in.lostFor = lost_ ? held_ : 0.0f;
     in.currentInterest = currentInterest_;
@@ -685,6 +686,12 @@ void Director::updateShow(Inspector& inspector, SimDriver& driver, float dt, boo
     if (show_.phase() != before) {
         // В консоль (лог raylib): ход эпизода можно проверить по запуску со снимком.
         TraceLog(LOG_INFO, "SERIES: %s", frame::clean(show_.status()).c_str());
+    }
+    if (const std::string_view line = show_.narrator().line(); line != narration_) {
+        narration_ = std::string(line);
+        if (!narration_.empty()) {
+            TraceLog(LOG_INFO, "NARRATOR: %s", frame::clean(narration_).c_str()); // рассказчик (12а.13)
+        }
     }
     if (orders.show) {
         if (orders.show->target != kInvalidId) {
@@ -1640,22 +1647,26 @@ void Director::drawSeriesFrame() {
                     tint(urgent(current_) ? amber : straw), omen, display.x * 0.7f);
     }
 
-    // Нижняя полоса: имя крупно, рядом — положение, ниже — чего он хочет.
+    // Нижняя полоса: имя крупно, ниже — голос рассказчика (12а.13: знакомство,
+    // мотив сцены, связка, характер — вместо статусов), а когда он молчит — что
+    // человек делает сейчас.
     float y = display.y - bar + bar * 0.14f;
     const float nameAlpha = frame::fade(clock_ - subjectShownAt_, kNameFade);
     const std::string intent = hidden ? std::string() : intentLine(world_, shown_);
-    if (!intent.empty()) {
+    const Narrator& narrator = show_.narrator();
+    const bool narrating = !hidden && narrator.speaking();
+    if (!intent.empty() || narrating) {
         const std::string name = frame::clean(idLabel(shown_));
         const float nameSize = 32.0f * scale;
         const float height = frame::text(titleFont(), nameSize, margin, y, Align::Left, tint(white, nameAlpha), name);
-        if (const std::string status = statusLine(world_, shown_); !status.empty()) {
-            const float width = titleFont()->CalcTextSizeA(nameSize, FLT_MAX, 0.0f, name.c_str()).x;
-            frame::text(captionFont(), 19.0f * scale, margin + width + 16.0f * scale, y + nameSize * 0.32f,
-                        Align::Left, tint(muted, nameAlpha), frame::clean(status));
-        }
         y += height + 2.0f * scale;
-        frame::text(captionFont(), 21.0f * scale, margin, y, Align::Left, tint(white, nameAlpha),
-                    frame::clean(intent), display.x - 2.0f * margin);
+        if (narrating) {
+            frame::text(italicFont(), 22.0f * scale, margin, y, Align::Left, tint(straw, nameAlpha * narrator.alpha()),
+                        frame::clean(narrator.line()), display.x - 2.0f * margin);
+        } else {
+            frame::text(captionFont(), 21.0f * scale, margin, y, Align::Left, tint(white, nameAlpha),
+                        frame::clean(intent), display.x - 2.0f * margin);
+        }
     } else if (!current_.valid() && !hidden) {
         if (const entt::entity place = world_.find(establishing_); place != entt::null) {
             const CalendarTime time = calendarAt(world_.tick());

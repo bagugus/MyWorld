@@ -309,6 +309,7 @@ private:
 
     // Сцены и эпизоды сериала (12а.8).
     Showrunner show_;
+    std::string narration_; // что рассказчик говорил на прошлом кадре — для лога
     std::vector<Pick> showPicks_;  // последние кандидаты для шоураннера
     bool pausedByShow_ = false;    // мир остановил шоураннер (титры эпизода)
     bool wasPaused_ = false;       // стоял ли мир до этого
