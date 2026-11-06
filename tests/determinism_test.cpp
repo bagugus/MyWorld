@@ -12,6 +12,7 @@
 #include "sim/Climate.h"
 #include "sim/Death.h"
 #include "sim/Events.h"
+#include "sim/Foresight.h"
 #include "sim/Components.h"
 #include "sim/Items.h"
 #include "sim/Map.h"
@@ -6192,6 +6193,88 @@ void testStoryLines() {
     CHECK(lw::storyInterest(tracker.stories()[5], world.tick()) > 0.0f);
 }
 
+// Предвкушение (этап 12а.2): по состоянию мира видно, что вот-вот случится, —
+// мститель идёт к обидчику, укушенный среди людей, двое идут к одному грузу;
+// предвестие ведёт к своей линии и сбывается событием летописи.
+void testForesight() {
+    Field field(4);
+    if (!field.open || field.people.size() != 4) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity avenger = field.people[0];
+    const entt::entity offender = field.people[1];
+    const entt::entity first = field.people[2];
+    const entt::entity second = field.people[3];
+    const auto setMind = [&](entt::entity person, lw::Action action, lw::EntityId target) {
+        lw::Mind& mind = registry.emplace_or_replace<lw::Mind>(person);
+        mind.action = action;
+        mind.phase = lw::ActionPhase::Travel;
+        mind.target = target;
+        mind.spot = field.at(28);
+    };
+    field.place(avenger, 0);
+    setMind(avenger, lw::Action::Avenge, field.id(offender));
+    field.freeze(offender, 20);
+    constexpr lw::EntityId kEvent = 777;
+    field.place(first, 21); // рядом с обидчиком
+    setMind(first, lw::Action::Salvage, kEvent);
+    field.place(second, 10);
+    setMind(second, lw::Action::Salvage, kEvent);
+    registry.get<lw::Wounds>(offender).infection = 0.9f;
+
+    const auto find = [](const std::vector<lw::Foresight>& all, lw::ForesightKind kind) {
+        const auto it = std::find_if(all.begin(), all.end(),
+                                     [kind](const lw::Foresight& f) { return f.kind == kind; });
+        return it != all.end() ? *it : lw::Foresight{lw::ForesightKind::Count};
+    };
+    const std::vector<lw::Foresight> all = lw::foresee(field.world);
+    for (std::size_t i = 1; i < all.size(); ++i) {
+        CHECK(all[i - 1].interest >= all[i].interest);
+    }
+    const lw::Foresight revenge = find(all, lw::ForesightKind::Revenge);
+    CHECK(revenge.hero == field.id(avenger) && revenge.other == field.id(offender));
+    CHECK(std::abs(revenge.distance - 20.0f * lw::Map::kCellSize) < 1.0f);
+    CHECK(revenge.eta > 0.0f && revenge.interest > 0.0f);
+
+    const lw::Foresight turning = find(all, lw::ForesightKind::Turning);
+    CHECK(turning.hero == field.id(offender) && turning.crowd >= 1);
+    CHECK(turning.eta > 0.0f && turning.eta < lw::kInfectionHours * 300.0f);
+
+    const lw::Foresight race = find(all, lw::ForesightKind::CacheRace);
+    CHECK(race.focus == kEvent && race.crowd == 2);
+    CHECK(race.hero == field.id(first) && race.other == field.id(second)); // первый ближе
+    CHECK(race.eta < race.distance); // идёт быстрее метра в секунду
+
+    // Ближе к кульминации — интереснее.
+    field.place(avenger, 17);
+    const lw::Foresight closer = find(lw::foresee(field.world), lw::ForesightKind::Revenge);
+    CHECK(closer.same(revenge) && closer.eta < revenge.eta && closer.interest > revenge.interest);
+
+    // Предвестие ведёт к своей линии: вражда обидчика с мстителем.
+    using K = lw::ChronicleKind;
+    field.world.record(K::AssaultedBy, field.id(avenger), field.id(offender));
+    field.world.record(K::Bitten, field.id(offender), 900);
+    lw::StoryTracker tracker;
+    tracker.update(field.world);
+    const lw::Story* feud = tracker.lineOf(revenge);
+    CHECK(feud != nullptr && feud->kind == lw::StoryKind::Feud && feud->hero == field.id(avenger));
+    const lw::Story* infection = tracker.lineOf(turning);
+    CHECK(infection != nullptr && infection->kind == lw::StoryKind::Infection);
+    CHECK(tracker.lineOf(race) == nullptr); // ивента в летописи нет
+
+    // Сбылось: отомстил; кто-то из гонки забрал груз; встал зомби.
+    const auto last = [&]() { return field.world.chronicle().events().back(); };
+    field.world.record(K::Avenged, field.id(avenger), field.id(offender), 0);
+    CHECK(lw::fulfilledBy(field.world, revenge, last()));
+    CHECK(!lw::fulfilledBy(field.world, race, last()));
+    field.world.record(K::Salvaged, field.id(second), kEvent, 2, 0);
+    CHECK(lw::fulfilledBy(field.world, race, last()));
+    field.world.record(K::Turned, field.id(offender));
+    CHECK(lw::fulfilledBy(field.world, turning, last()));
+    CHECK(!lw::fulfilledBy(field.world, revenge, last()));
+}
+
 } // namespace
 
 int main() {
@@ -6319,6 +6402,7 @@ int main() {
     testCrimeCondemned();
     testPoliceDefends();
     testStoryLines();
+    testForesight();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

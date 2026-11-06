@@ -72,6 +72,35 @@ std::vector<std::uint32_t> StoryTracker::storiesOf(EntityId id) const {
     return ids;
 }
 
+const Story* StoryTracker::lineOf(const Foresight& foresight) const {
+    const auto byKey = [this](const std::unordered_map<EntityId, std::uint32_t>& map,
+                              EntityId key) -> const Story* {
+        const auto it = map.find(key);
+        return it != map.end() ? &stories_[it->second] : nullptr;
+    };
+    const Story* story = nullptr;
+    switch (foresight.kind) {
+    case ForesightKind::Revenge:
+    case ForesightKind::Theft:
+        if (foresight.other != kInvalidId && foresight.hero != foresight.other) {
+            if (const auto it = feuds_.find(pairOf(foresight.hero, foresight.other));
+                it != feuds_.end()) {
+                story = &stories_[it->second];
+            }
+        }
+        break;
+    case ForesightKind::Turning:
+        story = byKey(infections_, foresight.hero);
+        break;
+    case ForesightKind::CacheRace:
+        story = byKey(salvages_, foresight.focus);
+        break;
+    default:
+        break;
+    }
+    return story != nullptr && story->active() ? story : nullptr;
+}
+
 bool StoryTracker::accepts(const Story& story, std::uint64_t tick) {
     return story.active() || tick <= story.ended + kEpilogue;
 }

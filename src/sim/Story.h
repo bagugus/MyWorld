@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Chronicle.h"
+#include "sim/Foresight.h"
 #include "sim/Id.h"
 
 #include <cstddef>
@@ -96,6 +97,10 @@ public:
     const Story* find(std::uint32_t id) const;
     // Номера линий (Story::id), где участвует id, по возрастанию.
     std::vector<std::uint32_t> storiesOf(EntityId id) const;
+    // Идущая линия, к кульминации которой ведёт предвестие (этап 12а.2):
+    // вражда мстителя с обидчиком или вора с хозяином, заражение укушенного,
+    // гонка за грузом ивента; nullptr — такой линии нет (орда, первая кража).
+    const Story* lineOf(const Foresight& foresight) const;
 
 private:
     void consume(const World& world, const ChronicleEvent& event, std::uint32_t index);

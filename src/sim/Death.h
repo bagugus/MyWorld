@@ -33,7 +33,9 @@ int carcassMeat(AnimalKind kind);
 inline constexpr std::uint64_t kMeatSpoilTicks = kTicksPerGameDay;
 inline constexpr std::uint64_t kCarcassDecayTicks = 3 * kTicksPerGameDay;
 inline constexpr std::uint64_t kBodyDecayTicks = 6 * kTicksPerGameDay;
-// Укушенный встаёт через столько игровых минут после смерти.
+// Заражение от укуса доходит до предела (смерть) за столько игровых часов
+// (NeedsSystem); укушенный встаёт через столько игровых минут после смерти.
+inline constexpr float kInfectionHours = 30.0f;
 inline constexpr int kTurnMinMinutes = 10;
 inline constexpr int kTurnMaxMinutes = 40;
 void updateBodies(World& world);

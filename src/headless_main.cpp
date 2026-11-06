@@ -14,10 +14,12 @@
 //   lw_headless --seed 42 --outbreak 3 --daily           вспышка на 4-е сутки (0 — не по расписанию)
 //   lw_headless --seed 42 --phase collapse               сразу в фазу коллапса (этап 7.4)
 //   lw_headless --seed 42 --phase panic --stories        и сюжетные линии из летописи (этап 12а)
+//   lw_headless --seed 42 --phase panic --foresight      что предвиделось и сбылось ли (этап 12а.2)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Events.h"
+#include "sim/Foresight.h"
 #include "sim/Names.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
@@ -737,6 +739,108 @@ void printStories(const lw::World& world) {
     }
 }
 
+// Предвкушение (этап 12а.2): предвестия, замеченные по ходу прогона (раз в
+// игровую минуту), — сбылись ли и насколько заранее их было видно.
+class ForesightLog {
+public:
+    void sample(const lw::World& world) {
+        const std::uint64_t tick = world.tick();
+        for (const lw::Foresight& omen : lw::foresee(world)) {
+            const auto open = std::find_if(watches_.begin(), watches_.end(), [&](const Watch& watch) {
+                return watch.last == previous_ && watch.first.same(omen);
+            });
+            if (open != watches_.end()) {
+                open->last = tick;
+                open->lastEta = omen.eta;
+            } else {
+                watches_.push_back({omen, tick, tick, omen.eta});
+            }
+        }
+        previous_ = tick;
+    }
+
+    void print(const lw::World& world) const {
+        constexpr auto kKinds = static_cast<std::size_t>(lw::ForesightKind::Count);
+        // Сбылось, если нужное событие случилось, пока предвестие было видно,
+        // или вскоре после. Обращение — к последнему сроку и ещё за игровой час:
+        // предвестие пропадает, когда рядом никого, а тело встаёт позже. Срок
+        // не вышел к концу прогона — «ещё ждём», в долю сбывшихся не идёт.
+        constexpr std::uint64_t kGrace = 10 * lw::kTicksPerGameMinute;
+        const std::vector<lw::ChronicleEvent>& events = world.chronicle().events();
+        std::size_t seen[kKinds] = {};
+        std::size_t fulfilled[kKinds] = {};
+        std::size_t pending[kKinds] = {};
+        double lead[kKinds] = {};
+        double error[kKinds] = {};
+        std::vector<std::pair<const Watch*, std::uint64_t>> examples[kKinds];
+        for (const Watch& watch : watches_) {
+            const auto kind = static_cast<std::size_t>(watch.first.kind);
+            ++seen[kind];
+            const std::uint64_t until =
+                watch.last +
+                (watch.first.kind == lw::ForesightKind::Turning
+                     ? static_cast<std::uint64_t>(watch.lastEta * lw::kTicksPerSecond) +
+                           lw::kTicksPerGameHour
+                     : kGrace);
+            // События летописи идут по времени: только окно [seen, until].
+            std::uint64_t when = 0;
+            auto event = std::lower_bound(
+                events.begin(), events.end(), watch.seen,
+                [](const lw::ChronicleEvent& e, std::uint64_t tick) { return e.tick < tick; });
+            for (; event != events.end() && event->tick <= until; ++event) {
+                if (lw::fulfilledBy(world, watch.first, *event)) {
+                    when = event->tick;
+                    break;
+                }
+            }
+            if (when == 0) {
+                pending[kind] += until > world.tick() ? 1 : 0;
+                continue;
+            }
+            ++fulfilled[kind];
+            const double seconds = static_cast<double>(when - watch.seen) / lw::kTicksPerSecond;
+            lead[kind] += seconds;
+            error[kind] += std::abs(seconds - watch.first.eta);
+            if (examples[kind].size() < 2) {
+                examples[kind].emplace_back(&watch, when);
+            }
+        }
+        std::printf("foresight: %zu seen (sampled each game minute)\n", watches_.size());
+        for (std::size_t kind = 0; kind < kKinds; ++kind) {
+            const double n = static_cast<double>(std::max<std::size_t>(fulfilled[kind], 1));
+            const std::size_t settled = seen[kind] - pending[kind];
+            std::printf("  %-10s seen %4zu, came true %4zu (%3.0f%%), pending %3zu, "
+                        "lead mean %6.0f s, eta error mean %6.0f s\n",
+                        lw::foresightKindName(static_cast<lw::ForesightKind>(kind)), seen[kind],
+                        fulfilled[kind],
+                        settled > 0 ? 100.0 * static_cast<double>(fulfilled[kind]) /
+                                          static_cast<double>(settled)
+                                    : 0.0,
+                        pending[kind], lead[kind] / n, error[kind] / n);
+            for (const auto& [watch, when] : examples[kind]) {
+                const lw::CalendarTime time = lw::calendarAt(watch->seen);
+                std::printf("    day %2d %02d:%02d %s -> %s (about #%llu): %.0f m, eta %.0f s, "
+                            "came true in %.0f s\n",
+                            time.day, time.hour, time.minute, label(world, watch->first.hero).c_str(),
+                            label(world, watch->first.other).c_str(),
+                            static_cast<unsigned long long>(watch->first.focus),
+                            watch->first.distance, watch->first.eta,
+                            static_cast<double>(when - watch->seen) / lw::kTicksPerSecond);
+            }
+        }
+    }
+
+private:
+    struct Watch {
+        lw::Foresight first;   // каким было, когда заметили
+        std::uint64_t seen = 0; // тик, когда заметили
+        std::uint64_t last = 0; // тик последнего замера, где оно было
+        float lastEta = 0.0f;   // оценка срока на последнем замере, секунды
+    };
+    std::vector<Watch> watches_;
+    std::uint64_t previous_ = ~std::uint64_t{0};
+};
+
 // Ивенты (этап 7.1): сколько было, сколько идёт, что осталось в грузах, кто
 // узнал и сколько унесли.
 void printEvents(const lw::World& world) {
@@ -1191,6 +1295,7 @@ int main(int argc, char** argv) {
     bool profile = false;
     bool eventLog = false;
     bool storyLog = false;
+    bool foresightLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1220,6 +1325,8 @@ int main(int argc, char** argv) {
             eventLog = true;
         } else if (std::strcmp(argv[i], "--stories") == 0) {
             storyLog = true;
+        } else if (std::strcmp(argv[i], "--foresight") == 0) {
+            foresightLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
             config.events = true;
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
@@ -1245,7 +1352,7 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--stories] [--profile]\n");
+                        "[--stories] [--foresight] [--profile]\n");
             return 2;
         }
     }
@@ -1271,6 +1378,7 @@ int main(int argc, char** argv) {
     if (daily) {
         printDailyHeader();
     }
+    ForesightLog foresight;
     const auto manualTick =
         static_cast<std::uint64_t>(std::max(0.0, manualHour) * lw::kTicksPerGameHour);
     for (std::uint64_t i = 0; i < ticks; ++i) {
@@ -1280,6 +1388,9 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(world.tick()));
         }
         world.step();
+        if (foresightLog && world.tick() % lw::kTicksPerGameMinute == 0) {
+            foresight.sample(world);
+        }
         if (daily && world.tick() % lw::kTicksPerGameDay == 0) {
             printDaily(world);
         }
@@ -1316,6 +1427,9 @@ int main(int argc, char** argv) {
     }
     if (storyLog) {
         printStories(world);
+    }
+    if (foresightLog) {
+        foresight.print(world);
     }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

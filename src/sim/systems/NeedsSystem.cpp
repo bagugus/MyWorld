@@ -50,10 +50,9 @@ constexpr float kGunshotFear = 0.3f;
 // (по чуть-чуть каждую минуту — примерно вдвое за час); слабее этого — остановилось.
 constexpr float kClotHours = 1.5f;
 constexpr float kBleedingStopped = 0.005f;
-// Заражение от укуса (этап 5.5) доходит до предела за столько часов; с
-// kFeverStart начинается лихорадка: здоровье уходит со скоростью до
-// 1 / kFeverHours в час на пределе. На пределе заражения — смерть.
-constexpr float kInfectionHours = 30.0f;
+// Заражение от укуса (этап 5.5) доходит до предела за kInfectionHours
+// (sim/Death.h); с kFeverStart начинается лихорадка: здоровье уходит со
+// скоростью до 1 / kFeverHours в час на пределе. На пределе заражения — смерть.
 constexpr float kFeverStart = 0.5f;
 constexpr float kFeverHours = 12.0f;
 // Тело человека ближе этого пугает (этап 5.5).
