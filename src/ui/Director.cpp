@@ -894,7 +894,7 @@ ShotPlan Director::planOf(float alpha) const {
                                 placed->kind == SpotKind::Desk;
             plan.lookHeight = lying ? 0.75f : seated ? 1.0f : 1.35f;
             plan.stage = (static_cast<std::uint64_t>(interiors_->version()) << 32) ^
-                         (static_cast<std::uint64_t>(placed->spot + 2) << 16) ^ (lying ? 1u : 0u);
+                         (static_cast<std::uint64_t>(placed->stage + 2) << 16) ^ (lying ? 1u : 0u);
             return plan;
         }
         // Комнат нет (не открыли): в кадре весь дом, со стороны двери.
@@ -1013,7 +1013,12 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
         }
     }
     const bool climax = slowmo_ || urgent(current_);
-    if (interiors_ != nullptr && series_) {
+    // Сцена гаснет: кадр замирает как был — ни камера, ни открытый дом не
+    // меняются (иначе в затемнении видно, как камера улетает к новому месту).
+    const bool frozen = series_ && show_.fading();
+    if (interiors_ != nullptr && series_ && frozen) {
+        interiors_->update(world_, dt);
+    } else if (interiors_ != nullptr && series_) {
         // Герой сцены дома — открыть его дом (12а.14); на вводном общем плане и
         // в кадре-паузе дом — снаружи.
         EntityId home = kInvalidId;
@@ -1029,7 +1034,7 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
         } else {
             interiors_->close();
         }
-        interiors_->update(world_);
+        interiors_->update(world_, dt);
     }
     if (!series_) {
         if (!enabled_) {
@@ -1047,6 +1052,9 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
     if (camera.mode() != ViewMode::Cinema) {
         camera.setMode(ViewMode::Cinema);
     }
+    if (frozen) {
+        return;
+    }
     // Под вводным титром и на установочном плане — место сцены общим планом
     // (12а.8), дальше — план кадра.
     ShotPlan plan;
@@ -1062,7 +1070,8 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
         plan = establishingPlan(); // смотреть пока нечего
     }
     shot_ = plan.size;
-    cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, show_.finale(), dt);
+    cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, show_.finale(), dt,
+                   show_.hidden());
     // В лог — смена приёма: ход съёмки видно по запуску со снимком.
     if (cinema_.framingTitle() != loggedFraming_ || cinema_.sense() != loggedSense_) {
         loggedFraming_ = cinema_.framingTitle();

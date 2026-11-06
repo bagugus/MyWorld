@@ -60,9 +60,11 @@ public:
     void cut() { pendingCut_ = true; }
     // Раз за кадр: поставить кадр камеры. heading — куда обращён герой
     // (atan2(dx, dy), как у моделей), если известно; climax — вот-вот
-    // кульминация; finale — финал, камера отъезжает; dt — реальные секунды.
+    // кульминация; finale — финал, камера отъезжает; hidden — кадр закрыт
+    // чёрным (титр, скачок): камера встаёт на место сразу, без перехода, —
+    // когда кадр проявится, она уже стоит; dt — реальные секунды.
     void update(CameraController& camera, const ShotPlan& plan, std::optional<float> heading, bool climax,
-                bool finale, float dt);
+                bool finale, float dt, bool hidden = false);
 
     // Затемнение после склейки: 1 — чёрный кадр, 0 — нет.
     float blackout() const { return blackout_; }

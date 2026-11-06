@@ -85,8 +85,19 @@ private:
         Emote emote = Emote::None;
         float at = 0.0f;
     };
+    // Кто стоит на улице в этом кадре (люди и зомби): чтобы не рисовать их
+    // друг в друге — в симуляции у них нет столкновений, и делающие одно и то
+    // же (разговор, работа, очередь, орда) стоят в одной точке.
+    struct Body {
+        float x = 0.0f;
+        float y = 0.0f;
+        EntityId id = kInvalidId;
+    };
 
     void readChronicle(const World& world);
+    // Сдвиг, чтобы не стоять в соседе: (x, y) — куда встанет сам; к сдвигу
+    // добавляется, сколько нужно, чтобы разойтись на личное расстояние.
+    void separate(EntityId id, float x, float y, bool hug, float& offX, float& offY) const;
     void indexBuildings(const World& world);
     void gatherFrame(const World& world);
     std::optional<Rect> buildingRect(const World& world, EntityId building) const;
@@ -104,6 +115,7 @@ private:
     std::unordered_map<std::int64_t, EntityId> buildingCells_; // клетка → здание
     bool indexed_ = false;
     std::vector<Spot> corpses_;                 // тела в этом кадре
+    std::unordered_map<std::int64_t, std::vector<Body>> crowd_; // клетка 2 м → кто в ней стоит
     std::unordered_set<EntityId> occupied_;     // здания, где кто-то внутри
     std::uint32_t gathered_ = 0;                // кадр, когда собраны
     std::size_t chronicleRead_ = 0;

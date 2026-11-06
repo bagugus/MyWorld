@@ -350,7 +350,7 @@ bool CinemaCamera::adoptSense(const ShotPlan& plan, float dt, bool cutting) {
 }
 
 void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::optional<float> heading,
-                          bool climax, bool finale, float dt) {
+                          bool climax, bool finale, float dt, bool hidden) {
     blackout_ = std::max(0.0f, blackout_ - dt / kFadeIn);
     settle_ = std::max(0.0f, settle_ - dt);
     if (!plan.valid) {
@@ -983,6 +983,13 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
     } else if (cutHere || framing != framing_) {
         shot.cut = true; // «восьмёрка», новое место панорамы, другой приём — встык
         settle_ = 0.0f;
+    }
+    if (hidden) {
+        // Под чёрным кадром переход не виден и не нужен: камера сразу на месте,
+        // иначе зритель увидит, как она доезжает, когда кадр проявится.
+        shot.cut = true;
+        settle_ = 0.0f;
+        blackout_ = 0.0f;
     }
     if (settle_ > 0.0f) {
         shot.smoothing = std::max(shot.smoothing, kSettleSmoothing);

@@ -42,6 +42,10 @@ constexpr float kReloadSeconds = 1.6f;
 // Подход к стене, воде, телу — метры в секунду и не дальше этого.
 constexpr float kOffsetSpeed = 1.2f;
 constexpr float kMaxOffset = 2.2f;
+// Личное расстояние: ближе фигуры расходятся (только облик), метры; ищут
+// соседей по клеткам такого размера.
+constexpr float kPersonal = 0.62f;
+constexpr float kCrowdCell = 2.0f;
 // Разговор — на таком расстоянии, объятие — на таком.
 constexpr float kTalkDistance = 1.1f;
 constexpr float kHugDistance = 0.45f;
@@ -424,7 +428,20 @@ void Animator::gatherFrame(const World& world) {
     gathered_ = frame_;
     corpses_.clear();
     occupied_.clear();
+    crowd_.clear();
     const entt::registry& registry = world.registry();
+    const auto crowdKey = [](float x, float y) {
+        return (static_cast<std::int64_t>(std::floor(y / kCrowdCell)) << 32) ^
+               static_cast<std::uint32_t>(static_cast<std::int32_t>(std::floor(x / kCrowdCell)));
+    };
+    for (const auto [entity, person, position, id] : registry.view<const Person, const Position, const Id>().each()) {
+        if (!person.indoors) {
+            crowd_[crowdKey(position.x, position.y)].push_back({position.x, position.y, id.value});
+        }
+    }
+    for (const auto [entity, zombie, position, id] : registry.view<const Zombie, const Position, const Id>().each()) {
+        crowd_[crowdKey(position.x, position.y)].push_back({position.x, position.y, id.value});
+    }
     for (const auto [entity, corpse, position, id] : registry.view<const Corpse, const Position, const Id>().each()) {
         corpses_.push_back({position.x, position.y, id.value, corpse.kind != CorpseKind::Animal});
     }
@@ -433,6 +450,63 @@ void Animator::gatherFrame(const World& world) {
             occupied_.insert(person.home);
         }
     }
+}
+
+void Animator::separate(EntityId id, float x, float y, bool hug, float& offX, float& offY) const {
+    const float px = x + offX;
+    const float py = y + offY;
+    const int cx = static_cast<int>(std::floor(x / kCrowdCell));
+    const int cy = static_cast<int>(std::floor(y / kCrowdCell));
+    float pushX = 0.0f;
+    float pushY = 0.0f;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            const std::int64_t key = (static_cast<std::int64_t>(cy + dy) << 32) ^
+                                     static_cast<std::uint32_t>(static_cast<std::int32_t>(cx + dx));
+            const auto cell = crowd_.find(key);
+            if (cell == crowd_.end()) {
+                continue;
+            }
+            for (const Body& other : cell->second) {
+                if (other.id == id) {
+                    continue;
+                }
+                // Сосед там, где его нарисовали в прошлом кадре (со своим сдвигом).
+                float ox = other.x;
+                float oy = other.y;
+                if (const auto it = states_.find(other.id); it != states_.end() && !it->second->fresh) {
+                    ox += it->second->offX;
+                    oy += it->second->offY;
+                }
+                const float personal = hug ? kHugDistance * 0.8f : kPersonal;
+                float ax = px - ox;
+                float ay = py - oy;
+                float d = std::hypot(ax, ay);
+                if (d >= personal) {
+                    continue;
+                }
+                if (d < 1e-3f) {
+                    // Ровно в одной точке: расходятся в разные стороны по паре id.
+                    const EntityId lo = std::min(id, other.id);
+                    const EntityId hi = std::max(id, other.id);
+                    const float angle = static_cast<float>(mix32((lo << 20) ^ hi) % 6283u) / 1000.0f;
+                    const float sign = id == lo ? 1.0f : -1.0f;
+                    ax = std::sin(angle) * sign;
+                    ay = std::cos(angle) * sign;
+                    d = 0.0f;
+                } else {
+                    ax /= d;
+                    ay /= d;
+                }
+                // Каждый уходит на половину: вторую половину сделает сосед.
+                const float move = (personal - d) * 0.5f;
+                pushX += ax * move;
+                pushY += ay * move;
+            }
+        }
+    }
+    offX += pushX;
+    offY += pushY;
 }
 
 std::optional<Animator::Rect> Animator::buildingRect(const World& world, EntityId building) const {
@@ -870,6 +944,10 @@ void Animator::chooseHuman(const World& world, entt::entity entity, State& state
     };
 
     // --- Дома, в комнате (12а.14): поза — по месту ---
+    if (indoor != nullptr && indoor->walking) {
+        choice.act = hurt ? Act::Limp : Act::Walk; // идёт к новому месту в комнате
+        return;
+    }
     if (indoor != nullptr) {
         if ((person != nullptr && person->asleep) || indoor->what == Occupation::Sleep) {
             choice.act = unitOf(seed ^ state.starts, 60) < 0.5f ? Act::SleepBack : Act::SleepCurled;
@@ -1478,7 +1556,9 @@ const Figure& Animator::animate(const World& world, entt::entity entity, EntityI
         figure.heading = std::remainder(figure.heading, kTau);
     };
     const bool corpseBody = body == Figure::Body::HumanCorpse || body == Figure::Body::AnimalCorpse;
-    if (indoor != nullptr) {
+    if (indoor != nullptr && indoor->walking) {
+        turnTo(indoor->heading); // идёт по комнате — поворачивает по ходу
+    } else if (indoor != nullptr) {
         figure.heading = indoor->heading; // место в комнате задаёт, куда смотреть
     } else if (!corpseBody && choice.act != Act::Rise) {
         if (speed > kMoving && !(choice.face && choice.faceMoving)) {
@@ -1492,6 +1572,10 @@ const Figure& Animator::animate(const World& world, entt::entity entity, EntityI
     {
         float tx = choice.offX;
         float ty = choice.offY;
+        if (indoor == nullptr && (body == Figure::Body::Human || body == Figure::Body::Zombie)) {
+            gatherFrame(world);
+            separate(id, x, y, choice.act == Act::Hug, tx, ty); // не стоять в соседе
+        }
         const float length = std::hypot(tx, ty);
         if (length > kMaxOffset) {
             tx *= kMaxOffset / length;
