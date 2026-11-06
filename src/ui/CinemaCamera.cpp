@@ -972,7 +972,9 @@ void CinemaCamera::update(CameraController& camera, const ShotPlan& plan, std::o
         const float ratio = std::max(before, shot.distance) / std::max(std::min(before, shot.distance), 0.1f);
         if (!started_ || (cutting && away > std::max(kCutDistance, kCutShare * shot.distance))) {
             shot.cut = true;
-            blackout_ = 1.0f;
+            // Проявка из чёрного — только в самом начале; дальняя склейка — встык
+            // (по отзыву: смена кадра без затемнения).
+            blackout_ = started_ ? 0.0f : 1.0f;
             settle_ = 0.0f;
         } else if (recompose || ratio > kSizeCut || framing != Framing::Standard) {
             shot.cut = true; // другая крупность, другой приём — встык
