@@ -1,5 +1,6 @@
 #include "render/Trees3D.h"
 
+#include "render/LandUse.h"
 #include "render/Lighting3D.h"
 #include "render/Terrain3D.h"
 #include "render/TreeLayout.h"
@@ -601,38 +602,9 @@ float farthestOfBox(Vector3 p, Vector3 min, Vector3 max) {
 
 } // namespace
 
-Trees3D::Trees3D(const Map& map, const Terrain3D& terrain) : map_(map), terrain_(terrain) {
-    const int chunksX = (map.width() + kChunkCells - 1) / kChunkCells;
-    const int chunksY = (map.height() + kChunkCells - 1) / kChunkCells;
-    chunks_.resize(static_cast<std::size_t>(chunksX) * static_cast<std::size_t>(chunksY));
-    for (int cy = 0; cy < chunksY; ++cy) {
-        for (int cx = 0; cx < chunksX; ++cx) {
-            Chunk& chunk = chunks_[static_cast<std::size_t>(cy * chunksX + cx)];
-            chunk.left = cx * kChunkCells;
-            chunk.top = cy * kChunkCells;
-            chunk.width = std::min(kChunkCells, map.width() - chunk.left);
-            chunk.height = std::min(kChunkCells, map.height() - chunk.top);
-            float low = 1.0e9f;
-            float high = -1.0e9f;
-            for (int y = chunk.top; y < chunk.top + chunk.height; ++y) {
-                for (int x = chunk.left; x < chunk.left + chunk.width; ++x) {
-                    if (map.cover.at(x, y) == Cover::Forest) {
-                        chunk.forest = true;
-                        low = std::min(low, map.elevationMeters({x, y}));
-                        high = std::max(high, map.elevationMeters({x, y}));
-                    }
-                }
-            }
-            if (!chunk.forest) {
-                continue;
-            }
-            chunk.min = {static_cast<float>(chunk.left) * Map::kCellSize - kCrownReach, low - 2.0f,
-                         static_cast<float>(chunk.top) * Map::kCellSize - kCrownReach};
-            chunk.max = {static_cast<float>(chunk.left + chunk.width) * Map::kCellSize + kCrownReach,
-                         high + kTallest,
-                         static_cast<float>(chunk.top + chunk.height) * Map::kCellSize + kCrownReach};
-        }
-    }
+Trees3D::Trees3D(const Map& map, const Terrain3D& terrain, const LandUse& land)
+    : map_(map), terrain_(terrain), land_(land) {
+    scan();
 
     shader_ = SceneShading::loadShader(kTreeVs, kTreeFs);
     const std::string shadowFs = std::string("#define SHADOW_PASS\n") + kTreeFs;
@@ -660,6 +632,51 @@ Trees3D::~Trees3D() {
     MemFree(shadowMaterial_.maps);
 }
 
+void Trees3D::scan() {
+    for (Chunk& chunk : chunks_) {
+        unload(chunk.far);
+        for (Part& part : chunk.near) {
+            unload(part);
+        }
+    }
+    const int chunksX = (map_.width() + kChunkCells - 1) / kChunkCells;
+    const int chunksY = (map_.height() + kChunkCells - 1) / kChunkCells;
+    chunks_.assign(static_cast<std::size_t>(chunksX) * static_cast<std::size_t>(chunksY), Chunk{});
+    TreeSpec trees[kMaxTreesPerCell];
+    for (int cy = 0; cy < chunksY; ++cy) {
+        for (int cx = 0; cx < chunksX; ++cx) {
+            Chunk& chunk = chunks_[static_cast<std::size_t>(cy * chunksX + cx)];
+            chunk.left = cx * kChunkCells;
+            chunk.top = cy * kChunkCells;
+            chunk.width = std::min(kChunkCells, map_.width() - chunk.left);
+            chunk.height = std::min(kChunkCells, map_.height() - chunk.top);
+            float low = 1.0e9f;
+            float high = -1.0e9f;
+            for (int y = chunk.top; y < chunk.top + chunk.height; ++y) {
+                for (int x = chunk.left; x < chunk.left + chunk.width; ++x) {
+                    if (map_.cover.at(x, y) == Cover::Forest || openTreesInCell(land_, {x, y}, trees) > 0) {
+                        chunk.forest = true;
+                        low = std::min(low, map_.elevationMeters({x, y}));
+                        high = std::max(high, map_.elevationMeters({x, y}));
+                    }
+                }
+            }
+            if (!chunk.forest) {
+                continue;
+            }
+            chunk.min = {static_cast<float>(chunk.left) * Map::kCellSize - kCrownReach, low - 2.0f,
+                         static_cast<float>(chunk.top) * Map::kCellSize - kCrownReach};
+            chunk.max = {static_cast<float>(chunk.left + chunk.width) * Map::kCellSize + kCrownReach,
+                         high + kTallest,
+                         static_cast<float>(chunk.top + chunk.height) * Map::kCellSize + kCrownReach};
+        }
+    }
+}
+
+void Trees3D::reset() {
+    scan();
+}
+
 void Trees3D::buildFar(Chunk& chunk) {
     const double start = GetTime();
     TreeBuilder builder;
@@ -667,7 +684,7 @@ void Trees3D::buildFar(Chunk& chunk) {
     int count = 0;
     for (int y = chunk.top; y < chunk.top + chunk.height && builder.hasRoom(); ++y) {
         for (int x = chunk.left; x < chunk.left + chunk.width && builder.hasRoom(); ++x) {
-            const int n = treesInCell(map_, {x, y}, trees);
+            const int n = cellTrees(map_, &land_, {x, y}, trees);
             for (int i = 0; i < n && builder.hasRoom(); ++i) {
                 if (trees[i].kind == TreeKind::Bush) {
                     continue;
@@ -699,7 +716,7 @@ void Trees3D::buildNear(Chunk& chunk, int block) {
     int count = 0;
     for (int y = top; y < bottom && builder.hasRoom(); ++y) {
         for (int x = left; x < right && builder.hasRoom(); ++x) {
-            const int n = treesInCell(map_, {x, y}, trees);
+            const int n = cellTrees(map_, &land_, {x, y}, trees);
             for (int i = 0; i < n && builder.hasRoom(); ++i) {
                 builder.begin(trees[i], terrain_.groundAt(trees[i].x, trees[i].z));
                 emitNear(builder, trees[i]);

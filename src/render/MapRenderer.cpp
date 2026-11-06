@@ -26,6 +26,12 @@ constexpr Color kShallowSea = {72, 144, 178, 255};
 constexpr Color kDeepSea = {24, 62, 112, 255};
 constexpr Color kLake = {58, 122, 170, 255};
 constexpr Color kRiver = {78, 146, 192, 255};
+// Дно под водой в 3D (видно сквозь мелководье): у реки — галька с песком, у
+// озера — ил, у моря — песок, глубже темнее.
+constexpr Color kRiverBed = {122, 108, 82, 255};
+constexpr Color kLakeBed = {98, 92, 72, 255};
+constexpr Color kSeaSand = {176, 164, 128, 255};
+constexpr Color kSeaDeep = {52, 66, 72, 255};
 
 // Фильтр для 3D: билинейный с мип-уровнями и анизотропией — вдаль земля под
 // углом не рябит и не мылится; чёткие клетки вблизи — в шейдере земли.
@@ -81,6 +87,18 @@ Color cellColor(const Map& map, int x, int y, bool shade) {
         break;
     }
 
+    if (!shade) {
+        switch (map.water.at(x, y)) {
+        case Water::Sea:
+            return mix(kSeaSand, kSeaDeep, std::clamp(-map.elevationMeters({x, y}) / 6.0f, 0.0f, 1.0f));
+        case Water::Lake:
+            return kLakeBed;
+        case Water::River:
+            return kRiverBed;
+        case Water::None:
+            break;
+        }
+    }
     switch (map.water.at(x, y)) {
     case Water::Sea: {
         const float depth = -map.elevationMeters({x, y});
@@ -165,8 +183,20 @@ MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells -
                     // Снег тоже с отмывкой: склоны остаются читаемыми.
                     snow[index] = scale({236, 240, 246, snowAlpha(map, left + x, top + y)},
                                         std::min(1.0f, hillshade(map, left + x, top + y) * 1.05f));
-                    const float deciduous = deciduousShareOf(map, {left + x, top + y});
-                    forest[index] = {static_cast<unsigned char>(std::lround(deciduous * 255.0f)), 0, 0, 255};
+                    // Маски для 3D: R — доля лиственных в лесу, G — поле, B — луг
+                    // (трава и цветы по сезону), A — дорога (канавы вдоль неё).
+                    const int cx = left + x;
+                    const int cy = top + y;
+                    const float deciduous = deciduousShareOf(map, {cx, cy});
+                    const bool open = map.water.at(cx, cy) == Water::None && map.road.at(cx, cy) == Road::None &&
+                                      map.cover.at(cx, cy) == Cover::None;
+                    const bool field = open && map.ground.at(cx, cy) == Ground::Field;
+                    const bool meadow = open && map.ground.at(cx, cy) == Ground::Grass;
+                    const bool road = map.road.at(cx, cy) != Road::None && map.water.at(cx, cy) == Water::None;
+                    forest[index] = {static_cast<unsigned char>(std::lround(deciduous * 255.0f)),
+                                     static_cast<unsigned char>(field ? 255 : 0),
+                                     static_cast<unsigned char>(meadow ? 255 : 0),
+                                     static_cast<unsigned char>(road ? 255 : 0)};
                 }
             }
 

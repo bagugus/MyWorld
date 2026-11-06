@@ -29,7 +29,9 @@ public:
     struct GroundChunk {
         Texture2D texture{}; // без отмывки: в 3D склоны лепит свет
         Texture2D snow{};    // в 3D нужна только альфа: сколько клетки заносит
-        Texture2D forest{};  // красный — доля лиственных в клетке леса (render/TreeLayout)
+        // Маски: R — доля лиственных в клетке леса (render/TreeLayout), G — поле,
+        // B — луг, A — дорога (этап 11.9).
+        Texture2D forest{};
         int left = 0;
         int top = 0;
         int width = 0;

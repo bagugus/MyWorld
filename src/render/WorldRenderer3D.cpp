@@ -8,6 +8,7 @@
 #include "render/TreeLayout.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Scenario.h"
 #include "sim/TimeScale.h"
 #include "sim/Weapons.h"
 #include "sim/World.h"
@@ -139,7 +140,7 @@ void drawSmoke(const World& world, const WorldEvent& event, const Terrain3D& ter
 } // namespace
 
 WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
-    : terrain_(map, textures), trees_(map, terrain_) {
+    : land_(map), terrain_(map, textures, land_), trees_(map, terrain_, land_), props_(map, terrain_, land_) {
     // Перила — по краям настила над открытой водой, опоры — через клетку до дна.
     const auto key = [&map](Cell cell) {
         return static_cast<std::int64_t>(cell.y) * map.width() + cell.x;
@@ -243,6 +244,12 @@ BuildingModel WorldRenderer3D::buildingModel(const Building& building, EntityId 
 }
 
 void WorldRenderer3D::updateBuildingBounds(const World& world) {
+    if (!land_.hasSettlements()) {
+        // Дворы и столбы — по зданиям: раскладка вне леса меняется.
+        land_.addSettlements(world);
+        trees_.reset();
+        props_.reset();
+    }
     const auto buildings = world.registry().view<const Building>();
     if (buildingBounds_.size() == buildings.size()) {
         return; // здания не меняются: посчитано раньше
@@ -326,6 +333,29 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     if (treesEnabled_) {
         trees_.update(view, kNearTreeRange, std::min(drawDistance_, kMaxTreeRange));
     }
+    // Мелочь вне леса; мусор — по запустению мира (с паники, больше после коллапса).
+    Props3D::Look props;
+    props.year = trees.year;
+    props.snow = snow;
+    props.wind = trees.wind;
+    props.time = trees.time;
+    switch (worldPhase(world)) {
+    case WorldPhase::Panic:
+        props.decay = 0.25f;
+        break;
+    case WorldPhase::Collapse:
+        props.decay = 0.6f;
+        break;
+    case WorldPhase::Survival:
+        props.decay = 1.0f;
+        break;
+    default:
+        props.decay = 0.0f;
+        break;
+    }
+    if (propsEnabled_) {
+        props_.update(view, Props3D::kSmallRange, std::min(drawDistance_, kMaxPropsRange));
+    }
 
     // Тени: квадрат вокруг точки взгляда, чуть вперёд по взгляду.
     const float distance = Vector3Distance(eye, view.target);
@@ -340,6 +370,9 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
             terrain_.drawShadowCasters(view, shading_.shadowCenter(), shading_.shadowRadius());
             if (treesEnabled_) {
                 trees_.drawShadows(shading_, trees);
+            }
+            if (propsEnabled_) {
+                props_.drawShadows(shading_, props);
             }
             rlSetTexture(rlGetTextureIdDefault());
             rlBegin(RL_QUADS);
@@ -357,9 +390,12 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     BeginMode3D(view);
     // Даже полный покров оставляет карту читаемой.
     const Foliage foliage = averageFoliageAt(trees.year);
-    terrain_.drawGround(view, snow * 0.85f, {foliage.leaves, foliage.turn, foliage.fresh}, shading_);
+    terrain_.drawGround(view, snow * 0.85f, {foliage.leaves, foliage.turn, foliage.fresh}, trees.year, shading_);
     if (treesEnabled_) {
         trees_.draw(shading_, trees);
+    }
+    if (propsEnabled_) {
+        props_.draw(shading_, props);
     }
 
     // Всё непрозрачное — одним набором четырёхугольников без текстуры.
@@ -377,7 +413,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         std::erase_if(motion_, [this](const auto& entry) { return frame_ - entry.second.seen > kForgetFrames; });
     }
 
-    terrain_.drawWater(time, shading_);
+    terrain_.drawWater(time, trees.wind, shading_);
 
     for (const auto [entity, event] : registry.view<const WorldEvent>().each()) {
         if (world.tick() < event.signalUntil) {

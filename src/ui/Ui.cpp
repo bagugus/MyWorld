@@ -690,6 +690,15 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                     }
                 }
             }
+            bool props = renderer3d.propsEnabled();
+            if (ImGui::Checkbox("Мелочи", &props)) {
+                renderer3d.setPropsEnabled(props);
+            }
+            if (props) {
+                ImGui::SameLine();
+                ImGui::Text("посевы, трава, заборы, столбы: в кадре %d, сеток %d", renderer3d.props().itemsDrawn(),
+                            renderer3d.props().meshesLoaded());
+            }
             const SceneShading& shading = renderer3d.shading();
             const SceneLight& light = shading.light();
             ImGui::Text("Свет: %s %.2f, рассеянный %.2f", light.moonlit ? "луна" : "солнце",

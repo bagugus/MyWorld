@@ -8,6 +8,7 @@
 
 namespace lw {
 
+class LandUse;
 class Map;
 class SceneShading;
 class Terrain3D;
@@ -27,13 +28,20 @@ class Terrain3D;
 // деревья качаются по ветру. Нормаль — по производным позиции во фрагментном
 // шейдере (грани плоские, вершины общие — сетки вдвое-втрое меньше).
 //
+// С этапа 11.9 — и деревья вне леса (render/TreeLayout: openTreesInCell):
+// одиночные, рощицы, кусты у дорог и воды, плодовые во дворах.
+//
 // Только читает карту. Создавать после InitWindow, уничтожать до CloseWindow.
 class Trees3D {
 public:
-    Trees3D(const Map& map, const Terrain3D& terrain);
+    Trees3D(const Map& map, const Terrain3D& terrain, const LandUse& land);
     ~Trees3D();
     Trees3D(const Trees3D&) = delete;
     Trees3D& operator=(const Trees3D&) = delete;
+
+    // Раскладка вне леса изменилась (LandUse узнал о дворах): пересчитать, где
+    // есть деревья, и построить сетки заново.
+    void reset();
 
     // Что нужно в этом кадре: подробные — до nearRange от камеры, упрощённые —
     // до farRange. Строит недостающее (ближнее — первым), выгружает ненужное.
@@ -75,7 +83,7 @@ private:
         int top = 0;
         int width = 0;
         int height = 0;
-        bool forest = false;
+        bool forest = false; // есть деревья (в лесу или вне его)
         Vector3 min{}; // границы с деревьями, метры
         Vector3 max{};
         Part far;
@@ -86,6 +94,7 @@ private:
         bool farOnly = false; // подробные ещё не готовы: все деревья — упрощённые
     };
 
+    void scan();
     void buildFar(Chunk& chunk);
     void buildNear(Chunk& chunk, int block);
     void unload(Part& part);
@@ -96,6 +105,7 @@ private:
 
     const Map& map_;
     const Terrain3D& terrain_;
+    const LandUse& land_;
     std::vector<Chunk> chunks_;
     std::uint32_t frame_ = 0;
     float nearRange_ = 0.0f;

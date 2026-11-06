@@ -70,6 +70,8 @@ int main(int argc, char** argv) {
     float path[4] = {};
     bool navGraph = false;
     bool director = false;
+    bool noUi = false;    // --no-ui: без окон и подписей (снимки мира)
+    bool noProps = false; // --no-props: без мелочи вне леса (сравнить облик)
     std::uint64_t selectId = 0;
     bool view3d = false;
     std::optional<std::pair<float, float>> orbit;
@@ -117,6 +119,10 @@ int main(int argc, char** argv) {
             view3d = true;
         } else if (std::strcmp(argv[i], "--foliage") == 0 && i + 1 < argc) {
             foliage = std::strtof(argv[++i], nullptr);
+        } else if (std::strcmp(argv[i], "--no-ui") == 0) {
+            noUi = true;
+        } else if (std::strcmp(argv[i], "--no-props") == 0) {
+            noProps = true;
         } else if (std::strcmp(argv[i], "--director") == 0) {
             director = true;
         } else if (std::strcmp(argv[i], "--nav-graph") == 0) {
@@ -165,6 +171,7 @@ int main(int argc, char** argv) {
         camera.setObstacles(&renderer3d.buildingBounds()); // кинокамера не заходит в стены
         lw::ui::loadCameraSettings(camera.settings());
         renderer3d.setFoliageYear(foliage);
+        renderer3d.setPropsEnabled(!noProps);
         if (orbit) {
             camera.setOrbitAngles(orbit->first, orbit->second);
         }
@@ -255,7 +262,7 @@ int main(int argc, char** argv) {
 
             lw::ui::beginFrame();
             lw::ui::setNameSource(&world);
-            if (!series) {
+            if (!series && !noUi) {
                 lw::ui::drawSettlementLabels(world, camera);
                 lw::ui::drawTimePanel(world, environment, driver);
                 lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
@@ -271,9 +278,10 @@ int main(int argc, char** argv) {
 
             EndDrawing();
 
-            const bool settled = !camera.is3d() || renderer3d.trees().pending() == 0;
+            const bool settled = !camera.is3d() || renderer3d.pending() == 0;
             if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait) &&
                 GetTime() >= screenshotDelay) {
+                TraceLog(LOG_INFO, "SCREENSHOT: frame %d, %d FPS", frame, GetFPS());
                 const Image image = LoadImageFromScreen();
                 ExportImage(image, screenshot);
                 UnloadImage(image);

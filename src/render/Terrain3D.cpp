@@ -1,5 +1,7 @@
 #include "render/Terrain3D.h"
 
+#include "render/FieldLayout.h"
+#include "render/LandUse.h"
 #include "render/Lighting3D.h"
 #include "render/MapRenderer.h"
 
@@ -9,6 +11,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <string>
 
 namespace lw {
 
@@ -17,12 +20,18 @@ namespace {
 constexpr float kCell = Map::kCellSize;
 constexpr float kNoWater = -1.0e9f;
 
-// Поверхность воды чуть ниже расчётной: берега и долины, засыпанные ровно до
-// уровня озера, остаются сухими, а не мерцают вровень с водой.
-constexpr float kWaterInset = 0.3f;
+// Поверхность воды чуть ниже расчётной (LandUse::channelInset: у озёр и моря
+// на 0,3 м, у рек — глубже): берега и долины, засыпанные ровно до уровня озера,
+// остаются сухими, а не мерцают вровень с водой.
 // Угол на границе воды и суши — на столько ниже поверхности воды: берег
 // проходит по краю водных клеток, а не заходит в сухие.
 constexpr float kShoreDepth = 0.1f;
+// У пресной воды угол на границе — не мельче этого (этап 11.9): кромка воды
+// заходит в соседнюю сухую клетку на метр-полтора, выше неё — откос берега.
+constexpr float kRiverEdgeDepth = 0.3f;
+constexpr float kLakeEdgeDepth = 0.2f;
+// Уровень воды в вершине земли, где воды рядом нет: дно и мокрый берег не рисуются.
+constexpr float kDryLevel = -1000.0f;
 // Глубже этого существо уже не идёт по дну, а плывёт.
 constexpr float kSwimDepth = 1.3f;
 // Настил моста над уровнем воды.
@@ -57,19 +66,25 @@ float waterLevel(const Map& map, Cell cell) {
 }
 
 // Земля: текстура карты (пиксель — клетка) с рваными краями клеток, детальный
-// шум, снег по маске, свет по нормали, тень и дымка (render/Lighting3D).
+// шум, снег по маске, свет по нормали, тень и дымка (render/Lighting3D). С
+// этапа 11.9: поля по сезону (лоскуты render/FieldLayout — борозды, всходы,
+// колосья, стерня, межи), луга по сезону с цветами, канавы вдоль дорог, дно и
+// мокрый берег у воды (texcoord2.x — уровень воды у вершины).
 constexpr const char* kGroundVs = R"(#version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
+in vec2 vertexTexCoord2;
 in vec3 vertexNormal;
 uniform mat4 mvp;
 out vec3 fragPosition;
 out vec2 fragTexCoord;
 out vec3 fragNormal;
+out float fragWater;
 void main() {
     fragPosition = vertexPosition;
     fragTexCoord = vertexTexCoord;
     fragNormal = vertexNormal;
+    fragWater = vertexTexCoord2.x;
     gl_Position = mvp * vec4(vertexPosition, 1.0);
 }
 )";
@@ -78,11 +93,13 @@ constexpr const char* kGroundFs = R"(
 in vec3 fragPosition;
 in vec2 fragTexCoord;
 in vec3 fragNormal;
+in float fragWater;
 uniform sampler2D texture0; // карта
 uniform sampler2D texture1; // снег: альфа — сколько клетки заносит
-uniform sampler2D texture2; // лиственный лес: красный — доля лиственных
+uniform sampler2D texture2; // маски: R — лиственный лес, G — поле, B — луг, A — дорога
 uniform float snowAmount;
 uniform vec3 foliage;       // листва, пожелтение, молодая листва — в среднем
+uniform float year;         // доля года с 1 марта
 
 out vec4 finalColor;
 
@@ -99,6 +116,56 @@ vec2 crisp(vec2 uv, vec2 size, vec2 cellsPerPixel) {
     return t / size;
 }
 
+// Поле: между рядами — пашня с бороздами или стерня, на рядах — растения по
+// сезону; у границы лоскута — межа травой. footprint — метров на пиксель:
+// ряды мельче пикселя сливаются в средний цвет, а не рябят.
+vec3 fieldColor(vec2 p, vec3 meadow, float footprint) {
+    Patch plot = fieldPatch(p);
+    Crop crop = cropState(plot.crop, year, plot.timing);
+    float spacing = rowSpacing(plot.crop);
+    vec2 n = vec2(-sin(plot.angle), cos(plot.angle));
+    float r = dot(p, n) / spacing;
+    float rows = clamp(footprint / spacing * 1.5, 0.0, 1.0); // 1 — ряды мельче пикселя
+    float furrow = mix(0.5 + 0.5 * cos(6.2831853 * r), 0.5, rows);
+    vec3 soil = mix(vec3(0.27, 0.21, 0.16), vec3(0.42, 0.34, 0.25), furrow);
+    // Стерня — светлая солома полосами по рядам.
+    vec3 stubble = mix(vec3(0.60, 0.53, 0.34), vec3(0.76, 0.68, 0.44), furrow);
+    vec3 between = mix(soil, stubble, crop.stubble);
+    float from = abs(fract(r) - 0.5);
+    float aa = max(fwidth(r), 0.02);
+    float inRow = 1.0 - smoothstep(0.5 * crop.cover - aa, 0.5 * crop.cover + aa, from);
+    inRow = mix(inRow, crop.cover, rows);
+    float plants = inRow * clamp(crop.h * 6.0, 0.0, 1.0) * (1.0 - crop.stubble);
+    vec3 color = mix(between, crop.plant * 0.82, plants);
+    color = mix(color, meadow, crop.meadow);
+    // Межа — полоса травы по границе лоскута.
+    return mix(meadow, color, smoothstep(kBalkWidth - 0.3, kBalkWidth + 0.3, plot.edge));
+}
+
+// Цветы на лугу — точки по сезону, только вблизи (мельче пары пикселей рябили бы).
+vec3 withFlowers(vec3 color, vec2 p, float footprint) {
+    float visible = 1.0 - smoothstep(0.012, 0.03, footprint);
+    if (visible <= 0.0) {
+        return color;
+    }
+    const float kStep = 0.3;
+    vec2 g = floor(p / kStep);
+    uint h = hash3(int(g.x), int(g.y), 77u);
+    float kind = hashUnit(h * 2654435761u);
+    float spring = ramp(0.08, 0.13, year) * (1.0 - ramp(0.26, 0.32, year));
+    float summer = ramp(0.22, 0.28, year) * (1.0 - ramp(0.44, 0.50, year));
+    float density = 0.07 * (kind < 0.5 ? spring : summer);
+    if (hashUnit(h) >= density) {
+        return color;
+    }
+    vec2 center = (g + 0.2 + 0.6 * vec2(hashUnit(h >> 3), hashUnit(h >> 7))) * kStep;
+    float spot = 1.0 - smoothstep(0.03, 0.03 + footprint, length(p - center));
+    vec3 petals = kind < 0.25 ? vec3(0.95, 0.95, 0.90) : kind < 0.5 ? vec3(0.95, 0.85, 0.20)
+                : kind < 0.7 ? vec3(0.45, 0.55, 0.95) : kind < 0.88 ? vec3(0.70, 0.40, 0.85)
+                : vec3(0.90, 0.20, 0.15);
+    return mix(color, petals, spot * visible);
+}
+
 void main() {
     vec2 size = vec2(textureSize(texture0, 0));
     vec2 p = fragPosition.xz;
@@ -113,17 +180,56 @@ void main() {
     vec2 dx = dFdx(fragTexCoord);
     vec2 dy = dFdy(fragTexCoord);
     vec3 base = textureGrad(texture0, uv, dx, dy).rgb;
+    vec4 masks = textureGrad(texture2, uv, dx, dy);
     // Лиственный лес под кронами и вдали, где деревьев уже нет, — по сезону.
-    float deciduous = textureGrad(texture2, uv, dx, dy).r;
+    float deciduous = masks.r;
     if (deciduous > 0.0) {
         vec3 green = base * mix(vec3(1.08, 1.06, 0.92), vec3(1.35, 1.32, 0.8), foliage.z);
         vec3 leafy = mix(green, vec3(0.44, 0.33, 0.12), foliage.y);
         base = mix(base, mix(vec3(0.27, 0.24, 0.2), leafy, foliage.x), deciduous);
     }
-    float fine = texture(detailMap, p / 21.0).r;
+    float footprint = max(length(fwidth(p)), 1e-4);
     float broad = texture(detailMap, p / 230.0).g;
+    float patchy = texture(detailMap, p / 70.0).g;
+    // Луг и межи — по сезону; на поле — посевы.
+    vec3 meadow = meadowColor(year, patchy) * (0.92 + 0.16 * texture(detailMap, p / 9.0).r);
+    if (masks.b > 0.01) {
+        base = mix(base, withFlowers(meadow, p, footprint), masks.b);
+    }
+    if (masks.g > 0.01) {
+        base = mix(base, fieldColor(p, meadow, footprint), masks.g);
+    }
+    // Канава вдоль дороги: в полутора метрах от края полотна — сырая, темнее и зеленее.
+    // Расстояние до полотна — до ближайшей из восьми соседних дорожных клеток,
+    // с тем же сдвигом краёв, что у самой дороги: канава идёт вдоль неё, а не
+    // уголками по клеткам.
+    if (masks.a < 0.5 && near > 0.0) {
+        vec2 t = (fragTexCoord + jitter / size) * size;
+        ivec2 c = ivec2(floor(t));
+        ivec2 last = ivec2(size) - 1;
+        float edge = 9.0;
+        for (int j = -1; j <= 1; ++j) {
+            for (int i = -1; i <= 1; ++i) {
+                ivec2 n = clamp(c + ivec2(i, j), ivec2(0), last);
+                if ((i != 0 || j != 0) && texelFetch(texture2, n, 0).a > 0.5) {
+                    vec2 outside = max(max(vec2(n) - t, t - vec2(n) - 1.0), vec2(0.0));
+                    edge = min(edge, length(outside));
+                }
+            }
+        }
+        float ditch = (1.0 - smoothstep(0.25, 0.5, abs(edge * 4.0 - 1.3))) * near;
+        base = mix(base, base * vec3(0.74, 0.82, 0.70), ditch);
+    }
+    // У воды: мокрый берег темнее, под водой — дно (песок и галька, глубже — ил).
+    float under = fragWater - fragPosition.y;
+    if (under > -0.45) {
+        base *= mix(1.0, 0.7, smoothstep(-0.45, 0.0, under));
+        vec3 bed = mix(vec3(0.44, 0.40, 0.30), vec3(0.22, 0.22, 0.18), smoothstep(0.3, 2.5, under));
+        base = mix(base, bed, smoothstep(0.0, 0.25, under));
+    }
+    float fine = texture(detailMap, p / 21.0).r;
     base *= 0.78 + 0.26 * fine + 0.18 * broad;
-    float snow = textureGrad(texture1, uv, dx, dy).a * snowAmount;
+    float snow = textureGrad(texture1, uv, dx, dy).a * snowAmount * (1.0 - smoothstep(-0.1, 0.0, under));
     base = mix(base, vec3(0.90, 0.92, 0.96) * (0.94 + 0.08 * fine), snow);
     vec3 n = normalize(fragNormal);
     vec3 color = base * lighting(n, shadowAt(fragPosition, n));
@@ -132,16 +238,21 @@ void main() {
 )";
 
 // Вода: рябь — сумма бегущих волн, цвет — от глубины и света, под углом
-// отражает небо, у берега прозрачна; блик — от солнца или луны.
+// отражает небо, у берега прозрачна; блик — от солнца или луны. С этапа 11.9:
+// волны бегут по ветру и растут с ним; на реке рябь сносит по течению
+// (нормаль вершины — скорость течения по x и z, в y — перекат), на перекатах — пена.
 constexpr const char* kWaterVs = R"(#version 330
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
+in vec3 vertexNormal;
 uniform mat4 mvp;
 out vec3 fragPosition;
 out float fragDepth;
+out vec3 fragFlow;
 void main() {
     fragPosition = vertexPosition;
     fragDepth = vertexTexCoord.x;
+    fragFlow = vertexNormal;
     gl_Position = mvp * vec4(vertexPosition, 1.0);
 }
 )";
@@ -149,8 +260,10 @@ void main() {
 constexpr const char* kWaterFs = R"(
 in vec3 fragPosition;
 in float fragDepth;
+in vec3 fragFlow;
 uniform float time;
 uniform vec3 skyColor;
+uniform vec2 wind;
 uniform vec4 colDiffuse;
 out vec4 finalColor;
 
@@ -167,16 +280,57 @@ vec2 wave(vec2 p, vec2 dir, float frequency, float speed, float amplitude) {
     return dir * (amplitude * resolved * cos(dot(p, dir) * frequency + time * speed));
 }
 
+vec2 turn(vec2 v, float a) {
+    float c = cos(a);
+    float s = sin(a);
+    return vec2(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+// Рябь течения: шум сносит по течению двумя фазами со сдвигом на полпериода —
+// узор не растягивается (карта течения). noise — для пены.
+vec2 current(vec2 p, vec2 velocity, out float noise) {
+    const float kCycle = 1.6;
+    float t = time / kCycle;
+    float phase0 = fract(t);
+    float phase1 = fract(t + 0.5);
+    float w0 = 1.0 - abs(1.0 - 2.0 * phase0);
+    vec2 a = p - velocity * phase0 * kCycle;
+    vec2 b = p - velocity * phase1 * kCycle + vec2(1.37, 0.71);
+    vec4 fineA = texture(detailMap, a / 4.0);
+    vec4 fineB = texture(detailMap, b / 4.0);
+    vec4 wideA = texture(detailMap, a / 13.0);
+    vec4 wideB = texture(detailMap, b / 13.0);
+    vec2 slope = mix((fineB.ba - 0.5) + 0.7 * (wideB.ba - 0.5), (fineA.ba - 0.5) + 0.7 * (wideA.ba - 0.5), w0);
+    noise = mix(0.6 * fineB.r + 0.4 * wideB.g, 0.6 * fineA.r + 0.4 * wideA.g, w0);
+    return slope;
+}
+
 void main() {
     vec3 toEye = viewPos - fragPosition;
     float distance = length(toEye);
     vec3 v = toEye / max(distance, 1e-3);
     vec2 p = fragPosition.xz;
     footprint = max(length(fwidth(p)), 1e-4);
-    vec2 slope = wave(p, vec2(0.80, 0.60), 0.90, 1.7, 0.050)
-               + wave(p, vec2(-0.53, 0.85), 1.70, 2.4, 0.030)
-               + wave(p, vec2(0.20, -0.98), 3.10, 3.3, 0.020)
-               + wave(p, vec2(-0.92, -0.39), 0.35, 1.0, 0.040);
+    // Волны — по ветру, в ветер выше.
+    float windSpeed = length(wind);
+    vec2 along = windSpeed > 0.1 ? wind / windSpeed : vec2(0.80, 0.60);
+    float gust = 0.35 + 0.65 * clamp(windSpeed / 8.0, 0.0, 1.5);
+    vec2 slope = gust * (wave(p, along, 0.90, 1.7, 0.050)
+               + wave(p, turn(along, 0.6), 1.70, 2.4, 0.030)
+               + wave(p, turn(along, -0.5), 3.10, 3.3, 0.020)
+               + wave(p, turn(along, 1.2), 0.35, 1.0, 0.040));
+    // Течение реки.
+    vec2 velocity = fragFlow.xz;
+    float speed = length(velocity);
+    float rapids = clamp(fragFlow.y, 0.0, 1.0);
+    float foam = 0.0;
+    if (speed > 0.02) {
+        float noise;
+        vec2 ripple = current(p, velocity, noise);
+        float resolved = 1.0 - smoothstep(0.06, 0.25, footprint);
+        slope = slope * 0.5 + ripple * (0.18 + 0.12 * speed + 0.3 * rapids) * resolved;
+        foam = smoothstep(0.62, 0.8, noise + 0.3 * rapids) * rapids * (0.4 + 0.6 * resolved);
+    }
     // Вдали рябь мельче пикселя и только мерцала бы.
     slope /= 1.0 + distance / 120.0;
     vec3 n = normalize(vec3(-slope.x, 1.0, -slope.y));
@@ -188,6 +342,9 @@ void main() {
     color += lightColor * (0.9 * pow(max(dot(n, normalize(lightDir + v)), 0.0), 250.0));
     float alpha = smoothstep(0.0, 0.5, depth) * mix(0.5, 0.9, deep);
     alpha = mix(alpha, 1.0, fresnel * smoothstep(0.0, 0.3, depth));
+    vec3 white = vec3(0.92, 0.94, 0.95) * lighting(vec3(0.0, 1.0, 0.0), 1.0);
+    color = mix(color, white, foam);
+    alpha = max(alpha, foam * smoothstep(0.0, 0.1, depth));
     finalColor = vec4(withFog(color, fragPosition), alpha) * colDiffuse;
 }
 )";
@@ -266,7 +423,7 @@ bool outsideFrustum(const Matrix& m, Vector3 min, Vector3 max) {
 
 namespace {
 
-Mesh allocateMesh(int vertexCount, int triangleCount, bool normals = false) {
+Mesh allocateMesh(int vertexCount, int triangleCount, bool normals = false, bool texcoords2 = false) {
     Mesh mesh{};
     mesh.vertexCount = vertexCount;
     mesh.triangleCount = triangleCount;
@@ -274,6 +431,9 @@ Mesh allocateMesh(int vertexCount, int triangleCount, bool normals = false) {
     mesh.texcoords = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 2 * sizeof(float)));
     if (normals) {
         mesh.normals = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 3 * sizeof(float)));
+    }
+    if (texcoords2) {
+        mesh.texcoords2 = static_cast<float*>(MemAlloc(static_cast<unsigned>(vertexCount) * 2 * sizeof(float)));
     }
     mesh.indices = static_cast<unsigned short*>(
         MemAlloc(static_cast<unsigned>(triangleCount) * 3 * sizeof(unsigned short)));
@@ -287,14 +447,17 @@ void upload(Mesh& mesh) {
     MemFree(mesh.vertices);
     MemFree(mesh.texcoords);
     MemFree(mesh.normals);
+    MemFree(mesh.texcoords2);
     mesh.vertices = nullptr;
     mesh.texcoords = nullptr;
     mesh.normals = nullptr;
+    mesh.texcoords2 = nullptr;
 }
 
 } // namespace
 
-Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), textures_(textures) {
+Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
+    : map_(map), textures_(textures), land_(land) {
     const int width = map.width();
     const int height = map.height();
     const std::size_t count = static_cast<std::size_t>(width + 1) * static_cast<std::size_t>(height + 1);
@@ -303,6 +466,8 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
     surface_.resize(count);
     minSurface_ = std::numeric_limits<float>::max();
     maxSurface_ = std::numeric_limits<float>::lowest();
+    // Высота берега над водой у углов пресной воды (для откосов) — только на время постройки.
+    std::vector<float> bank(count, 0.0f);
     for (int vy = 0; vy <= height; ++vy) {
         for (int vx = 0; vx <= width; ++vx) {
             // Угол делят до четырёх клеток. Среди воды высота — по дну. На границе
@@ -311,11 +476,17 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
             // внутрь сухой клетки, и вода растекалась бы по нему. Даже если суша
             // ниже реки (русло поперёк склона), угол не опускается: вдоль русла
             // получается невысокий вал, и вода остаётся в своих клетках.
+            // С этапа 11.9 вода реки опущена глубже (русло врезано, LandUse::
+            // channelInset), а угол на границе с пресной водой — заметно ниже
+            // воды: кромка уходит в сухую клетку, выше — откос берега.
             float land = 0.0f;
             int lands = 0;
             float bed = 0.0f;
             float level = 0.0f;
+            float banks = 0.0f;
             int wet = 0;
+            bool river = false;
+            bool lake = false;
             for (int cy = vy - 1; cy <= vy; ++cy) {
                 for (int cx = vx - 1; cx <= vx; ++cx) {
                     const Cell cell{cx, cy};
@@ -323,9 +494,13 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
                         continue;
                     }
                     const float elevation = map.elevationMeters(cell);
-                    if (map.water.at(cx, cy) != Water::None) {
+                    const Water water = map.water.at(cx, cy);
+                    if (water != Water::None) {
                         bed += elevation;
-                        level += waterLevel(map, cell);
+                        level += waterLevel(map, cell) - land_.channelInset(cell);
+                        banks = std::max(banks, land_.bankHeight(cell));
+                        river = river || water == Water::River;
+                        lake = lake || water == Water::Lake;
                         ++wet;
                     }
                     land += elevation;
@@ -336,16 +511,47 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
             if (wet == 0) {
                 ground_[i] = land / static_cast<float>(lands);
             } else {
-                water_[i] = level / static_cast<float>(wet) - kWaterInset;
+                water_[i] = level / static_cast<float>(wet);
                 ground_[i] = bed / static_cast<float>(wet);
+                bank[i] = banks;
                 if (wet < lands) {
                     ground_[i] = std::max(ground_[i], water_[i] - kShoreDepth);
+                    if (river || lake) {
+                        ground_[i] = std::min(ground_[i], water_[i] - (river ? kRiverEdgeDepth : kLakeEdgeDepth));
+                    }
                 }
             }
-            surface_[i] = std::max(ground_[i], water_[i]);
-            minSurface_ = std::min(minSurface_, surface_[i]);
-            maxSurface_ = std::max(maxSurface_, surface_[i]);
         }
+    }
+    // Берег над пресной водой — не ниже своей высоты: у русла поперёк склона
+    // нижний берег поднимается валом, и откос есть с обеих сторон.
+    for (int vy = 0; vy <= height; ++vy) {
+        for (int vx = 0; vx <= width; ++vx) {
+            const std::size_t i = vertexIndex(vx, vy);
+            if (water_[i] != kNoWater) {
+                continue;
+            }
+            float wanted = std::numeric_limits<float>::lowest();
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = vx + dx;
+                    const int ny = vy + dy;
+                    if (nx < 0 || ny < 0 || nx > width || ny > height) {
+                        continue;
+                    }
+                    const std::size_t n = vertexIndex(nx, ny);
+                    if (water_[n] != kNoWater && bank[n] > 0.0f) {
+                        wanted = std::max(wanted, water_[n] + bank[n]);
+                    }
+                }
+            }
+            ground_[i] = std::max(ground_[i], wanted);
+        }
+    }
+    for (std::size_t i = 0; i < count; ++i) {
+        surface_[i] = std::max(ground_[i], water_[i]);
+        minSurface_ = std::min(minSurface_, surface_[i]);
+        maxSurface_ = std::max(maxSurface_, surface_[i]);
     }
 
     for (int y = 0; y < height; ++y) {
@@ -382,7 +588,9 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
         }
     }
 
-    groundShader_ = SceneShading::loadShader(kGroundVs, kGroundFs);
+    const std::string groundFs = std::string(kFieldGlsl) + kGroundFs;
+    groundShader_ = SceneShading::loadShader(kGroundVs, groundFs.c_str());
+    yearLoc_ = GetShaderLocation(groundShader_, "year");
     snowLoc_ = GetShaderLocation(groundShader_, "snowAmount");
     foliageLoc_ = GetShaderLocation(groundShader_, "foliage");
     groundMaterial_ = LoadMaterialDefault();
@@ -392,6 +600,7 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures) : map_(map), texture
     waterShader_ = SceneShading::loadShader(kWaterVs, kWaterFs);
     timeLoc_ = GetShaderLocation(waterShader_, "time");
     skyLoc_ = GetShaderLocation(waterShader_, "skyColor");
+    windLoc_ = GetShaderLocation(waterShader_, "wind");
     waterMaterial_ = LoadMaterialDefault();
     waterMaterial_.shader = waterShader_;
 
@@ -567,7 +776,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
     const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
     const int gridQuads = (nx - 1) * (nz - 1);
     const int skirtQuads = 2 * (nx - 1) + 2 * (nz - 1);
-    Mesh mesh = allocateMesh(nx * nz + 2 * nx + 2 * nz, 2 * (gridQuads + skirtQuads), true);
+    Mesh mesh = allocateMesh(nx * nz + 2 * nx + 2 * nz, 2 * (gridQuads + skirtQuads), true, true);
 
     int vertices = 0;
     const auto put = [&](int cx, int cz, float y) {
@@ -578,6 +787,29 @@ void Terrain3D::buildGround(Tile& tile, int level) {
         // Пиксель текстуры — клетка; угол клетки — край пикселя.
         mesh.texcoords[2 * vertices] = static_cast<float>(cx - chunk.left) / static_cast<float>(chunk.width);
         mesh.texcoords[2 * vertices + 1] = static_cast<float>(cz - chunk.top) / static_cast<float>(chunk.height);
+        // Уровень воды у вершины — для дна и мокрого берега; у сухих углов рядом
+        // с водой — средний уровень соседних мокрых, дальше от воды — «сухо».
+        const int gx = std::clamp(cx, 0, map_.width());
+        const int gz = std::clamp(cz, 0, map_.height());
+        float water = water_[vertexIndex(gx, gz)];
+        if (water == kNoWater) {
+            float sum = 0.0f;
+            int wet = 0;
+            for (int dz = -1; dz <= 1; ++dz) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const int nx = gx + dx;
+                    const int nz = gz + dz;
+                    if (nx >= 0 && nz >= 0 && nx <= map_.width() && nz <= map_.height() &&
+                        water_[vertexIndex(nx, nz)] != kNoWater) {
+                        sum += water_[vertexIndex(nx, nz)];
+                        ++wet;
+                    }
+                }
+            }
+            water = wet > 0 ? sum / static_cast<float>(wet) : kDryLevel;
+        }
+        mesh.texcoords2[2 * vertices] = water;
+        mesh.texcoords2[2 * vertices + 1] = 0.0f;
         // Нормаль — по соседним углам самой подробной сетки: и на грубых уровнях
         // свет лепит мелкие склоны.
         const auto h = [&](int x, int z) {
@@ -628,6 +860,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
             std::copy_n(position, 3, mesh.vertices + 3 * v);
             mesh.vertices[3 * v + 1] -= skirt;
             std::copy_n(mesh.texcoords + 2 * g, 2, mesh.texcoords + 2 * v);
+            std::copy_n(mesh.texcoords2 + 2 * g, 2, mesh.texcoords2 + 2 * v);
             std::copy_n(mesh.normals + 3 * g, 3, mesh.normals + 3 * v);
         }
         for (int k = 0; k + 1 < count; ++k) {
@@ -719,7 +952,7 @@ void Terrain3D::buildWater(Tile& tile, int level) {
         return;
     }
 
-    Mesh mesh = allocateMesh(vertexCount, 2 * quadCount);
+    Mesh mesh = allocateMesh(vertexCount, 2 * quadCount, true);
     for (int j = 0; j < nz; ++j) {
         for (int i = 0; i < nx; ++i) {
             const int v = remap[latticeIndex(i, j)];
@@ -733,6 +966,22 @@ void Terrain3D::buildWater(Tile& tile, int level) {
             // Глубина в узле — для цвета и прозрачности в шейдере; у берега отрицательна.
             mesh.texcoords[2 * v] = y - ground_[vertexIndex(cellX(i), cellZ(j))];
             mesh.texcoords[2 * v + 1] = 0.0f;
+            // Течение в узле — среднее по четырём клеткам вокруг (LandUse::flowAt
+            // уже сглажено): x и z — скорость, м/с; y — перекат.
+            float fx = 0.0f;
+            float fz = 0.0f;
+            float rapids = 0.0f;
+            for (int dz = -1; dz <= 0; ++dz) {
+                for (int dx = -1; dx <= 0; ++dx) {
+                    const LandUse::Flow flow = land_.flowAt({cellX(i) + dx, cellZ(j) + dz});
+                    fx += 0.25f * flow.x * flow.speed;
+                    fz += 0.25f * flow.z * flow.speed;
+                    rapids += 0.25f * flow.rapids;
+                }
+            }
+            mesh.normals[3 * v] = fx;
+            mesh.normals[3 * v + 1] = rapids;
+            mesh.normals[3 * v + 2] = fz;
         }
     }
     int indices = 0;
@@ -793,7 +1042,8 @@ void Terrain3D::drawShadowCasters(const Camera3D& camera, Vector2 center, float 
     rlEnableBackfaceCulling();
 }
 
-void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, const SceneShading& shading) {
+void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, float year,
+                           const SceneShading& shading) {
     ++frame_;
     textures_.useGroundFilter();
     // Внутри BeginMode3D модельно-видовая матрица — это вид камеры.
@@ -827,6 +1077,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 fol
     const float snow = std::clamp(snowAmount, 0.0f, 1.0f);
     SetShaderValue(groundShader_, snowLoc_, &snow, SHADER_UNIFORM_FLOAT);
     SetShaderValue(groundShader_, foliageLoc_, &foliage, SHADER_UNIFORM_VEC3);
+    SetShaderValue(groundShader_, yearLoc_, &year, SHADER_UNIFORM_FLOAT);
     // Юбки видны с обеих сторон; снизу на землю не смотрят, так что отсечение не нужно.
     rlDisableBackfaceCulling();
     for (const Visible& visible : visible_) {
@@ -851,7 +1102,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 fol
     }
 }
 
-void Terrain3D::drawWater(float time, const SceneShading& shading) {
+void Terrain3D::drawWater(float time, Vector2 wind, const SceneShading& shading) {
     // Всё непрозрачное, накопленное в батче rlgl, — раньше воды: сквозь воду
     // видно то, что под ней.
     rlDrawRenderBatchActive();
@@ -861,6 +1112,7 @@ void Terrain3D::drawWater(float time, const SceneShading& shading) {
     shading.apply(waterShader_);
     SetShaderValue(waterShader_, timeLoc_, &time, SHADER_UNIFORM_FLOAT);
     SetShaderValue(waterShader_, skyLoc_, &sky, SHADER_UNIFORM_VEC3);
+    SetShaderValue(waterShader_, windLoc_, &wind, SHADER_UNIFORM_VEC2);
     for (const Visible& visible : visible_) {
         const Mesh& mesh = tiles_[static_cast<std::size_t>(visible.tile)].water[static_cast<std::size_t>(visible.level)];
         if (mesh.vertexCount > 0) {

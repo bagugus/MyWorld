@@ -11,6 +11,7 @@
 
 namespace lw {
 
+class LandUse;
 class MapRenderer;
 class SceneShading;
 
@@ -30,10 +31,16 @@ bool outsideFrustum(const Matrix& viewProjection, Vector3 min, Vector3 max);
 // нужны. Текстура — та же карта, что и в виде сверху, но без отмывки: склоны
 // лепит свет по нормалям (этап 11.4, render/Lighting3D).
 //
+// С этапа 11.9 русла рек врезаны (вода ниже берегов, откосы, мокрый берег и
+// дно сквозь мелководье), вода течёт по направлению реки (render/LandUse:
+// flowAt), на перекатах пенится, ветер гонит рябь; на земле — поля по сезону
+// (render/FieldLayout: борозды, всходы, колосья, стерня, межи), трава и цветы
+// на лугах, канавы вдоль дорог.
+//
 // Только читает карту. Создавать после InitWindow, уничтожать до CloseWindow.
 class Terrain3D {
 public:
-    Terrain3D(const Map& map, MapRenderer& textures);
+    Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land);
     ~Terrain3D();
     Terrain3D(const Terrain3D&) = delete;
     Terrain3D& operator=(const Terrain3D&) = delete;
@@ -63,9 +70,12 @@ public:
     // Земля со снегом (amount 0..1), светом, тенью и дымкой. Между BeginMode3D
     // и EndMode3D, первым. Лиственный лес на земле — по средней листве
     // (TreeLayout: averageFoliageAt): весной светлеет, осенью желтеет, зимой сереет.
-    void drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, const SceneShading& shading);
-    // Вода — после всего непрозрачного: она полупрозрачна. time — секунды для ряби.
-    void drawWater(float time, const SceneShading& shading);
+    // year — доля года (с 1 марта): поля и луга по сезону.
+    void drawGround(const Camera3D& camera, float snowAmount, Vector3 foliage, float year,
+                    const SceneShading& shading);
+    // Вода — после всего непрозрачного: она полупрозрачна. time — секунды для
+    // ряби и течения, wind — ветер (куда дует, м/с).
+    void drawWater(float time, Vector2 wind, const SceneShading& shading);
     // Рельеф в карту теней: плитки квадрата center ± radius тех же уровней, что в кадре.
     void drawShadowCasters(const Camera3D& camera, Vector2 center, float radius);
 
@@ -118,6 +128,7 @@ private:
 
     const Map& map_;
     MapRenderer& textures_;
+    const LandUse& land_;
     // Сетки по углам клеток, (ширина + 1) × (высота + 1).
     std::vector<float> ground_;
     std::vector<float> water_;   // уровень воды; kNoWater — рядом нет воды
@@ -134,12 +145,14 @@ private:
     Shader groundShader_{};
     int snowLoc_ = -1;
     int foliageLoc_ = -1;
+    int yearLoc_ = -1;
     Material groundMaterial_{};
     Material casterMaterial_{}; // рельеф в карте теней: шейдер по умолчанию
     Material waterMaterial_{};
     Shader waterShader_{};
     int timeLoc_ = -1;
     int skyLoc_ = -1;
+    int windLoc_ = -1;
     Shader drapeShader_{};
     int heightsLoc_ = -1;
     Texture2D heights_{}; // surface_ текстурой R32F для drapeShader_
