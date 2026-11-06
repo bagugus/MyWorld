@@ -581,8 +581,10 @@ void LandUse::addYardThings() {
         };
 
         if (lot.kind == BuildingKind::House && hashUnit(bits >> 5) < 0.6f && (flags_.at(lot.door.x, lot.door.y) & kYard)) {
-            // Скамейка у стены сбоку от входа, сидящий смотрит на улицу.
-            const float side = (bits & 1u) != 0u ? 1.3f : -1.3f;
+            // Скамейка у стены сбоку от входа, сидящий смотрит на улицу. Крыльцо
+            // (render/Models3D) — дверь 1 м и по 0,3 м с боков: скамейка длиной
+            // 1,4 м начинается за ним.
+            const float side = (bits & 1u) != 0u ? 1.8f : -1.8f;
             Thing bench;
             bench.kind = ThingKind::Bench;
             bench.x = doorX - static_cast<float>(fx) * (0.5f * kCell - 0.45f) + static_cast<float>(-fz) * side;
@@ -591,7 +593,13 @@ void LandUse::addYardThings() {
             bench.dz = static_cast<float>(fz);
             bench.length = 1.4f;
             bench.bits = bits;
-            things_.push_back(bench);
+            // Дальний конец скамейки — тоже во дворе (не за забором, не на улице).
+            const float far = side + (side > 0.0f ? 0.7f : -0.7f);
+            const float endX = doorX - static_cast<float>(fx) * (0.5f * kCell - 0.45f) + static_cast<float>(-fz) * far;
+            const float endZ = doorZ - static_cast<float>(fz) * (0.5f * kCell - 0.45f) + static_cast<float>(fx) * far;
+            if (Map::cellAt(endX, endZ) == lot.door || yardCell(endX, endZ)) {
+                things_.push_back(bench);
+            }
         }
         if (lot.kind == BuildingKind::House && lot.village && hashUnit(bits >> 7) < 0.55f) {
             // Поленница вдоль боковой стены.

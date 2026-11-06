@@ -158,14 +158,13 @@ void main() {
     if (threshold < fragKeep.x || threshold >= fragKeep.y) {
         discard;
     }
-    // Листва — клочьями: распускается и облетает не вся сразу. Голая крона
-    // вблизи — только ствол и сучья (клочья веток висели бы в воздухе
-    // обломками), дальше — редкая серая дымка мелких веток, гуще с расстоянием.
+    // Листва — клочьями: распускается и облетает не вся сразу. Голая крона —
+    // только ствол и сучья, вблизи и вдали: дымка мелких веток из отдельных
+    // пикселей смотрелась чёрными точками, а сплошная масса вдали — бурыми ромбами.
     bool leafy = fragPart > 1.5;
-    float clump = 0.0;
     if (leafy) {
         float clumpSize = lod < 0.5 ? 1.0 / 6.0 : 1.0;
-        clump = hash(floor(fragRest / clumpSize));
+        float clump = hash(floor(fragRest / clumpSize));
         // Клочок мельче пары пикселей при движении камеры то попадал бы в
         // пиксель, то нет — крона искрилась. Вдали вместо клочьев — та же доля
         // пикселей по матрице Байера (сдвинутой, чтобы не совпасть с растворением):
@@ -173,8 +172,7 @@ void main() {
         float clumpPixels = clumpSize / max(length(fwidth(fragRest)), 1e-4);
         float dithered = (kBayer[((cell.y + 2) & 3) * 4 + ((cell.x + 1) & 3)] + 0.5) / 16.0;
         clump = mix(dithered, clump, smoothstep(1.5, 4.0, clumpPixels));
-        float twigs = lod < 0.5 ? 0.3 * smoothstep(40.0, 200.0, length(fragRest - viewPos)) : 0.45;
-        if (clump >= max(fragFoliage.x, twigs)) {
+        if (clump >= fragFoliage.x) {
             discard;
         }
     }
@@ -182,10 +180,7 @@ void main() {
     finalColor = vec4(1.0);
 #else
     vec3 base = fragColor.rgb;
-    bool bare = leafy && clump >= fragFoliage.x;
-    if (bare) {
-        base = vec3(0.34, 0.30, 0.26);
-    } else if (leafy) {
+    if (leafy) {
         base = mix(base, vec3(0.50, 0.68, 0.26), 0.6 * fragFoliage.z);
         float spot = 0.85 + 0.3 * hash(floor(fragRest * 1.7) + 5.0);
         base = mix(base, autumnColor(fragPart, fragTiming) * spot, fragFoliage.y);
@@ -194,8 +189,8 @@ void main() {
     if (fragPart > 0.5) {
         base *= 0.72 + 0.28 * fragColor.a;
     }
-    // Снег — на верхних гранях хвои, ветвей и голых крон.
-    if (snow > 0.0 && (!leafy || bare)) {
+    // Снег — на верхних гранях хвои и ветвей.
+    if (snow > 0.0 && !leafy) {
         base = mix(base, vec3(0.90, 0.92, 0.96), 0.9 * snow * smoothstep(-0.05, 0.4, n.y));
     }
     vec3 color = base * lighting(n, shadowAt(fragPosition, n));
@@ -547,6 +542,8 @@ void emitNear(TreeBuilder& b, const TreeSpec& tree) {
 }
 
 // --- Упрощённые: пирамида или ромб на стволе ---------------------------------
+// Ствол лиственных — до верха кроны: зимой крона пропадает, и голое дерево
+// вдали — ствол, как и вблизи.
 
 void emitFar(TreeBuilder& b, const TreeSpec& tree) {
     ShapeRandom& r = b.random();
@@ -569,14 +566,14 @@ void emitFar(TreeBuilder& b, const TreeSpec& tree) {
     }
     case TreeKind::Broadleaf: {
         const Color green = vary(kBroadleafGreen, r, 0.14f);
-        b.prism({0.0f, -0.3f, 0.0f}, {0.0f, 0.5f * h, 0.0f}, trunk, trunk * 0.7f, 3, kWood, kBroadleafBark,
+        b.prism({0.0f, -0.3f, 0.0f}, {0.0f, 0.88f * h, 0.0f}, trunk, trunk * 0.3f, 3, kWood, kBroadleafBark,
                 kBroadleafBark);
         b.diamond({0.0f, 0.62f * h, 0.0f}, radius, 0.36f * h, kLeaves, green);
         break;
     }
     case TreeKind::Birch: {
         const Color green = vary(kBirchGreen, r, 0.12f);
-        b.prism({0.0f, -0.3f, 0.0f}, {0.0f, 0.55f * h, 0.0f}, trunk, trunk * 0.7f, 3, kWood, kBirchBark,
+        b.prism({0.0f, -0.3f, 0.0f}, {0.0f, 0.92f * h, 0.0f}, trunk, trunk * 0.3f, 3, kWood, kBirchBark,
                 kBirchBark);
         b.diamond({0.0f, 0.7f * h, 0.0f}, radius, 0.28f * h, kBirchLeaves, green);
         break;

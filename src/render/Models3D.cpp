@@ -609,6 +609,10 @@ struct Layout {
     float wallTop = 0.0f;
     float ridge = 0.0f; // высота конька (у плоской крыши — верх стен)
     float decalOut = 0.04f; // окна и двери — на столько снаружи стены
+    // По сторонам (Side): во сколько раз дальше отходят окна и насколько они
+    // видны — вскользь окно мельче пикселя по ширине и спорит со стеной в глубине.
+    float sideOut[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    float sideDetail[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 Layout layoutOf(const BuildingModel& model, const Shape& shape) {
@@ -638,7 +642,7 @@ enum class Side : std::uint8_t { PlusX, MinusX, PlusZ, MinusZ };
 // чуть снаружи (layout.decalOut), чтобы не сливаться со стеной.
 void emitOnWall(const Emitter& e, const Layout& layout, Side side, float a0, float a1, float y0, float y1,
                 Color color, bool glow = false) {
-    const float kOut = layout.decalOut;
+    const float kOut = layout.decalOut * layout.sideOut[static_cast<int>(side)];
     switch (side) {
     case Side::PlusZ: {
         const float z = layout.hz + kOut;
@@ -848,6 +852,25 @@ void emitBuilding(const BuildingModel& model) {
     const Shape shape = shapeOf(model);
     Layout layout = layoutOf(model, shape);
     layout.decalOut = model.decalOut;
+    if (model.eye) {
+        // Глаз — в осях модели (обратный поворот ModelFrame).
+        const float c = std::cos(layout.frame.yaw);
+        const float s = std::sin(layout.frame.yaw);
+        const float dx = model.eye->x - layout.frame.origin.x;
+        const float dz = model.eye->z - layout.frame.origin.z;
+        const Vector3 eye = {dx * c - dz * s, model.eye->y, dx * s + dz * c};
+        const float midY = 0.5f * (layout.floor + layout.wallTop);
+        const Vector3 centers[4] = {{layout.hx, midY, 0.0f}, {-layout.hx, midY, 0.0f}, {0.0f, midY, layout.hz},
+                                    {0.0f, midY, -layout.hz}};
+        const Vector3 normals[4] = {{1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}};
+        for (int side = 0; side < 4; ++side) {
+            const Vector3 toEye = Vector3Subtract(eye, centers[side]);
+            const float facing = Vector3DotProduct(normals[side], toEye) / std::max(Vector3Length(toEye), 1e-3f);
+            layout.sideOut[side] = 1.0f / std::max(facing, 0.2f);
+            const float k = std::clamp((facing - 0.08f) / 0.2f, 0.0f, 1.0f);
+            layout.sideDetail[side] = k * k * (3.0f - 2.0f * k);
+        }
+    }
     const Emitter e(layout.frame);
     const Color wall = buildingColor(model.kind);
     const float hx = layout.hx;
@@ -901,7 +924,9 @@ void emitBuilding(const BuildingModel& model) {
     const Side doorSide = door.side;
     const float doorAlong = (door.a0 + door.a1) * 0.5f;
     const float doorHalf = shape.doorWidth * 0.5f;
-    emitOnWall(e, layout, doorSide, door.a0, door.a1, door.y0, door.y1, mix(wall, shape.doorColor, model.detail));
+    const auto detailOn = [&](Side side) { return model.detail * layout.sideDetail[static_cast<int>(side)]; };
+    emitOnWall(e, layout, doorSide, door.a0, door.a1, door.y0, door.y1,
+               mix(wall, shape.doorColor, detailOn(doorSide)));
     if (model.doorGround < layout.floor - 0.15f) {
         // Крыльцо до земли у двери.
         emitAtWall(e, layout, doorSide, doorAlong - doorHalf - 0.3f, doorAlong + doorHalf + 0.3f, 1.0f,
@@ -920,8 +945,12 @@ void emitBuilding(const BuildingModel& model) {
         const bool glow = model.lights > 0.0f &&
                           static_cast<float>((window.bits * 0x2545F4914F6CDD1DULL) >> 40 & 0xFFFFu) / 65535.0f <
                               model.lights;
+        const float detail = detailOn(window.side);
+        if (detail <= 0.0f) {
+            continue; // окно цвета стены (ночью — тёмное, как стена) не нужно
+        }
         emitOnWall(e, layout, window.side, window.a0, window.a1, window.y0, window.y1,
-                   glow ? shaded(kWindowLight, model.detail) : mix(wall, kGlassColor, model.detail), glow);
+                   glow ? shaded(kWindowLight, detail) : mix(wall, kGlassColor, detail), glow);
     }
 }
 
@@ -929,6 +958,14 @@ void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom) {
     const ModelFrame frame;
     const Emitter e(frame);
     e.box(min, max, color, nullptr, bottom ? kAll : (kTop | kSides));
+}
+
+void emitTurnedBox(Vector3 center, Vector3 half, float yaw, Color color, bool bottom) {
+    ModelFrame frame;
+    frame.origin = center;
+    frame.yaw = yaw;
+    const Emitter e(frame);
+    e.box(Vector3Negate(half), half, color, nullptr, bottom ? kAll : (kTop | kSides));
 }
 
 void emitBeacon(Vector3 tip, float size, Color color) {

@@ -228,7 +228,73 @@ void emitPoseGallery(Vector3 center, const Terrain3D& terrain, float t, int only
 WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
     : land_(map), terrain_(map, textures, land_), trees_(map, terrain_, land_), props_(map, terrain_, land_),
       interior_(terrain_) {
-    // Перила — по краям настила над открытой водой, опоры — через клетку до дна.
+    // Прямой пролёт — плита вдоль дороги от берега до берега, перила по обеим
+    // сторонам, опоры до дна. Пролёт не по прямой — настил по клеткам, перила
+    // по краям над открытой водой, опоры через клетку.
+    const auto part = [this](Vector3 center, Vector3 half, float yaw, Color color, bool bottom = false) {
+        bridgeParts_.push_back({center, half, yaw, color, bottom});
+    };
+    const auto box = [&part](Vector3 min, Vector3 max, Color color, bool bottom = false) {
+        part(Vector3Scale(Vector3Add(min, max), 0.5f), Vector3Scale(Vector3Subtract(max, min), 0.5f), 0.0f, color,
+             bottom);
+    };
+    for (const Terrain3D::Span& span : terrain_.spans()) {
+        if (!span.straight) {
+            continue;
+        }
+        const bool asphalt = span.road == Road::Asphalt;
+        const Color rail = asphalt ? kConcreteColor : kTimberColor;
+        const float deck = span.deck;
+        const Vector2 delta = Vector2Subtract(span.b, span.a);
+        const float length = Vector2Length(delta);
+        const Vector2 along = Vector2Scale(delta, 1.0f / length);
+        const Vector2 across = {along.y, -along.x};
+        // Ось Z коробки — вдоль моста (как у ModelFrame: yaw 0 — на +Z мира).
+        const float yaw = std::atan2(along.x, along.y);
+        const float halfWidth = span.halfWidth;
+        const Vector2 mid = Vector2Scale(Vector2Add(span.a, span.b), 0.5f);
+        part({mid.x, deck - 0.5f * kBridgeThickness, mid.y}, {halfWidth, 0.5f * kBridgeThickness, 0.5f * length}, yaw,
+             asphalt ? kBridgeAsphalt : kBridgeWood, true);
+        for (const float side : {-1.0f, 1.0f}) {
+            const float t = asphalt ? 0.25f : 0.12f;
+            const Vector2 edge = Vector2Add(mid, Vector2Scale(across, side * (halfWidth - 0.5f * t)));
+            if (asphalt) {
+                part({edge.x, deck + 0.4f, edge.y}, {0.5f * t, 0.4f, 0.5f * length}, yaw, rail);
+                continue;
+            }
+            // Деревянные перила: верхний брус и столбики через 2 м.
+            part({edge.x, deck + 0.875f, edge.y}, {0.5f * t, 0.075f, 0.5f * length}, yaw, rail);
+            const int posts = std::max(1, static_cast<int>(length / 2.0f));
+            for (int i = 0; i <= posts; ++i) {
+                const float s = -0.5f * length + length * static_cast<float>(i) / static_cast<float>(posts);
+                const Vector2 at = Vector2Add(edge, Vector2Scale(along, s));
+                part({at.x, deck + 0.475f, at.y}, {0.075f, 0.475f, 0.075f}, yaw, rail);
+            }
+        }
+        // Опоры там, где под настилом не земля.
+        const float step = asphalt ? 8.0f : 4.0f;
+        const int piers = static_cast<int>(length / step);
+        for (int i = 1; i < piers; ++i) {
+            const float s = -0.5f * length + length * static_cast<float>(i) / static_cast<float>(piers);
+            const Vector2 at = Vector2Add(mid, Vector2Scale(along, s));
+            const float bottom = terrain_.groundAt(at.x, at.y) - 0.5f;
+            const float top = deck - kBridgeThickness;
+            if (top - bottom < 0.8f) {
+                continue;
+            }
+            const float y = 0.5f * (top + bottom);
+            const float h = 0.5f * (top - bottom);
+            if (asphalt) {
+                part({at.x, y, at.y}, {0.8f * halfWidth, h, 0.5f}, yaw, kConcreteColor);
+            } else {
+                for (const float side : {-1.0f, 1.0f}) {
+                    const Vector2 leg = Vector2Add(at, Vector2Scale(across, side * (halfWidth - 0.4f)));
+                    part({leg.x, y, leg.y}, {0.15f, h, 0.15f}, yaw, kTimberColor);
+                }
+            }
+        }
+    }
+
     const auto key = [&map](Cell cell) {
         return static_cast<std::int64_t>(cell.y) * map.width() + cell.x;
     };
@@ -237,12 +303,16 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
         bridged.insert(key(bridge.cell));
     }
     for (const Terrain3D::Bridge& bridge : terrain_.bridges()) {
+        if (terrain_.spans()[static_cast<std::size_t>(bridge.span)].straight) {
+            continue;
+        }
         const bool asphalt = bridge.road == Road::Asphalt;
         const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
         const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
         const float x1 = x0 + Map::kCellSize;
         const float z1 = z0 + Map::kCellSize;
         const float deck = bridge.deck;
+        box({x0, deck - kBridgeThickness, z0}, {x1, deck, z1}, asphalt ? kBridgeAsphalt : kBridgeWood, true);
         const float t = asphalt ? 0.25f : 0.12f;
         const float y0 = asphalt ? deck : deck + 0.8f;
         const float y1 = asphalt ? deck + 0.8f : deck + 0.95f;
@@ -271,12 +341,10 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
                 min.x = x1 - t;
                 break;
             }
-            bridgeParts_.push_back({min, max, rail});
+            box(min, max, rail);
             if (!asphalt) {
                 // Столбики перил у начала каждого пролёта.
-                const Vector3 postMin = {min.x, deck, min.z};
-                const Vector3 postMax = {std::min(max.x, min.x + 0.15f), y1, std::min(max.z, min.z + 0.15f)};
-                bridgeParts_.push_back({postMin, postMax, rail});
+                box({min.x, deck, min.z}, {std::min(max.x, min.x + 0.15f), y1, std::min(max.z, min.z + 0.15f)}, rail);
             }
         }
         if ((bridge.cell.x + bridge.cell.y) % (asphalt ? 3 : 2) == 0) {
@@ -286,8 +354,7 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
             const float bottom = terrain_.groundAt(cx, cz) - 0.5f;
             const float top = deck - kBridgeThickness;
             if (top > bottom) {
-                bridgeParts_.push_back({{cx - half, bottom, cz - half}, {cx + half, top, cz + half},
-                                        asphalt ? kConcreteColor : kTimberColor});
+                box({cx - half, bottom, cz - half}, {cx + half, top, cz + half}, rail);
             }
         }
     }
@@ -622,11 +689,12 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         const float pixels = camera.zoomAt(center);
         const float distance = Vector3Distance(eye, {center.x, model.low, center.y});
         model.detailed = !shadowPass && pixels >= kDetailPixels && distance < drawDistance_;
-        model.detail = std::clamp((pixels - kDetailPixels) / kDetailPixels, 0.0f, 1.0f);
+        model.detail = std::clamp((pixels - kDetailPixels) / (2.0f * kDetailPixels), 0.0f, 1.0f);
         // Окно — плоскость у самой стены. Вдали буфер глубины различает
         // только слои в d² / (near · 2²⁴) друг от друга; окно отходит от стены
         // на втрое больше, иначе стена и окно мерцают, перекрывая друг друга.
         model.decalOut = std::max(0.04f, 3.0f * distance * distance / (nearPlane * 16777216.0f));
+        model.eye = eye;
         model.lights = !shadowPass && litBuildings_.contains(id) ? lights_ : 0.0f;
         emitBuilding(model);
         buildingsDrawn_ += shadowPass ? 0 : 1;
@@ -637,23 +705,11 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
     const auto bridgeFade = [&](Vector3 point) {
         return fadeAt(Vector3Distance(eye, point), bridgeRange);
     };
-    for (const Terrain3D::Bridge& bridge : terrain_.bridges()) {
-        const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
-        const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
-        const float fade = bridgeFade({x0, bridge.deck, z0});
-        if (fade <= 0.0f || skip({x0, bridge.deck, z0}, 2.0f * Map::kCellSize)) {
-            continue;
-        }
-        setModelFade(fade);
-        emitWorldBox({x0, bridge.deck - kBridgeThickness, z0},
-                     {x0 + Map::kCellSize, bridge.deck, z0 + Map::kCellSize},
-                     bridge.road == Road::Asphalt ? kBridgeAsphalt : kBridgeWood, true);
-    }
     for (const Part& part : bridgeParts_) {
-        const float fade = bridgeFade(part.min);
-        if (fade > 0.0f && !skip(part.min, 2.0f * Map::kCellSize)) {
+        const float fade = bridgeFade(part.center);
+        if (fade > 0.0f && !skip(part.center, Vector3Length(part.half))) {
             setModelFade(fade);
-            emitWorldBox(part.min, part.max, part.color);
+            emitTurnedBox(part.center, part.half, part.yaw, part.color, part.bottom);
         }
     }
     setModelFade(1.0f);

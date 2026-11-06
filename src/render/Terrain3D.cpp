@@ -557,10 +557,11 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
             if (map.road.at(x, y) != Road::None && map.water.at(x, y) != Water::None) {
-                bridges_.push_back({{x, y}, waterLevel(map, {x, y}) + kBridgeDeck, map.road.at(x, y)});
+                bridges_.push_back({{x, y}, waterLevel(map, {x, y}) + kBridgeDeck, map.road.at(x, y), 0});
             }
         }
     }
+    buildSpans();
 
     tilesX_ = (width + kTileCells - 1) / kTileCells;
     const int tilesY = (height + kTileCells - 1) / kTileCells;
@@ -658,6 +659,118 @@ float Terrain3D::sample(const std::vector<float>& grid, float x, float y) const 
     return h00 + (h10 - h00) * u + (h11 - h10) * w;
 }
 
+void Terrain3D::buildSpans() {
+    const int width = map_.width();
+    const auto key = [width](Cell cell) { return static_cast<std::int64_t>(cell.y) * width + cell.x; };
+    for (std::size_t i = 0; i < bridges_.size(); ++i) {
+        bridgeAt_[key(bridges_[i].cell)] = i;
+    }
+    const auto center = [](Cell cell) { return Vector2{Map::cellCenter(cell.x), Map::cellCenter(cell.y)}; };
+    std::vector<bool> done(bridges_.size(), false);
+    for (std::size_t first = 0; first < bridges_.size(); ++first) {
+        if (done[first]) {
+            continue;
+        }
+        // Связные клетки моста (и по диагонали: дорога идёт лесенкой) и клетки
+        // дороги на суше рядом с ними — берега.
+        std::vector<std::size_t> cells{first};
+        std::vector<Cell> banks;
+        done[first] = true;
+        for (std::size_t k = 0; k < cells.size(); ++k) {
+            const Cell cell = bridges_[cells[k]].cell;
+            for (int dy = -1; dy <= 1; ++dy) {
+                for (int dx = -1; dx <= 1; ++dx) {
+                    const Cell next = {cell.x + dx, cell.y + dy};
+                    if ((dx == 0 && dy == 0) || !map_.contains(next) || map_.road.at(next.x, next.y) == Road::None) {
+                        continue;
+                    }
+                    if (const auto it = bridgeAt_.find(key(next)); it != bridgeAt_.end()) {
+                        if (!done[it->second]) {
+                            done[it->second] = true;
+                            cells.push_back(it->second);
+                        }
+                    } else if (std::none_of(banks.begin(), banks.end(),
+                                            [&](Cell b) { return b.x == next.x && b.y == next.y; })) {
+                        banks.push_back(next);
+                    }
+                }
+            }
+        }
+
+        Span span;
+        span.deck = std::numeric_limits<float>::lowest();
+        for (const std::size_t i : cells) {
+            span.deck = std::max(span.deck, bridges_[i].deck);
+            if (bridges_[i].road == Road::Asphalt) {
+                span.road = Road::Asphalt;
+            }
+        }
+        // Прямой пролёт: дорога на суше у моста — ровно два связных куска, по
+        // берегу с каждой стороны; ось — от середины одного до середины другого,
+        // все клетки моста — между ними.
+        std::vector<int> group(banks.size(), -1);
+        int groups = 0;
+        for (std::size_t seed = 0; seed < banks.size(); ++seed) {
+            if (group[seed] >= 0) {
+                continue;
+            }
+            std::vector<std::size_t> open{seed};
+            group[seed] = groups;
+            while (!open.empty()) {
+                const Cell cell = banks[open.back()];
+                open.pop_back();
+                for (std::size_t j = 0; j < banks.size(); ++j) {
+                    if (group[j] < 0 && std::abs(banks[j].x - cell.x) <= 1 && std::abs(banks[j].y - cell.y) <= 1) {
+                        group[j] = groups;
+                        open.push_back(j);
+                    }
+                }
+            }
+            ++groups;
+        }
+        if (groups == 2) {
+            Vector2 sum[2] = {};
+            float count[2] = {};
+            for (std::size_t j = 0; j < banks.size(); ++j) {
+                sum[group[j]] = Vector2Add(sum[group[j]], center(banks[j]));
+                count[group[j]] += 1.0f;
+            }
+            span.a = Vector2Scale(sum[0], 1.0f / count[0]);
+            span.b = Vector2Scale(sum[1], 1.0f / count[1]);
+            const float length = Vector2Distance(span.a, span.b);
+            if (length > 1.0f) {
+                const Vector2 along = Vector2Scale(Vector2Subtract(span.b, span.a), 1.0f / length);
+                span.straight = true;
+                float widest = 0.0f;
+                for (const std::size_t i : cells) {
+                    const Vector2 p = Vector2Subtract(center(bridges_[i].cell), span.a);
+                    const float t = Vector2DotProduct(p, along);
+                    const float off = std::abs(p.x * along.y - p.y * along.x);
+                    widest = std::max(widest, off);
+                    if (t < 0.0f || t > length || off > 1.5f * Map::kCellSize) {
+                        span.straight = false;
+                        break;
+                    }
+                }
+                // Настил закрывает клетки дороги над водой: середины клеток — не
+                // дальше 1,5 м от края.
+                span.halfWidth = std::max(span.road == Road::Asphalt ? 3.0f : 2.0f, widest + 1.5f);
+            }
+        }
+        if (span.straight) {
+            // Настил — не ниже низкого берега: иначе плита упрётся в откос.
+            const float low = std::min(groundAt(span.a.x, span.a.y), groundAt(span.b.x, span.b.y));
+            span.deck = std::max(span.deck, low + 0.05f);
+        }
+        const int index = static_cast<int>(spans_.size());
+        for (const std::size_t i : cells) {
+            bridges_[i].deck = span.deck;
+            bridges_[i].span = index;
+        }
+        spans_.push_back(span);
+    }
+}
+
 float Terrain3D::groundAt(float x, float y) const {
     return sample(ground_, x, y);
 }
@@ -668,8 +781,9 @@ float Terrain3D::surfaceAt(float x, float y) const {
 
 float Terrain3D::standAt(float x, float y) const {
     const Cell cell = map_.clampedCellAt(x, y);
-    if (map_.road.at(cell.x, cell.y) != Road::None && map_.water.at(cell.x, cell.y) != Water::None) {
-        return waterLevel(map_, cell) + kBridgeDeck;
+    if (const auto bridge = bridgeAt_.find(static_cast<std::int64_t>(cell.y) * map_.width() + cell.x);
+        bridge != bridgeAt_.end()) {
+        return bridges_[bridge->second].deck;
     }
     return std::max(groundAt(x, y), surfaceAt(x, y) - kSwimDepth);
 }

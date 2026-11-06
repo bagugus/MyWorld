@@ -187,8 +187,6 @@ const float kBayer[16] = float[16](0.0, 8.0, 2.0, 10.0, 12.0, 4.0, 14.0, 6.0,
 void main() {
     ivec2 cell = ivec2(mod(gl_FragCoord.xy, 4.0));
     float threshold = (kBayer[cell.y * 4 + cell.x] + 0.5) / 16.0;
-    // Второй порог — для узоров: сдвинут, чтобы не совпасть с растворением.
-    float pattern = (kBayer[((cell.y + 2) & 3) * 4 + ((cell.x + 1) & 3)] + 0.5) / 16.0;
     if (threshold >= fragInfo.z) {
         discard;
     }
@@ -202,7 +200,9 @@ void main() {
     vec3 base = fragColor.rgb;
     int part = fragPart;
     if (part == PART_WIRE) {
-        if (pattern >= fragCover) {
+        // Провод сплошной, пока лента шире настоящего не больше чем впятеро,
+        // дальше его нет: редкие точки по экранному узору рябили.
+        if (fragCover < 0.3) {
             discard;
         }
     } else if (part == PART_CROP) {
@@ -233,19 +233,22 @@ void main() {
         float fine = 1.0 - smoothstep(0.004, 0.012, px); // узор крупнее пикселя
         if (style == 0) {
             // Штакетник: планки с заострённым верхом на двух прожилинах. Просвет
-            // мельче пары пикселей — неподвижным экранным узором, а не рябью.
+            // уже трёх пикселей при движении то попадал бы в пиксель, то нет —
+            // забор рябил бы: тогда он сплошной и темнее, как планки с просветами
+            // в среднем (экранный узор из точек тоже рябит).
             float slat = fract(u / 0.13);
             bool rail = (v > 0.22 && v < 0.30) || (v > 0.70 && v < 0.78);
-            if (v > 1.0 - 0.12 * abs(slat - 0.3) / 0.7) {
+            bool gaps = 0.13 * 0.4 / px > 3.0;
+            if (gaps && v > 1.0 - 0.12 * abs(slat - 0.3) / 0.7) {
                 discard;
             }
             if (!rail) {
-                if (0.13 * 0.4 / px > 2.0) {
+                if (gaps) {
                     if (slat > 0.6) {
                         discard;
                     }
-                } else if (pattern >= 0.62) {
-                    discard;
+                } else {
+                    base *= 0.78;
                 }
             }
             base *= 0.9 + 0.1 * hashUnit(hash3(int(floor(u / 0.13)), 1, 9u));

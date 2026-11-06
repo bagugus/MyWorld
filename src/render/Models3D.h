@@ -7,6 +7,7 @@
 #include <raylib.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace lw {
@@ -82,6 +83,8 @@ struct BuildingModel {
     float detail = 1.0f;     // насколько окна и дверь отличимы от стены: у края
                              // детализации тают в цвет стены, а не мелькают
     float decalOut = 0.04f;  // окна и дверь — на столько метров снаружи стены
+                             // (при взгляде в упор; вскользь — дальше)
+    std::optional<Vector3> eye; // откуда смотрят: стены вскользь — окна тают в цвет стены
     float lights = 0.0f;     // доля окон, светящихся ночью: 0 — темно
 };
 // Высота крыши здания над землёй (для отсечения).
@@ -119,6 +122,9 @@ void setModelIndoor(bool indoor);
 
 // Коробка по осям мира от min до max (с дном, если bottom).
 void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom = false);
+// Коробка с серединой center и полуразмерами half, повёрнутая на yaw вокруг
+// вертикали (ось Z коробки — по направлению yaw, как у ModelFrame).
+void emitTurnedBox(Vector3 center, Vector3 half, float yaw, Color color, bool bottom = false);
 
 // Метка выбранного: светящаяся перевёрнутая пирамидка высотой size, острием в tip.
 void emitBeacon(Vector3 tip, float size, Color color);

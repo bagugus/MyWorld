@@ -99,10 +99,13 @@ public:
     bool interiorView(const CameraController& camera) const;
 
 private:
+    // Часть моста: коробка с серединой center, полуразмерами half, повёрнутая на yaw.
     struct Part {
-        Vector3 min{};
-        Vector3 max{};
+        Vector3 center{};
+        Vector3 half{};
+        float yaw = 0.0f;
         Color color{};
+        bool bottom = false; // с дном: настил виден снизу
     };
 
     // Модель здания без облика сезона и мелочи: участок, земля под ним, дверь.
@@ -125,7 +128,7 @@ private:
     std::vector<bool> hiddenFurniture_;
     bool lampsOn_ = false;
     SceneShading shading_;
-    std::vector<Part> bridgeParts_; // перила и опоры мостов: не меняются
+    std::vector<Part> bridgeParts_; // настил, перила и опоры мостов: не меняются
     // Позы и движения существ (этап 12а.11): раз за кадр, второй проход
     // (тень и кадр) берёт уже посчитанное.
     Animator animator_;

@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <optional>
+#include <unordered_map>
 #include <vector>
 
 namespace lw {
@@ -48,8 +49,20 @@ public:
     // Мост — клетка дороги над водой: настил над уровнем воды.
     struct Bridge {
         Cell cell;
-        float deck = 0.0f; // высота настила, метры
+        float deck = 0.0f; // высота настила, метры: общая у всего пролёта
         Road road = Road::Dirt;
+        int span = 0;      // индекс в spans()
+    };
+    // Пролёт — связные (и по диагонали) клетки моста. Прямой пролёт — одна плита
+    // вдоль дороги от берега до берега (a, b — середины кусков дороги на берегах,
+    // мир x, z), иначе — настил по клеткам.
+    struct Span {
+        Vector2 a{};
+        Vector2 b{};
+        float deck = 0.0f;
+        float halfWidth = 2.0f; // полуширина плиты прямого пролёта, м
+        Road road = Road::Dirt;
+        bool straight = false;
     };
 
     // Высота твёрдой земли (под водой — дна) в точке мира (x, y), метры; так же,
@@ -66,6 +79,7 @@ public:
     const Map& map() const { return map_; }
 
     const std::vector<Bridge>& bridges() const { return bridges_; }
+    const std::vector<Span>& spans() const { return spans_; }
 
     // Земля со снегом (amount 0..1), светом, тенью и дымкой. Между BeginMode3D
     // и EndMode3D, первым. Лиственный лес на земле — по средней листве
@@ -136,6 +150,10 @@ private:
     float minSurface_ = 0.0f;
     float maxSurface_ = 0.0f;
     std::vector<Bridge> bridges_;
+    std::vector<Span> spans_;
+    std::unordered_map<std::int64_t, std::size_t> bridgeAt_; // клетка → индекс в bridges_
+
+    void buildSpans();
 
     std::vector<Tile> tiles_;
     int tilesX_ = 0;
