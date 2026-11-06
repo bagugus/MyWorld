@@ -4,6 +4,7 @@
 #include "sim/Foresight.h"
 #include "sim/Id.h"
 #include "sim/Story.h"
+#include "ui/Camerawork.h"
 
 #include <cstdint>
 #include <string>
@@ -12,6 +13,7 @@
 
 namespace lw {
 
+class CameraController;
 class SimDriver;
 class World;
 
@@ -46,6 +48,12 @@ class Inspector;
 // скорость, как только что-то начинает надвигаться. Скорость пользователя —
 // основа: её режиссёр запоминает и возвращает, когда его выключают.
 //
+// Операторская работа (12а.5, только вид сверху): у кадра есть план — общий
+// (орда у поселения), средний (группа, двое перед столкновением, гонка за
+// грузом), крупный (герой); режиссёр кадрирует всё, что должно быть в кадре,
+// далёкую смену кадра делает пролётом с отъездом, в кульминации медленно
+// наезжает и замедляет время до x1, пока всё не случится (Camerawork).
+//
 // Мир режиссёр только читает (скорость времени — не состояние мира). Выбор
 // пользователя (щелчок по другому объекту) выключает режиссёра.
 class Director {
@@ -59,6 +67,9 @@ public:
     // летопись, при надобности сменить линию и героя, поправить скорость
     // времени (темп). dt — реальные секунды.
     void update(Inspector& inspector, SimDriver& driver, float dt);
+    // Раз за кадр после Inspector::updateCamera: план кадра, пролёты, наезд
+    // (только вид сверху). alpha — доля тика для плавной отрисовки.
+    void updateCamera(CameraController& camera, float alpha, float dt);
     // Окно «Режиссёр»: включение, текущая линия, список линий, что вот-вот
     // случится, события выбранной линии.
     void drawPanel(Inspector& inspector);
@@ -128,8 +139,14 @@ private:
     const Pick* calmPick(const std::vector<Pick>& picks) const;
     // Затишье: ничего не надвигается и в кадре скучно.
     bool quiet() const;
-    // Темп: ускорить время в затишье, вернуть скорость пользователя.
+    // Темп: ускорить время в затишье, замедлить в кульминации, вернуть
+    // скорость пользователя.
     void pace(SimDriver& driver, float dt);
+    // Где сейчас объект (метры): существо, здание, орда и группа — по вожаку,
+    // ивент и поселение; false — нет в мире.
+    bool positionOf(EntityId id, float alpha, Vector2& at) const;
+    // План кадра для текущего кандидата (12а.5).
+    ShotPlan planOf(float alpha) const;
     // «John Miller идёт мстить Peter Green — 120 м, ~2 мин».
     std::string omenLine(const Foresight& omen) const;
     // Учёт эпизодов: кого показывают сейчас и когда показывали каждого.
@@ -181,6 +198,15 @@ private:
     int baseSpeed_ = 0;
     int setSpeed_ = 0;
     float userPaced_ = 0.0f;      // секунд с тех пор, как пользователь сменил скорость
+
+    // Операторская работа (12а.5).
+    Camerawork camerawork_;
+    ShotSize shot_ = ShotSize::Close; // план текущего кадра
+    // Замедление в кульминации: держится, пока предвестие не сбудется (не
+    // дольше kSlowMax); для того же кадра — один раз.
+    bool slowmo_ = false;
+    bool slowmoSpent_ = false;
+    float slowmoFor_ = 0.0f;
 };
 
 } // namespace ui

@@ -1,14 +1,17 @@
 #include "ui/Director.h"
 
+#include "render/CameraController.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/TimeScale.h"
+#include "sim/Map.h"
 #include "sim/World.h"
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
 
 #include <imgui.h>
+#include <raymath.h>
 
 #include <algorithm>
 #include <cstdio>
@@ -89,6 +92,18 @@ constexpr int kLullSpeed = 10;
 constexpr float kUserPace = 30.0f;
 // Сколько секунд подпись «Тем временем…».
 constexpr float kCutTitle = 5.0f;
+// Операторская работа (12а.5). Замедление: предвестие интереснее
+// kSlowInterest, до кульминации меньше kSlowEta секунд симуляции — время x1,
+// пока не случится, но не дольше kSlowMax реальных секунд.
+constexpr float kSlowEta = 30.0f;
+constexpr float kSlowInterest = 0.3f;
+constexpr float kSlowMax = 40.0f;
+// Ближе этого (метры) двое — уже средний план: видно обоих.
+constexpr float kNear = 250.0f;
+// Кого из участников уместить в средний план: не дальше этого от героя.
+constexpr float kCompany = 300.0f;
+// Сколько участников линии брать в кадр.
+constexpr std::size_t kCompanyMax = 8;
 
 const char* heroStatusTitle(HeroStatus status) {
     constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
@@ -198,6 +213,8 @@ void Director::setEnabled(bool enabled) {
     tension_ = 0.0f;
     quietFor_ = 0.0f;
     currentInterest_ = 0.0f;
+    slowmo_ = slowmoSpent_ = false;
+    camerawork_.reset();
 }
 
 bool Director::exists(EntityId id) const {
@@ -333,8 +350,12 @@ void Director::show(const Pick& pick, Inspector& inspector, Cut cut) {
     if (pick.target == kInvalidId) {
         return;
     }
+    if (pick.target != shown_) {
+        camerawork_.cut(); // далеко — пролёт
+    }
     if (!pick.same(current_) || lost_) {
         held_ = 0.0f;
+        slowmo_ = slowmoSpent_ = false;
         cut_ = cut;
         cutAt_ = clock_;
         if (cut != Cut::Parallel && cut != Cut::Retarget) {
@@ -481,7 +502,9 @@ void Director::pace(SimDriver& driver, float dt) {
     userPaced_ += dt;
     quietFor_ = quiet() ? quietFor_ + dt : 0.0f;
     int wanted = baseSpeed_;
-    if (quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
+    if (slowmo_) {
+        wanted = 1; // кульминация — в реальном времени
+    } else if (quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
         !driver.skipping()) {
         wanted = std::max(baseSpeed_, kLullSpeed);
     }
@@ -517,6 +540,7 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
         return;
     }
     held_ += dt;
+    slowmoFor_ += dt;
     breather_ = std::max(0.0f, breather_ - dt);
     tension_ += (intensity() - tension_) * std::min(1.0f, dt / kTensionTime);
     trackEpisode();
@@ -570,6 +594,17 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     if (resolved && tension_ >= kTenseEnough) {
         breather_ = kBreather; // после кульминации — передышка
     }
+    // Замедление в кульминации (12а.5): срок — в секундах симуляции, чтобы
+    // само замедление его не сбивало.
+    if (slowmo_ && (!current_.hasOmen || lost_ || slowmoFor_ >= kSlowMax)) {
+        slowmo_ = false;
+        slowmoSpent_ = true;
+    } else if (!slowmo_ && !slowmoSpent_ && current_.hasOmen && !lost_ &&
+               current_.omen.eta <= kSlowEta && current_.interest >= kSlowInterest) {
+        slowmo_ = true;
+        slowmoFor_ = 0.0f;
+    }
+    currentUrgent = currentUrgent || slowmo_;
     currentInterest_ = currentInterest;
     if (picks.empty()) {
         return;
@@ -617,6 +652,129 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
         best.interest > currentInterest * kSwitchMargin) {
         show(best, inspector, Cut::Switch);
     }
+}
+
+bool Director::positionOf(EntityId id, float alpha, Vector2& at) const {
+    const entt::entity entity = world_.find(id);
+    if (entity == entt::null) {
+        return false;
+    }
+    const entt::registry& registry = world_.registry();
+    if (const auto* position = registry.try_get<Position>(entity)) {
+        at = {position->x, position->y};
+        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
+            // Как рисует рендер: между прошлым и последним тиком.
+            const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
+            at.x -= velocity->x * back;
+            at.y -= velocity->y * back;
+        }
+        return true;
+    }
+    if (const auto* building = registry.try_get<Building>(entity)) {
+        at = {(static_cast<float>(building->origin.x) + building->width * 0.5f) * Map::kCellSize,
+              (static_cast<float>(building->origin.y) + building->height * 0.5f) * Map::kCellSize};
+        return true;
+    }
+    if (const auto* horde = registry.try_get<Horde>(entity)) {
+        return positionOf(horde->leader, alpha, at);
+    }
+    if (const auto* group = registry.try_get<Group>(entity)) {
+        return positionOf(group->leader, alpha, at);
+    }
+    if (const auto* event = registry.try_get<WorldEvent>(entity)) {
+        at = {Map::cellCenter(event->site.x), Map::cellCenter(event->site.y)};
+        return true;
+    }
+    if (const auto* settlement = registry.try_get<Settlement>(entity)) {
+        at = {Map::cellCenter(settlement->center.x), Map::cellCenter(settlement->center.y)};
+        return true;
+    }
+    return false;
+}
+
+ShotPlan Director::planOf(float alpha) const {
+    ShotPlan plan;
+    if (!current_.valid() || !positionOf(current_.target, alpha, plan.subject)) {
+        return plan;
+    }
+    plan.valid = true;
+    plan.size = ShotSize::Close;
+    const auto add = [&](EntityId id, float within) {
+        Vector2 at{};
+        if (id != current_.target && positionOf(id, alpha, at) &&
+            Vector2Distance(at, plan.subject) <= within) {
+            plan.extra.push_back(at);
+        }
+    };
+    const Story* story = stories_.find(current_.story);
+    if (current_.hasOmen && !lost_) {
+        const Foresight& omen = current_.omen;
+        const Vector2 place{omen.x, omen.y};
+        switch (omen.kind) {
+        case ForesightKind::Raid:
+            // Общий план: орда и поселение, к которому она идёт.
+            plan.size = ShotSize::Wide;
+            add(omen.other, std::numeric_limits<float>::infinity());
+            plan.extra.push_back(place);
+            break;
+        case ForesightKind::CacheRace:
+            plan.size = ShotSize::Medium;
+            add(omen.other, std::numeric_limits<float>::infinity());
+            plan.extra.push_back(place);
+            break;
+        case ForesightKind::Revenge:
+        case ForesightKind::Theft:
+            // Издалека — крупно герой; когда близко — оба в кадре.
+            if (omen.distance <= kNear) {
+                plan.size = ShotSize::Medium;
+                add(omen.other != kInvalidId ? omen.other : omen.focus, kNear * 2.0f);
+                plan.extra.push_back(place);
+            }
+            break;
+        case ForesightKind::Turning:
+            plan.size = ShotSize::Medium; // укушенный и люди вокруг
+            break;
+        default:
+            break;
+        }
+    } else if (story != nullptr && current_.visit == kInvalidId) {
+        switch (story->kind) {
+        case StoryKind::Group:
+            plan.size = ShotSize::Medium;
+            if (const entt::entity group = world_.find(story->focus);
+                group != entt::null && world_.registry().all_of<Group>(group)) {
+                for (const EntityId member : world_.registry().get<Group>(group).members) {
+                    add(member, kCompany);
+                }
+            }
+            break;
+        case StoryKind::Feud:
+            plan.size = ShotSize::Medium;
+            add(story->hero, kCompany);
+            add(story->other, kCompany);
+            break;
+        case StoryKind::Salvage:
+            plan.size = ShotSize::Medium;
+            for (std::size_t i = 0; i < story->cast.size() && plan.extra.size() < kCompanyMax; ++i) {
+                add(story->cast[i], kCompany);
+            }
+            break;
+        case StoryKind::Infection:
+        default:
+            break; // крупно: укушенный
+        }
+    }
+    return plan;
+}
+
+void Director::updateCamera(CameraController& camera, float alpha, float dt) {
+    if (!enabled_) {
+        camerawork_.idle();
+        return;
+    }
+    const ShotPlan plan = planOf(alpha);
+    shot_ = plan.size;
+    camerawork_.update(camera, plan, slowmo_ || urgent(current_), dt);
 }
 
 std::string Director::omenLine(const Foresight& omen) const {
@@ -729,7 +887,7 @@ void Director::drawPanel(Inspector& inspector) {
     if (ImGui::Checkbox("Режиссёр: камера сама ведёт историю", &enabled)) {
         setEnabled(enabled);
     }
-    ImGui::Checkbox("Темп: ускорять время в затишье", &tempo_);
+    ImGui::Checkbox("Темп: ускорять затишье, замедлять кульминацию", &tempo_);
     if (enabled_) {
         // Темп и монтаж (12а.4): что сейчас делает режиссёр.
         std::string state = tension_ >= kTenseEnough ? "напряжение" : "спокойно";
@@ -742,7 +900,14 @@ void Director::drawPanel(Inspector& inspector) {
         if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
             state += ", затишье — время x" + std::to_string(setSpeed_);
         }
+        if (slowmo_) {
+            state += ", замедление";
+        }
         ImGui::TextDisabled("%s; напряжение %.2f, на кадре %.0f с", state.c_str(), tension_, held_);
+        // Операторская работа (12а.5).
+        ImGui::TextDisabled("план: %s%s%s", shotSizeTitle(shot_),
+                            camerawork_.flying() ? ", пролёт" : "",
+                            camerawork_.pushIn() > 1.05f ? ", наезд" : "");
     }
 
     const std::uint64_t now = world_.tick();
@@ -865,6 +1030,8 @@ void Director::drawCaption(Inspector& inspector) {
             ImGui::TextColored(muted, "Передышка");
         } else if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
             ImGui::TextColored(muted, "Затишье — время x%d", setSpeed_);
+        } else if (slowmo_ && baseSpeed_ > 1) {
+            ImGui::TextColored(muted, "Замедление — кульминация");
         }
         if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
             drawHeroCaption(hero, inspector);

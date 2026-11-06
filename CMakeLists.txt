@@ -168,6 +168,8 @@ if(LW_BUILD_APP)
         src/render/WorldRenderer.h
         src/render/WorldRenderer3D.cpp
         src/render/WorldRenderer3D.h
+        src/ui/Camerawork.cpp
+        src/ui/Camerawork.h
         src/ui/ChronicleView.cpp
         src/ui/ChronicleView.h
         src/ui/Director.cpp

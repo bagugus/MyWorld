@@ -164,6 +164,20 @@ void CameraController::moveTo(float x, float y) {
     }
 }
 
+void CameraController::frame(float x, float y, float zoom) {
+    if (mode_ != ViewMode::TopDown) {
+        moveTo(x, y);
+        return;
+    }
+    topGoalCenter_ = {x, y};
+    topGoalZoom_ = std::clamp(zoom, kMinZoom, kMaxZoom);
+    zoomAnchored_ = false;
+}
+
+float CameraController::goalZoom() const {
+    return mode_ == ViewMode::TopDown ? topGoalZoom_ : zoom();
+}
+
 void CameraController::snap() {
     topCenter_ = topGoalCenter_;
     topZoom_ = topGoalZoom_;

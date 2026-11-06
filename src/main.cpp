@@ -201,6 +201,7 @@ int main(int argc, char** argv) {
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
             // с отрисовкой этого кадра.
             inspector.updateCamera(camera, alpha);
+            storyDirector.updateCamera(camera, alpha, dt); // план кадра, пролёты (вид сверху)
             std::optional<lw::CameraSubject> subject = inspector.cameraSubject(alpha);
             if (subject) {
                 if (const std::optional<float> heading = renderer3d.drawnHeading(inspector.selected())) {
