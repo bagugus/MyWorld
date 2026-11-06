@@ -716,6 +716,10 @@ void Director::updateShow(Inspector& inspector, SimDriver& driver, float dt, boo
     }
 }
 
+bool Director::blind() const {
+    return series_ && show_.phase() == ShowPhase::Jump && show_.curtain() >= 0.999f;
+}
+
 bool Director::positionOf(EntityId id, float alpha, Vector2& at) const {
     return ui::positionOf(world_, id, alpha, at);
 }
@@ -937,7 +941,7 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
         plan = establishingPlan(); // смотреть пока нечего
     }
     shot_ = plan.size;
-    cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, dt);
+    cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, show_.finale(), dt);
 }
 
 Director::Pick Director::pickOf(const Story& story) const {
@@ -1145,7 +1149,7 @@ void Director::drawCaption(Inspector& inspector) {
         } else if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
             ImGui::TextColored(muted, "Затишье — время x%d", setSpeed_);
         } else if (slowmo_ && baseSpeed_ > 1) {
-            ImGui::TextColored(muted, "Замедление — кульминация");
+            ImGui::TextColored(muted, "Замедление");
         }
         if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
             drawHeroCaption(hero, inspector);
@@ -1162,19 +1166,14 @@ void Director::drawCaption(Inspector& inspector) {
                 }
             }
         } else if (story != nullptr) {
-            ImGui::TextUnformatted(titleOf(*story).c_str());
-            ImGui::TextDisabled("%s", stateLine(*story).c_str());
-        } else {
-            ImGui::TextUnformatted(omenTitle(current_.omen.kind));
-            if (lost_) {
-                ImGui::TextDisabled("случилось — смотрим, чем кончилось");
-            }
+            // Человеческим языком (12а.10); вид и стадия линии — в окне режиссёра.
+            ImGui::TextUnformatted(storyHeadline(world_, *story).c_str());
         }
         if (current_.hasOmen && !lost_) {
-            // Что вот-вот случится: ярче, когда кульминация совсем близко.
+            // Что вот-вот случится: ярче, когда совсем близко.
             const bool soon = urgent(current_);
             const ImVec4 color = soon ? ImVec4{1.0f, 0.62f, 0.3f, 1.0f} : ImVec4{0.95f, 0.85f, 0.5f, 1.0f};
-            ImGui::TextColored(color, "Вот-вот: %s", omenLine(world_, current_.omen).c_str());
+            ImGui::TextColored(color, "%s", omenHeadline(world_, current_.omen).c_str());
         }
         if (story != nullptr && !story->beats.empty()) {
             const ChronicleEvent& last = world_.chronicle().events()[story->beats.back().event];
@@ -1453,9 +1452,6 @@ void Director::drawSeriesFrame() {
     // Монтаж в сериале ведёт шоураннер: перебивка, передышка, будни.
     std::string label = show_.label();
     const float labelAlpha = 1.0f;
-    if (label.empty() && slowmo_) {
-        label = "Кульминация";
-    }
     // Справа — номер эпизода сериала, а в дебют героя — через кого он связан.
     std::string heroLine = show_.episode() > 0 ? "Эпизод " + std::to_string(show_.episode()) : "";
     if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
@@ -1471,11 +1467,10 @@ void Director::drawSeriesFrame() {
         }
     }
     const Story* story = stories_.find(current_.story);
+    // Линия — человеческим языком (12а.10): без названия вида и стадии.
     std::string storyLine;
     if (story != nullptr) {
-        storyLine = titleOf(*story) + " · " + stageTitle(story->stage);
-    } else if (current_.hasOmen) {
-        storyLine = omenTitle(current_.omen.kind);
+        storyLine = storyHeadline(world_, *story);
     }
     const float row = bar * 0.2f;
     if (hidden) {
@@ -1492,7 +1487,7 @@ void Director::drawSeriesFrame() {
     frame::text(titleFont(), 17.0f * scale, display.x - margin, row, Align::Right, tint(gold),
                 frame::clean(heroLine));
     if (current_.hasOmen && !lost_ && !hidden) {
-        const std::string omen = "Вот-вот: " + frame::clean(omenLine(world_, current_.omen));
+        const std::string omen = frame::clean(omenHeadline(world_, current_.omen));
         frame::text(captionFont(), 18.0f * scale, display.x * 0.5f, row + 30.0f * scale, Align::Center,
                     tint(urgent(current_) ? amber : straw), omen, display.x * 0.7f);
     }
@@ -1540,7 +1535,6 @@ void Director::drawSeriesFrame() {
     if (!summaries_.empty() && clock_ - summaryAt_ < kSummaryTime && !cards) {
         // В сериале итог подводится сцене (эпизод — у шоураннера).
         const float alpha = frame::fade(clock_ - summaryAt_, 0.5f, kSummaryTime, 1.2f);
-        lines.push_back({italicFont(), 18.0f * scale, tint(muted, alpha), "Итог сцены"});
         lines.push_back({titleFont(), 22.0f * scale, tint(gold, alpha), frame::clean(summaries_.back().text)});
     }
     if (recapHero_ == shown_ && shown_ != kInvalidId && clock_ - recapAt_ < kRecapTime) {

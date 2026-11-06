@@ -241,7 +241,12 @@ int main(int argc, char** argv) {
             const lw::Environment environment = lw::environmentAt(world);
 
             BeginDrawing();
-            if (camera.is3d()) {
+            // Скачок времени в сериале (12а.10): кадр чёрный — мир не рисуем,
+            // кадр короче и промотка идёт быстрее.
+            const bool blind = storyDirector.blind();
+            if (blind) {
+                ClearBackground(BLACK);
+            } else if (camera.is3d()) {
                 ClearBackground(lw::kSkyColor);
                 renderer3d.setHighlight(series ? lw::kInvalidId : inspector.selected()); // в кино меток нет
                 renderer3d.draw(world, camera, alpha);
@@ -251,7 +256,9 @@ int main(int argc, char** argv) {
                 renderer.draw(world, camera.camera(), alpha);
                 EndMode2D();
             }
-            weatherRenderer.draw(environment, world.weather(), camera.is3d());
+            if (!blind) {
+                weatherRenderer.draw(environment, world.weather(), camera.is3d());
+            }
             if (!series) {
                 // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
                 camera.beginOverlay();

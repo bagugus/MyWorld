@@ -3,6 +3,7 @@
 #include "sim/Components.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
+#include "ui/Captions.h"
 #include "ui/Format.h"
 
 #include <cstdio>
@@ -149,6 +150,143 @@ std::string omenLine(const World& world, const Foresight& omen) {
         formatGameDuration(duration, sizeof(duration), ticks);
         line += ", через ~";
         line += duration;
+    }
+    return line;
+}
+
+namespace {
+
+// Окончание по роду: «погиб» — «погибла».
+std::string said(const World& world, EntityId id, const char* male, const char* female) {
+    return isFemale(world, id) ? female : male;
+}
+
+// Жив ли человек (не тело, не зомби, есть в мире).
+bool alive(const World& world, EntityId id) {
+    const entt::entity entity = id != kInvalidId ? world.find(id) : entt::null;
+    return entity != entt::null && world.registry().all_of<Person>(entity);
+}
+
+std::string settlementName(const World& world, EntityId id) {
+    const entt::entity entity = id != kInvalidId ? world.find(id) : entt::null;
+    if (entity != entt::null) {
+        if (const auto* settlement = world.registry().try_get<Settlement>(entity)) {
+            return settlement->name;
+        }
+    }
+    return "поселению";
+}
+
+} // namespace
+
+std::string storyHeadline(const World& world, const Story& story) {
+    const EntityId hero = story.hero != kInvalidId ? story.hero : story.focus;
+    const std::string a = idLabel(hero);
+    const std::string b = idLabel(story.other);
+    switch (story.kind) {
+    case StoryKind::Feud:
+        switch (story.ending) {
+        case StoryEnding::Revenge:
+            return a + said(world, hero, " отомстил ", " отомстила ") + b;
+        case StoryEnding::Reconciled:
+            return a + " и " + b + " помирились";
+        case StoryEnding::Killed:
+            return b + said(world, story.other, " убил ", " убила ") + a;
+        case StoryEnding::Death:
+            if (!alive(world, hero)) {
+                return a + said(world, hero, " погиб, так и не простив ", " погибла, так и не простив ") + b;
+            }
+            return b + said(world, story.other, " погиб, так и не помирившись с ", " погибла, так и не помирившись с ") + a;
+        case StoryEnding::Faded:
+            return a + said(world, hero, " забыл обиду на ", " забыла обиду на ") + b;
+        default:
+            return story.betrayal ? b + said(world, story.other, " предал ", " предала ") + a
+                                  : a + said(world, hero, " не простил ", " не простила ") + b;
+        }
+    case StoryKind::Group: {
+        // Вожак — нынешний, если группа ещё есть.
+        EntityId leader = story.hero;
+        const entt::entity group = story.focus != kInvalidId ? world.find(story.focus) : entt::null;
+        if (group != entt::null) {
+            if (const auto* g = world.registry().try_get<Group>(group); g != nullptr && g->leader != kInvalidId) {
+                leader = g->leader;
+            }
+        }
+        if (story.ending == StoryEnding::Disbanded) {
+            return "Люди " + idLabel(leader) + " разошлись";
+        }
+        return idLabel(leader) + said(world, leader, " и его люди", " и её люди");
+    }
+    case StoryKind::Infection:
+        switch (story.ending) {
+        case StoryEnding::Turned:
+            return a + said(world, hero, " стал зомби", " стала зомби");
+        case StoryEnding::Death:
+            return a + said(world, hero, " умер от укуса", " умерла от укуса");
+        default:
+            return a + said(world, hero, " укушен", " укушена");
+        }
+    case StoryKind::Salvage:
+        switch (story.ending) {
+        case StoryEnding::Claimed:
+            return "Груз забрали";
+        case StoryEnding::Unclaimed:
+            return "Груз так никому и не достался";
+        default:
+            return hero != kInvalidId && alive(world, hero) ? a + " и другие спешат к упавшему грузу"
+                                                             : "Все спешат к упавшему грузу";
+        }
+    default:
+        return a;
+    }
+}
+
+std::string omenHeadline(const World& world, const Foresight& omen) {
+    const entt::registry& registry = world.registry();
+    std::string line;
+    switch (omen.kind) {
+    case ForesightKind::Revenge:
+        line = idLabel(omen.hero) + " идёт мстить " + idLabel(omen.other);
+        break;
+    case ForesightKind::Raid:
+        line = "Орда идёт к " + settlementName(world, omen.other);
+        break;
+    case ForesightKind::Turning: {
+        const entt::entity body = world.find(omen.hero);
+        if (body != entt::null && registry.all_of<Corpse>(body)) {
+            line = "Тело " + idLabel(omen.hero) + " вот-вот встанет";
+        } else {
+            line = idLabel(omen.hero) + " вот-вот обратится";
+        }
+        if (omen.crowd > 0) {
+            line += ", а рядом люди";
+        }
+        return line;
+    }
+    case ForesightKind::CacheRace:
+        line = idLabel(omen.hero) + " и " + idLabel(omen.other) + " спешат к одному грузу";
+        break;
+    case ForesightKind::Theft: {
+        const entt::entity thief = world.find(omen.hero);
+        const auto* person = thief != entt::null ? registry.try_get<Person>(thief) : nullptr;
+        if (person != nullptr && person->home == omen.focus) {
+            line = idLabel(omen.hero) + " хочет сбежать с запасами группы";
+        } else if (omen.other != kInvalidId) {
+            line = idLabel(omen.hero) + " идёт обокрасть дом " + idLabel(omen.other);
+        } else {
+            line = idLabel(omen.hero) + " идёт обокрасть чужой дом";
+        }
+        break;
+    }
+    default:
+        return {};
+    }
+    // Когда — словами, не минутами.
+    const auto ticks = static_cast<std::uint64_t>(omen.eta * static_cast<float>(kTicksPerSecond));
+    if (ticks < 2 * kTicksPerGameMinute) {
+        line += omen.kind == ForesightKind::Raid ? " — она уже у околицы" : " — уже совсем близко";
+    } else if (ticks < 30 * kTicksPerGameMinute) {
+        line += " — скоро будет там";
     }
     return line;
 }

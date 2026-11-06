@@ -60,6 +60,9 @@ constexpr float kCinemaLifts[] = {0.0f, 8.0f, 16.0f, 26.0f, 38.0f, 52.0f};
 constexpr float kCinemaLiftUp = 0.25f;  // секунд: подъём над препятствием
 constexpr float kCinemaLiftDown = 1.5f; // секунд: обратно
 constexpr float kCinemaRelease = 1.2f;  // секунд: отъезд обратно после подъезда
+// Вид заслонён: подъём выше этого (градусы) или камера ближе этой доли расстояния.
+constexpr float kCinemaBlockedLift = 6.0f;
+constexpr float kCinemaBlockedReach = 0.6f;
 // Деревья: крона непрозрачна — сквозь листву луч проходит не больше
 // kFoliageSeeThrough метров; выше kTreeTop над землёй деревьев нет; луч
 // проверяется шагами kFoliageStep.
@@ -964,6 +967,7 @@ void CameraController::enterCinemaFromCamera() {
     shot.fovY = kFovY;
     cinema_ = cinemaGoal_ = shot;
     cinemaLift_ = 0.0f;
+    cinemaWantedLift_ = 0.0f;
     cinemaReach_ = pose.distance;
     cinemaSnap_ = false;
     mode_ = ViewMode::Cinema;
@@ -1188,6 +1192,7 @@ void CameraController::updateCinema(float dt) {
             wantedLift = lift;
         }
     }
+    cinemaWantedLift_ = wantedLift;
     if (snap) {
         cinemaLift_ = wantedLift;
     } else {
@@ -1204,6 +1209,17 @@ void CameraController::updateCinema(float dt) {
     }
     cinemaReach_ = std::max(cinemaReach_, free.minimum);
     cinemaSnap_ = false;
+}
+
+bool CameraController::cinemaBlocked() const {
+    return cinemaWantedLift_ > kCinemaBlockedLift || cinemaReach_ < cinema_.distance * kCinemaBlockedReach;
+}
+
+bool CameraController::cinemaClearFrom(float yaw) const {
+    const Vector2 focus = Vector2Add(cinema_.anchor, cinema_.offset);
+    const Vector3 target = {focus.x, surfaceAt(focus) + cinema_.height, focus.y};
+    const Clearance free = clearance(target, orbitDirection(yaw, cinema_.pitch), cinema_.distance);
+    return free.clear >= cinema_.distance * 0.97f && free.hidden <= kFoliageSeeThrough;
 }
 
 void CameraController::refreshCinema() {
