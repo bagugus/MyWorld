@@ -22,7 +22,8 @@
 // --outbreak    вспышка через DAYS игровых суток от начала мира (0 — не по расписанию)
 // --phase       сразу перевести мир в фазу: outbreak, panic, collapse, survival (этап 7.4);
 //               --hours прокручивает мир уже после этого
-// --director   включить режиссёра: камера сама ведёт самую интересную сюжетную линию (этап 12а)
+// --director    режим «Сериал» (этап 12а.7): кино в 3D во весь экран — камеру ведёт режиссёр
+//               по самой интересной сюжетной линии, окна спрятаны; Esc — выход, F11 — снова
 // --zombies, --no-peace — как у lw_headless
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
@@ -160,6 +161,8 @@ int main(int argc, char** argv) {
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
         camera.setTerrain(&renderer3d.terrain());
+        renderer3d.updateBuildingBounds(world);
+        camera.setObstacles(&renderer3d.buildingBounds()); // кинокамера не заходит в стены
         lw::ui::loadCameraSettings(camera.settings());
         renderer3d.setFoliageYear(foliage);
         if (orbit) {
@@ -184,7 +187,10 @@ int main(int argc, char** argv) {
             inspector.setFollow(true);
         }
         lw::ui::Director storyDirector(world);
-        storyDirector.setEnabled(director);
+        storyDirector.setFullscreenAllowed(screenshot == nullptr); // снимок — в окне того же размера
+        if (director) {
+            storyDirector.requestSeries(true); // сериал сам включает режиссёра, Esc — выключает
+        }
 
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
@@ -192,27 +198,34 @@ int main(int argc, char** argv) {
             const float dt = GetFrameTime();
 
             lw::ui::handleHotkeys(driver);
-            // Щелчок — по тому, что было на экране в прошлом кадре.
-            pathTool.handleInput(camera, !lw::ui::wantsMouse());
-            inspector.handleInput(camera, !lw::ui::wantsMouse());
+            storyDirector.handleHotkeys(!lw::ui::wantsKeyboard()); // F11 — сериал, Esc — выход
+            // В сериале мир и камера ввода не получают: смотрим кино.
+            if (!storyDirector.series()) {
+                // Щелчок — по тому, что было на экране в прошлом кадре.
+                pathTool.handleInput(camera, !lw::ui::wantsMouse());
+                inspector.handleInput(camera, !lw::ui::wantsMouse());
+            }
             driver.advance(dt);
             const float alpha = driver.interpolationAlpha();
             storyDirector.update(inspector, driver, dt);
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
             // с отрисовкой этого кадра.
             inspector.updateCamera(camera, alpha);
-            storyDirector.updateCamera(camera, alpha, dt); // план кадра, пролёты (вид сверху)
             std::optional<lw::CameraSubject> subject = inspector.cameraSubject(alpha);
             if (subject) {
                 if (const std::optional<float> heading = renderer3d.drawnHeading(inspector.selected())) {
                     subject->heading = *heading;
                 }
             }
+            // План кадра: пролёты в виде сверху, кинокамера в сериале.
+            storyDirector.updateCamera(camera, subject ? std::optional<float>(subject->heading) : std::nullopt,
+                                       alpha, dt);
+            const bool series = storyDirector.series();
             camera.setSubject(subject);
-            if (frame == 0 && startView) {
+            if (frame == 0 && startView && !series) {
                 camera.setMode(*startView); // из-за плеча — когда выбранный уже известен
             }
-            camera.update(dt, !lw::ui::wantsMouse(), !lw::ui::wantsKeyboard());
+            camera.update(dt, !series && !lw::ui::wantsMouse(), !series && !lw::ui::wantsKeyboard());
             if (frame == 0) {
                 camera.snap(); // снимок с командной строки — без плавного подлёта
             }
@@ -223,7 +236,7 @@ int main(int argc, char** argv) {
             BeginDrawing();
             if (camera.is3d()) {
                 ClearBackground(lw::kSkyColor);
-                renderer3d.setHighlight(inspector.selected());
+                renderer3d.setHighlight(series ? lw::kInvalidId : inspector.selected()); // в кино меток нет
                 renderer3d.draw(world, camera, alpha);
             } else {
                 ClearBackground({16, 18, 22, 255});
@@ -232,24 +245,28 @@ int main(int argc, char** argv) {
                 EndMode2D();
             }
             weatherRenderer.draw(environment, world.weather(), camera.is3d());
-            // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
-            camera.beginOverlay();
-            pathTool.drawOverlay(camera.camera());
-            inspector.drawOverlay(camera.camera(), alpha);
-            camera.endOverlay();
+            if (!series) {
+                // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
+                camera.beginOverlay();
+                pathTool.drawOverlay(camera.camera());
+                inspector.drawOverlay(camera.camera(), alpha);
+                camera.endOverlay();
+            }
 
             lw::ui::beginFrame();
             lw::ui::setNameSource(&world);
-            lw::ui::drawSettlementLabels(world, camera);
-            lw::ui::drawTimePanel(world, environment, driver);
-            lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
-            pathTool.drawPanel();
-            inspector.drawPanel();
-            lw::ui::drawKeyHelp(camera);
-            lw::ui::drawEventsPanel(world, driver, inspector, camera);
-            lw::ui::drawChroniclePanel(world, inspector);
-            storyDirector.drawPanel(inspector);
-            storyDirector.drawCaption(inspector);
+            if (!series) {
+                lw::ui::drawSettlementLabels(world, camera);
+                lw::ui::drawTimePanel(world, environment, driver);
+                lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
+                pathTool.drawPanel();
+                inspector.drawPanel();
+                lw::ui::drawKeyHelp(camera);
+                lw::ui::drawEventsPanel(world, driver, inspector, camera);
+                lw::ui::drawChroniclePanel(world, inspector);
+                storyDirector.drawPanel(inspector);
+            }
+            storyDirector.drawCaption(inspector); // в сериале — широкий кадр и титры
             lw::ui::endFrame();
 
             EndDrawing();

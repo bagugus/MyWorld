@@ -218,6 +218,43 @@ void WorldRenderer3D::setDrawDistance(float meters) {
     drawDistance_ = std::clamp(meters, kMinDrawDistance, kMaxDrawDistance);
 }
 
+BuildingModel WorldRenderer3D::buildingModel(const Building& building, EntityId id) const {
+    BuildingModel model;
+    model.kind = building.kind;
+    model.x0 = static_cast<float>(building.origin.x) * Map::kCellSize;
+    model.z0 = static_cast<float>(building.origin.y) * Map::kCellSize;
+    model.x1 = model.x0 + static_cast<float>(building.width) * Map::kCellSize;
+    model.z1 = model.z0 + static_cast<float>(building.height) * Map::kCellSize;
+    // Стоит на нижнем углу участка, высота отсчитывается от верхнего.
+    model.low = terrain_.groundAt(model.x0, model.z0);
+    model.high = model.low;
+    for (const Vector2 corner : {Vector2{model.x1, model.z0}, Vector2{model.x0, model.z1},
+                                 Vector2{model.x1, model.z1}}) {
+        const float ground = terrain_.groundAt(corner.x, corner.y);
+        model.low = std::min(model.low, ground);
+        model.high = std::max(model.high, ground);
+    }
+    // Дверь — на стене напротив клетки входа.
+    const Vector2 doorCell = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
+    model.door = {std::clamp(doorCell.x, model.x0, model.x1), std::clamp(doorCell.y, model.z0, model.z1)};
+    model.doorGround = terrain_.groundAt(doorCell.x, doorCell.y);
+    model.seed = mixBits(id);
+    return model;
+}
+
+void WorldRenderer3D::updateBuildingBounds(const World& world) {
+    const auto buildings = world.registry().view<const Building>();
+    if (buildingBounds_.size() == buildings.size()) {
+        return; // здания не меняются: посчитано раньше
+    }
+    buildingBounds_.clear();
+    buildingBounds_.reserve(buildings.size());
+    for (const auto [entity, building] : buildings.each()) {
+        const BuildingModel model = buildingModel(building, world.registry().get<Id>(entity).value);
+        buildingBounds_.push_back({{model.x0, model.low, model.z0}, {model.x1, buildingTop(model), model.z1}});
+    }
+}
+
 std::optional<float> WorldRenderer3D::drawnHeading(EntityId id) const {
     const auto it = motion_.find(id);
     if (it == motion_.end() || frame_ - it->second.seen > 1) {
@@ -253,6 +290,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
     const Camera3D& view = camera.camera3d();
     const Vector3 eye = view.position;
     ++frame_;
+    updateBuildingBounds(world);
     dt_ = std::min(GetFrameTime(), 0.1f);
     const float snow = snowCover(world);
     const Environment environment = environmentAt(world);
@@ -371,33 +409,14 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         creaturesDrawn_ = 0;
     }
     for (const auto [entity, building] : registry.view<const Building>().each()) {
-        BuildingModel model;
-        model.kind = building.kind;
-        model.x0 = static_cast<float>(building.origin.x) * Map::kCellSize;
-        model.z0 = static_cast<float>(building.origin.y) * Map::kCellSize;
-        model.x1 = model.x0 + static_cast<float>(building.width) * Map::kCellSize;
-        model.z1 = model.z0 + static_cast<float>(building.height) * Map::kCellSize;
-        // Стоит на нижнем углу участка, высота отсчитывается от верхнего.
-        model.low = terrain_.groundAt(model.x0, model.z0);
-        model.high = model.low;
-        for (const Vector2 corner : {Vector2{model.x1, model.z0}, Vector2{model.x0, model.z1},
-                                     Vector2{model.x1, model.z1}}) {
-            const float ground = terrain_.groundAt(corner.x, corner.y);
-            model.low = std::min(model.low, ground);
-            model.high = std::max(model.high, ground);
-        }
+        const EntityId id = registry.get<Id>(entity).value;
+        BuildingModel model = buildingModel(building, id);
         const Vector2 center = {(model.x0 + model.x1) * 0.5f, (model.z0 + model.z1) * 0.5f};
         const float top = buildingTop(model);
         if (skip({center.x, (model.low + top) * 0.5f, center.y},
                    std::max(model.x1 - model.x0, model.z1 - model.z0) + top - model.low)) {
             continue;
         }
-        // Дверь — на стене напротив клетки входа.
-        const Vector2 doorCell = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
-        model.door = {std::clamp(doorCell.x, model.x0, model.x1), std::clamp(doorCell.y, model.z0, model.z1)};
-        model.doorGround = terrain_.groundAt(doorCell.x, doorCell.y);
-        const EntityId id = registry.get<Id>(entity).value;
-        model.seed = mixBits(id);
         model.snow = snow;
         // Мелочь на стенах тени не отбрасывает.
         model.detailed = !shadowPass && camera.zoomAt(center) >= kDetailPixels &&

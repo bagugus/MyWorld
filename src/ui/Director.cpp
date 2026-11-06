@@ -1,6 +1,7 @@
 #include "ui/Director.h"
 
 #include "render/CameraController.h"
+#include "sim/Calendar.h"
 #include "sim/Components.h"
 #include "sim/SimDriver.h"
 #include "sim/TimeScale.h"
@@ -9,11 +10,15 @@
 #include "ui/ChronicleView.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
+#include "ui/SeriesFrame.h"
+#include "ui/Ui.h"
 
 #include <imgui.h>
 #include <raymath.h>
 
 #include <algorithm>
+#include <cfloat>
+#include <cmath>
 #include <cstdio>
 #include <iterator>
 #include <limits>
@@ -121,6 +126,17 @@ constexpr std::size_t kRecapBefore = 2;
 constexpr std::size_t kRecapSince = 3;
 // Сколько итогов эпизодов в окне.
 constexpr std::size_t kSummariesListed = 40;
+// Сериал (12а.7): полосы широкого кадра выезжают за kBarsTime секунд; начало —
+// проявка из чёрного за kOpeningFade, титры — ещё через kTitlesDelay; имя
+// нового героя проявляется за kNameFade.
+constexpr float kBarsTime = 0.8f;
+constexpr float kOpeningFade = 1.2f;
+constexpr float kTitlesDelay = 0.6f;
+constexpr float kNameFade = 0.8f;
+// Дом, где сидит герой, — точка взгляда на такой высоте, метры.
+constexpr float kHouseLookHeight = 3.0f;
+// Общий план поселения: какую долю радиуса уместить.
+constexpr float kEstablishingShare = 0.6f;
 
 const char* heroStatusTitle(HeroStatus status) {
     constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
@@ -369,6 +385,7 @@ void Director::show(const Pick& pick, Inspector& inspector, Cut cut) {
     }
     if (pick.target != shown_) {
         camerawork_.cut(); // далеко — пролёт
+        cinema_.cut();     // в сериале — склейка
     }
     if (!pick.same(current_) || lost_) {
         held_ = 0.0f;
@@ -563,7 +580,7 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
         sinceChoice_ = 0.0f;
         omens_ = foresee(world_);
     }
-    if (enabled_ && shown_ != kInvalidId && inspector.selected() != shown_) {
+    if (enabled_ && !series_ && shown_ != kInvalidId && inspector.selected() != shown_) {
         enabled_ = false; // пользователь выбрал своё — камера его
     }
     if (!enabled_) {
@@ -732,6 +749,7 @@ ShotPlan Director::planOf(float alpha) const {
     }
     plan.valid = true;
     plan.size = ShotSize::Close;
+    plan.subjectId = current_.target;
     const auto add = [&](EntityId id, float within) {
         Vector2 at{};
         if (id != current_.target && positionOf(id, alpha, at) &&
@@ -797,17 +815,138 @@ ShotPlan Director::planOf(float alpha) const {
             break; // крупно: укушенный
         }
     }
+    if (series_) {
+        // В 3D человека в доме не видно: в кадре весь дом, со стороны двери.
+        const entt::registry& registry = world_.registry();
+        const entt::entity entity = world_.find(current_.target);
+        const auto* person = entity != entt::null ? registry.try_get<Person>(entity) : nullptr;
+        const entt::entity home = person != nullptr && person->indoors ? world_.find(person->home) : entt::null;
+        if (home != entt::null && registry.all_of<Building>(home)) {
+            const Building& building = registry.get<Building>(home);
+            const float x0 = static_cast<float>(building.origin.x) * Map::kCellSize;
+            const float z0 = static_cast<float>(building.origin.y) * Map::kCellSize;
+            const float x1 = x0 + static_cast<float>(building.width) * Map::kCellSize;
+            const float z1 = z0 + static_cast<float>(building.height) * Map::kCellSize;
+            if (plan.size == ShotSize::Close) {
+                plan.size = ShotSize::Medium;
+            }
+            for (const Vector2 corner : {Vector2{x0, z0}, Vector2{x1, z0}, Vector2{x0, z1}, Vector2{x1, z1}}) {
+                plan.extra.push_back(corner);
+            }
+            const Vector2 door = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
+            const Vector2 center = {(x0 + x1) * 0.5f, (z0 + z1) * 0.5f};
+            plan.viewFrom = std::atan2(door.x - center.x, door.y - center.y) * RAD2DEG;
+            plan.lookHeight = kHouseLookHeight;
+        }
+    }
     return plan;
 }
 
-void Director::updateCamera(CameraController& camera, float alpha, float dt) {
-    if (!enabled_) {
-        camerawork_.idle();
+ShotPlan Director::establishingPlan() const {
+    ShotPlan plan;
+    const entt::registry& registry = world_.registry();
+    if (!exists(establishing_)) {
+        int largest = -1;
+        for (const auto [entity, settlement] : registry.view<const Settlement>().each()) {
+            if (settlement.radius > largest) {
+                largest = settlement.radius;
+                establishing_ = registry.get<Id>(entity).value;
+            }
+        }
+    }
+    const entt::entity entity = world_.find(establishing_);
+    if (entity == entt::null) {
+        return plan;
+    }
+    const Settlement& settlement = registry.get<Settlement>(entity);
+    plan.valid = true;
+    plan.size = ShotSize::Wide;
+    plan.subjectId = establishing_;
+    plan.subject = {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)};
+    const float reach = static_cast<float>(settlement.radius) * Map::kCellSize * kEstablishingShare;
+    for (const Vector2 side : {Vector2{-1.0f, 0.0f}, Vector2{1.0f, 0.0f}, Vector2{0.0f, -1.0f}, Vector2{0.0f, 1.0f}}) {
+        plan.extra.push_back(Vector2Add(plan.subject, Vector2Scale(side, reach)));
+    }
+    return plan;
+}
+
+void Director::handleHotkeys(bool keyboardFree) {
+    if (!keyboardFree) {
         return;
     }
-    const ShotPlan plan = planOf(alpha);
+    if (IsKeyPressed(KEY_F11)) {
+        requestSeries(!series());
+    } else if (series() && IsKeyPressed(KEY_ESCAPE)) {
+        requestSeries(false);
+    }
+}
+
+void Director::enterSeries(CameraController& camera) {
+    savedMode_ = camera.mode() == ViewMode::Cinema ? ViewMode::Orbit : camera.mode();
+    savedZoom_ = camera.zoom();
+    savedEnabled_ = enabled_;
+    if (!enabled_) {
+        setEnabled(true);
+    }
+    camera.setMode(ViewMode::Cinema);
+    cinema_.reset();
+    series_ = true;
+    seriesClock_ = 0.0f;
+    bars_ = 0.0f;
+    if (fullscreenAllowed_ && !IsWindowFullscreen() && !IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE)) {
+        ToggleBorderlessWindowed();
+        fullscreen_ = true;
+    }
+    HideCursor();
+}
+
+void Director::leaveSeries(CameraController& camera) {
+    series_ = false;
+    bars_ = 0.0f;
+    if (fullscreen_) {
+        ToggleBorderlessWindowed();
+        fullscreen_ = false;
+    }
+    ShowCursor();
+    camera.leaveCinema(savedMode_, savedZoom_);
+    if (enabled_ != savedEnabled_) {
+        setEnabled(savedEnabled_);
+    }
+}
+
+void Director::updateCamera(CameraController& camera, std::optional<float> heading, float alpha, float dt) {
+    if (seriesRequest_) {
+        const bool on = *seriesRequest_;
+        seriesRequest_.reset();
+        if (on && !series_) {
+            enterSeries(camera);
+        } else if (!on && series_) {
+            leaveSeries(camera);
+        }
+    }
+    const bool climax = slowmo_ || urgent(current_);
+    if (!series_) {
+        if (!enabled_) {
+            camerawork_.idle();
+            return;
+        }
+        const ShotPlan plan = planOf(alpha);
+        shot_ = plan.size;
+        camerawork_.update(camera, plan, climax, dt);
+        return;
+    }
+    // Сериал: кадр ставит только кинокамера.
+    seriesClock_ += dt;
+    bars_ = std::min(1.0f, bars_ + dt / kBarsTime);
+    if (camera.mode() != ViewMode::Cinema) {
+        camera.setMode(ViewMode::Cinema);
+    }
+    ShotPlan plan = planOf(alpha);
+    if (!plan.valid) {
+        plan = establishingPlan(); // смотреть пока нечего
+    }
     shot_ = plan.size;
-    camerawork_.update(camera, plan, slowmo_ || urgent(current_), dt);
+    cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, dt);
 }
 
 std::string Director::omenLine(const Foresight& omen) const {
@@ -916,6 +1055,11 @@ void Director::drawPanel(Inspector& inspector) {
         ImGui::End();
         return;
     }
+    if (ImGui::Button("Сериал (F11)")) {
+        requestSeries(true);
+    }
+    ImGui::SetItemTooltip("Кино в 3D во весь экран: камеру ведёт режиссёр, окна спрятаны; выход — Esc");
+    ImGui::SameLine();
     bool enabled = enabled_;
     if (ImGui::Checkbox("Режиссёр: камера сама ведёт историю", &enabled)) {
         setEnabled(enabled);
@@ -1044,6 +1188,10 @@ void Director::drawPanel(Inspector& inspector) {
 }
 
 void Director::drawCaption(Inspector& inspector) {
+    if (series_) {
+        drawSeriesFrame();
+        return;
+    }
     if (!enabled_) {
         return;
     }
@@ -1341,6 +1489,150 @@ void Director::drawCast(Inspector& inspector) {
     if (clicked != kInvalidId) {
         enabled_ = false; // пользователь выбрал своё
         inspector.select(clicked);
+    }
+}
+
+void Director::drawSeriesFrame() {
+    using frame::Align;
+    const ImVec2 display = ImGui::GetIO().DisplaySize;
+    const float scale = frame::scale();
+    const float bar = frame::barHeight(bars_);
+    const float margin = display.x * 0.07f;
+    frame::drawBars(bars_);
+    // Начало сериала — проявка из чёрного; склейка — короткая проявка.
+    frame::drawBlackout(std::max(cinema_.blackout(), 1.0f - frame::fade(seriesClock_, kOpeningFade)));
+    const float titles = frame::fade(seriesClock_ - kTitlesDelay, 1.0f);
+    if (titles <= 0.0f) {
+        return;
+    }
+    const auto tint = [titles](ImVec4 color, float alpha = 1.0f) {
+        color.w *= titles * alpha;
+        return color;
+    };
+    const ImVec4 white{0.95f, 0.94f, 0.9f, 1.0f};
+    const ImVec4 muted{0.7f, 0.74f, 0.8f, 1.0f};
+    const ImVec4 gold{1.0f, 0.82f, 0.42f, 1.0f};
+    const ImVec4 amber{1.0f, 0.62f, 0.3f, 1.0f};
+    const ImVec4 straw{0.95f, 0.85f, 0.55f, 1.0f};
+
+    // Верхняя полоса: слева — монтаж, по центру — линия, справа — герой
+    // сериала; ниже — что вот-вот случится.
+    std::string label;
+    float labelAlpha = 1.0f;
+    if (cut_ == Cut::Parallel && clock_ - cutAt_ < kCutTitle) {
+        label = "Тем временем…";
+        labelAlpha = frame::fade(clock_ - cutAt_, 0.4f, kCutTitle, 1.0f);
+    } else if (breather_ > 0.0f) {
+        label = "Передышка";
+    } else if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
+        label = "Затишье · время ×" + std::to_string(setSpeed_);
+    } else if (slowmo_) {
+        label = "Кульминация";
+    }
+    std::string heroLine;
+    if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
+        const Protagonist* protagonist = cast_.find(hero);
+        const auto it = episodes_.find(hero);
+        const int episode = it != episodes_.end() ? it->second.count : 0;
+        const bool opening = hero == episodeHero_ && clock_ - episodeStart_ < kEpisodeTitle;
+        if (protagonist != nullptr && opening && episode == 1) {
+            heroLine = "Новый герой";
+            if (protagonist->introducedBy != kInvalidId) {
+                heroLine += " · связан с " + idLabel(protagonist->introducedBy);
+            }
+        } else if (opening && returnedAfter_ >= kMissedAfter) {
+            char text[96];
+            std::snprintf(text, sizeof(text), "Возвращаемся спустя %.0f мин", returnedAfter_ / 60.0f);
+            heroLine = text;
+        } else if (episode > 0 && hero == episodeHero_) {
+            heroLine = "Эпизод " + std::to_string(episode);
+        }
+    }
+    const Story* story = stories_.find(current_.story);
+    std::string storyLine;
+    if (story != nullptr) {
+        storyLine = titleOf(*story) + " · " + stageTitle(story->stage);
+    } else if (current_.hasOmen) {
+        storyLine = omenTitle(current_.omen.kind);
+    }
+    const float row = bar * 0.2f;
+    frame::text(italicFont(), 19.0f * scale, margin, row, Align::Left, tint(muted, labelAlpha), label);
+    frame::text(titleFont(), 20.0f * scale, display.x * 0.5f, row, Align::Center, tint(white),
+                frame::clean(storyLine), display.x * 0.5f);
+    frame::text(titleFont(), 17.0f * scale, display.x - margin, row, Align::Right, tint(gold),
+                frame::clean(heroLine));
+    if (current_.hasOmen && !lost_) {
+        const std::string omen = "Вот-вот: " + frame::clean(omenLine(current_.omen));
+        frame::text(captionFont(), 18.0f * scale, display.x * 0.5f, row + 30.0f * scale, Align::Center,
+                    tint(urgent(current_) ? amber : straw), omen, display.x * 0.7f);
+    }
+
+    // Нижняя полоса: имя крупно, рядом — положение, ниже — чего он хочет.
+    float y = display.y - bar + bar * 0.14f;
+    const float nameAlpha = frame::fade(clock_ - subjectShownAt_, kNameFade);
+    const std::string intent = intentLine(world_, shown_);
+    if (!intent.empty()) {
+        const std::string name = frame::clean(idLabel(shown_));
+        const float nameSize = 32.0f * scale;
+        const float height = frame::text(titleFont(), nameSize, margin, y, Align::Left, tint(white, nameAlpha), name);
+        if (const std::string status = statusLine(world_, shown_); !status.empty()) {
+            const float width = titleFont()->CalcTextSizeA(nameSize, FLT_MAX, 0.0f, name.c_str()).x;
+            frame::text(captionFont(), 19.0f * scale, margin + width + 16.0f * scale, y + nameSize * 0.32f,
+                        Align::Left, tint(muted, nameAlpha), frame::clean(status));
+        }
+        y += height + 2.0f * scale;
+        frame::text(captionFont(), 21.0f * scale, margin, y, Align::Left, tint(white, nameAlpha),
+                    frame::clean(intent), display.x - 2.0f * margin);
+    } else if (!current_.valid()) {
+        if (const entt::entity place = world_.find(establishing_); place != entt::null) {
+            const CalendarTime time = calendarAt(world_.tick());
+            char when[64];
+            std::snprintf(when, sizeof(when), "день %d, %02d:%02d", time.day, time.hour, time.minute);
+            const float height = frame::text(titleFont(), 32.0f * scale, margin, y, Align::Left, tint(white),
+                                             world_.registry().get<Settlement>(place).name);
+            frame::text(captionFont(), 21.0f * scale, margin, y + height + 2.0f * scale, Align::Left,
+                        tint(muted), when);
+        }
+    }
+
+    // Над нижней полосой — субтитры: итог эпизода, «ранее в сериях».
+    struct Line {
+        ImFont* font;
+        float size;
+        ImVec4 color;
+        std::string text;
+    };
+    std::vector<Line> lines;
+    const float wrap = display.x * 0.6f;
+    if (!summaries_.empty() && clock_ - summaryAt_ < kSummaryTime) {
+        const float alpha = frame::fade(clock_ - summaryAt_, 0.5f, kSummaryTime, 1.2f);
+        lines.push_back({italicFont(), 18.0f * scale, tint(muted, alpha), "Итог эпизода"});
+        lines.push_back({titleFont(), 22.0f * scale, tint(gold, alpha), frame::clean(summaries_.back().text)});
+    }
+    if (recapHero_ == shown_ && shown_ != kInvalidId && clock_ - recapAt_ < kRecapTime) {
+        const float alpha = frame::fade(clock_ - recapAt_, 0.6f, kRecapTime, 1.5f);
+        const std::vector<ChronicleEvent>& events = world_.chronicle().events();
+        const auto add = [&](const char* title, const std::vector<std::uint32_t>& list) {
+            if (list.empty()) {
+                return;
+            }
+            lines.push_back({italicFont(), 18.0f * scale, tint(muted, alpha), title});
+            for (const std::uint32_t index : list) {
+                lines.push_back({captionFont(), 20.0f * scale, tint(white, alpha),
+                                 frame::clean(chronicleEventText(events[index], kInvalidId))});
+            }
+        };
+        add("Ранее в сериях", recapBefore_);
+        add("Пока нас не было", recapSince_);
+    }
+    float total = 0.0f;
+    for (const Line& line : lines) {
+        total += frame::measure(line.font, line.size, line.text, wrap) + 4.0f * scale;
+    }
+    y = display.y - bar - 20.0f * scale - total;
+    for (const Line& line : lines) {
+        y += frame::text(line.font, line.size, display.x * 0.5f, y, Align::Center, line.color, line.text, wrap) +
+             4.0f * scale;
     }
 }
 

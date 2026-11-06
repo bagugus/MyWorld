@@ -34,6 +34,13 @@ namespace {
 // Глифы подгружаются по мере надобности, диапазоны задавать не нужно.
 constexpr const char* kFontPath = "C:/Windows/Fonts/segoeui.ttf";
 constexpr float kFontSize = 18.0f;
+// Титры режима «Сериал».
+constexpr const char* kTitleFontPath = "C:/Windows/Fonts/georgia.ttf";
+constexpr const char* kItalicFontPath = "C:/Windows/Fonts/georgiai.ttf";
+constexpr const char* kCaptionFontPath = "C:/Windows/Fonts/segoeuil.ttf";
+ImFont* gTitleFont = nullptr;
+ImFont* gItalicFont = nullptr;
+ImFont* gCaptionFont = nullptr;
 
 constexpr int kSpeeds[] = {1, 10, 100};
 
@@ -264,6 +271,9 @@ void drawKeyHelp(const CameraController& camera) {
             keyRow("ПКМ + мышь", "осмотреться вокруг");
             keyRow("колесо", "ближе / дальше");
             break;
+        case ViewMode::Cinema:
+            keyRow("Esc", "выйти из сериала");
+            break;
         }
         ImGui::EndTable();
     }
@@ -272,6 +282,7 @@ void drawKeyHelp(const CameraController& camera) {
         keyRow("G", "свободный полёт / орбита");
         keyRow("T", "из-за плеча выбранного / орбита");
         keyRow("Home", "весь мир");
+        keyRow("F11", "сериал: кино в 3D во весь экран, Esc — выход");
         ImGui::EndTable();
     }
     if (table("Мир")) {
@@ -295,12 +306,28 @@ void init() {
     if (FileExists(kFontPath)) {
         io.FontDefault = io.Fonts->AddFontFromFileTTF(kFontPath, kFontSize);
     }
+    gTitleFont = FileExists(kTitleFontPath) ? io.Fonts->AddFontFromFileTTF(kTitleFontPath, kFontSize) : nullptr;
+    gItalicFont = FileExists(kItalicFontPath) ? io.Fonts->AddFontFromFileTTF(kItalicFontPath, kFontSize) : nullptr;
+    gCaptionFont =
+        FileExists(kCaptionFontPath) ? io.Fonts->AddFontFromFileTTF(kCaptionFontPath, kFontSize) : nullptr;
 
     rlImGuiEndInitImGui();
 }
 
 void shutdown() {
     rlImGuiShutdown();
+}
+
+ImFont* titleFont() {
+    return gTitleFont != nullptr ? gTitleFont : ImGui::GetIO().FontDefault;
+}
+
+ImFont* italicFont() {
+    return gItalicFont != nullptr ? gItalicFont : titleFont();
+}
+
+ImFont* captionFont() {
+    return gCaptionFont != nullptr ? gCaptionFont : ImGui::GetIO().FontDefault;
 }
 
 void beginFrame() {

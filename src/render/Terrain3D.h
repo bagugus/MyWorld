@@ -55,6 +55,8 @@ public:
     float standAt(float x, float y) const;
     // Точка поверхности, в которую упирается луч; нет — луч уходит в небо или за карту.
     std::optional<Vector2> raycast(const Ray& ray) const;
+    // Карта, по которой построен рельеф (раскладка деревьев для кинокамеры).
+    const Map& map() const { return map_; }
 
     const std::vector<Bridge>& bridges() const { return bridges_; }
 

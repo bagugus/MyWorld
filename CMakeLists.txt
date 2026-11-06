@@ -172,6 +172,8 @@ if(LW_BUILD_APP)
         src/ui/Camerawork.h
         src/ui/Captions.cpp
         src/ui/Captions.h
+        src/ui/CinemaCamera.cpp
+        src/ui/CinemaCamera.h
         src/ui/ChronicleView.cpp
         src/ui/ChronicleView.h
         src/ui/Director.cpp
@@ -182,6 +184,8 @@ if(LW_BUILD_APP)
         src/ui/Inspector.h
         src/ui/PathTool.cpp
         src/ui/PathTool.h
+        src/ui/SeriesFrame.cpp
+        src/ui/SeriesFrame.h
         src/ui/Ui.cpp
         src/ui/Ui.h
     )

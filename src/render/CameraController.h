@@ -5,14 +5,33 @@
 #include <raylib.h>
 
 #include <optional>
+#include <vector>
 
 namespace lw {
 
 class Terrain3D;
 
 // Как смотрим на мир: сверху (2D, этапы 1–10) или в 3D (этап 11): орбита вокруг
-// точки на земле, свободный полёт, из-за плеча выбранного существа (11.7).
-enum class ViewMode { TopDown, Orbit, Fly, Shoulder };
+// точки на земле, свободный полёт, из-за плеча выбранного существа (11.7);
+// кинокамера режима «Сериал» — ею управляет только режиссёр (12а.7).
+enum class ViewMode { TopDown, Orbit, Fly, Shoulder, Cinema };
+
+// Кадр кинокамеры (12а.7): куда смотреть, откуда и каким объективом. Точка
+// взгляда — якорь (обычно герой: камера держится за ним жёстко и не отстаёт и
+// на большой скорости времени) плюс смещение от него (плавно). Откуда — как у
+// орбиты: курс (0 — с юга, 90 — с востока), наклон над горизонтом, расстояние.
+struct CinemaShot {
+    EntityId anchorId = kInvalidId; // сменился без склейки — камера переходит плавно
+    Vector2 anchor{};               // метры мира
+    Vector2 offset{};               // точка взгляда = якорь + смещение
+    float height = 1.3f;            // точка взгляда над поверхностью, метры
+    float yaw = 0.0f;               // градусы
+    float pitch = 12.0f;            // градусы
+    float distance = 8.0f;          // метры
+    float fovY = 38.0f;             // угол зрения по вертикали, градусы (фокусное расстояние)
+    float smoothing = 0.8f;         // секунд: за столько камера проходит ~63 % пути к кадру
+    bool cut = false;               // склейка: сразу, без перехода
+};
 
 // Настройки камеры (панель «Статистика» → «Камера», хранятся в camera.ini).
 struct CameraSettings {
@@ -62,12 +81,24 @@ struct CameraSubject {
 //   WASD / стрелки     — панорама (в орбите — относительно взгляда)
 //   Home               — показать весь мир
 //   V                  — сверху / 3D
+// Кино (режим «Сериал»): ввода нет, кадр ставит режиссёр (setCinemaShot).
 class CameraController {
 public:
     CameraController(float worldWidth, float worldHeight);
 
     // Рельеф для 3D: камера смотрит на поверхность и не опускается под неё.
     void setTerrain(const Terrain3D* terrain);
+    // Коробки зданий (мир: x — восток, y — высота, z — юг): кинокамера не
+    // заходит в стены и не смотрит сквозь них. Список должен жить дольше камеры.
+    void setObstacles(const std::vector<BoundingBox>* boxes) { obstacles_ = boxes; }
+
+    // Кинокамера (12а.7): следующий кадр; действует в виде Cinema.
+    void setCinemaShot(const CinemaShot& shot);
+    // Выйти из кино в вид mode; zoom — зум (пикселей на метр), с которым
+    // продолжить, чтобы не оказаться вплотную к герою.
+    void leaveCinema(ViewMode mode, float zoom);
+    // Угол зрения по вертикали сейчас, градусы.
+    float fovY() const;
 
     // mouseFree / keyboardFree — false, когда ввод забрал интерфейс.
     void update(float dt, bool mouseFree, bool keyboardFree);
@@ -143,12 +174,32 @@ private:
     void updateOrbit(float dt, bool mouseFree, bool keyboardFree);
     void updateFly(float dt, bool mouseFree, bool keyboardFree);
     void updateShoulder(float dt, bool mouseFree);
+    void updateCinema(float dt);
     // Пересчитать camera3d_ и равносильную 2D-камеру из состояния вида.
     void refresh();
     void refreshTopDown();
     void refreshOrbit();
     void refreshFly();
     void refreshShoulder();
+    void refreshCinema();
+    // Кинокамера из нынешнего положения камеры (вход в кино без скачка).
+    void enterCinemaFromCamera();
+    // Насколько далеко от точки target по направлению dir можно поставить глаз:
+    // clear — до первого препятствия (рельеф, здание; деревья — так, чтобы перед
+    // объективом не было веток), minimum — ближе нельзя (точка внутри здания:
+    // глаз должен выйти наружу), hidden — сколько метров листвы между точкой и
+    // глазом (герой в лесу: его закрывают кроны).
+    struct Clearance {
+        float clear = 0.0f;
+        float minimum = 0.0f;
+        float hidden = 0.0f;
+    };
+    Clearance clearance(Vector3 target, Vector3 dir, float distance) const;
+    // Деревья: сократить result.clear так, чтобы перед объективом не было
+    // веток, и посчитать result.hidden.
+    void foliage(Vector3 target, Vector3 dir, Clearance& result) const;
+    // Направление от точки взгляда к глазу по курсу и наклону (градусы).
+    static Vector3 orbitDirection(float yawDegrees, float pitchDegrees);
     void setClipPlanes(double nearPlane) const;
     // Доля пути к цели за кадр по настройке плавности; scale — во сколько раз
     // медленнее обычного.
@@ -215,6 +266,16 @@ private:
     float shoulderDistance_ = 4.5f;
     Vector3 shoulderEye_{};
     Vector3 shoulderTarget_{};
+
+    // Кино: заданный кадр и нынешнее положение (догоняет кадр с его
+    // плавностью); подъём над препятствием (градусы наклона) и подъезд ближе
+    // (метры) сглажены отдельно: поднимаются быстро, отпускают медленно.
+    const std::vector<BoundingBox>* obstacles_ = nullptr;
+    CinemaShot cinemaGoal_;
+    CinemaShot cinema_;
+    float cinemaLift_ = 0.0f;
+    float cinemaReach_ = 0.0f; // насколько можно отъехать от точки, метры
+    bool cinemaSnap_ = true;   // следующий шаг — сразу на кадр
 };
 
 } // namespace lw

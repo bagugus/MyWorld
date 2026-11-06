@@ -493,6 +493,33 @@ EntityId drawChronicleEvent(const ChronicleEvent& event, EntityId self) {
     return clicked;
 }
 
+std::string chronicleEventText(const ChronicleEvent& event, EntityId self) {
+    const Phrase phrase = phraseOf(event);
+    std::string text;
+    const auto add = [&text](const std::string& part) {
+        if (part.empty()) {
+            return;
+        }
+        if (!text.empty()) {
+            text += ' ';
+        }
+        text += part;
+    };
+    if (event.subject != self) {
+        add(idLabel(event.subject));
+    }
+    add(phrase.verb);
+    if (phrase.withObject && event.object != self) {
+        add(idLabel(event.object));
+    }
+    add(phrase.middle);
+    if (phrase.withThird && event.third != kInvalidId) {
+        add(event.third == self ? std::string(phrase.thirdSelf) : idLabel(event.third));
+    }
+    add(phrase.tail);
+    return text;
+}
+
 void drawChroniclePanel(const World& world, Inspector& inspector) {
     // Внизу посередине: по бокам — время, инспектор и статистика.
     const ImVec2 display = ImGui::GetIO().DisplaySize;

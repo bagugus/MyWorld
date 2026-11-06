@@ -1,8 +1,11 @@
 #pragma once
 
+#include "sim/Id.h"
+
 #include <raylib.h>
 
 #include <cstdint>
+#include <optional>
 #include <vector>
 
 namespace lw {
@@ -17,8 +20,8 @@ namespace ui {
 // когда новый кадр далеко, и медленный наезд в кульминации. Колесо
 // пользователя не спорит с режиссёром: оно меняет общий множитель зума.
 //
-// В 3D оператор ничего не делает — камера только следит за выбранным через
-// инспектор, как раньше.
+// В 3D этот оператор ничего не делает: в режиме «Сериал» кадр по тому же
+// плану ставит кинокамера (CinemaCamera, 12а.7).
 
 // План кадра.
 enum class ShotSize : std::uint8_t {
@@ -32,8 +35,15 @@ enum class ShotSize : std::uint8_t {
 struct ShotPlan {
     bool valid = false;
     ShotSize size = ShotSize::Close;
+    EntityId subjectId = kInvalidId; // кто главное (якорь кинокамеры)
     Vector2 subject{};          // главное: всегда в кадре
     std::vector<Vector2> extra; // что ещё уместить, если влезает в план
+    // Откуда снимать, если это важно (курс камеры в градусах, как у орбиты):
+    // дом, где сидит герой, — со стороны двери. Только кинокамера (12а.7).
+    std::optional<float> viewFrom;
+    // На какой высоте над землёй точка взгляда, метры; 0 — как принято для плана
+    // (дом — середина стены, а не грудь человека внутри). Только кинокамера.
+    float lookHeight = 0.0f;
 };
 
 class Camerawork {

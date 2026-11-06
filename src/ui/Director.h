@@ -1,20 +1,22 @@
 #pragma once
 
+#include "render/CameraController.h"
 #include "sim/Cast.h"
 #include "sim/Foresight.h"
 #include "sim/Id.h"
 #include "sim/Story.h"
 #include "ui/Camerawork.h"
 #include "ui/Captions.h"
+#include "ui/CinemaCamera.h"
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace lw {
 
-class CameraController;
 class SimDriver;
 class World;
 
@@ -62,6 +64,14 @@ class Inspector;
 // уходит от человека (или он гибнет в кадре) — итог эпизода («Mary Cole
 // погибла, защищая дом»). Итоги копятся в окне — краткое содержание сериала.
 //
+// Режим «Сериал» (12а.7): кино — только в 3D. Кнопка в окне, F11 и
+// `living_world --director` включают режиссёра, кинокамеру (CameraController,
+// вид Cinema: кадр ставит только CinemaCamera по плану кадра) и окно без рамки
+// во весь экран; все окна интерфейса, курсор и метка выбранного прячутся, мышь
+// миром не управляет. Широкий кадр с полосами, титры и подписи — прямо на
+// кадре своим оформлением (SeriesFrame). Esc — выход: прежний вид, зум, окна
+// и режим окна (и прежнее состояние режиссёра).
+//
 // Мир режиссёр только читает (скорость времени — не состояние мира). Выбор
 // пользователя (щелчок по другому объекту) выключает режиссёра.
 class Director {
@@ -71,18 +81,30 @@ public:
     void setEnabled(bool enabled);
     bool enabled() const { return enabled_; }
 
+    // Режим «Сериал»: включится или выключится в ближайшем updateCamera.
+    void requestSeries(bool on) { seriesRequest_ = on; }
+    // Идёт ли сериал (или вот-вот начнётся): main прячет интерфейс и не отдаёт
+    // ввод миру и камере.
+    bool series() const { return seriesRequest_.value_or(series_); }
+    // Можно ли на время сериала разворачивать окно во весь экран (не при снимке).
+    void setFullscreenAllowed(bool allowed) { fullscreenAllowed_ = allowed; }
+    // F11 — сериал вкл/выкл, Esc — выйти из сериала.
+    void handleHotkeys(bool keyboardFree);
+
     // Раз за кадр после шага мира, до Inspector::updateCamera: дочитать
     // летопись, при надобности сменить линию и героя, поправить скорость
     // времени (темп). dt — реальные секунды.
     void update(Inspector& inspector, SimDriver& driver, float dt);
-    // Раз за кадр после Inspector::updateCamera: план кадра, пролёты, наезд
-    // (только вид сверху). alpha — доля тика для плавной отрисовки.
-    void updateCamera(CameraController& camera, float alpha, float dt);
+    // Раз за кадр после Inspector::updateCamera: включить или выключить
+    // сериал; план кадра — в виде сверху пролёты и наезд (Camerawork), в
+    // сериале — кадр кинокамеры (CinemaCamera). heading — куда обращён тот,
+    // кого показывают (как его рисует 3D), если известно; alpha — доля тика.
+    void updateCamera(CameraController& camera, std::optional<float> heading, float alpha, float dt);
     // Окно «Режиссёр»: включение, текущая линия, список линий, что вот-вот
     // случится, события выбранной линии.
     void drawPanel(Inspector& inspector);
     // Подпись в кадре сверху: какая линия, кто в ней, последнее событие и что
-    // вот-вот случится.
+    // вот-вот случится. В сериале — широкий кадр с титрами (drawSeriesFrame).
     void drawCaption(Inspector& inspector);
 
 private:
@@ -153,8 +175,15 @@ private:
     // Где сейчас объект (метры): существо, здание, орда и группа — по вожаку,
     // ивент и поселение; false — нет в мире.
     bool positionOf(EntityId id, float alpha, Vector2& at) const;
-    // План кадра для текущего кандидата (12а.5).
+    // План кадра для текущего кандидата (12а.5). В сериале человек в доме не
+    // виден — в кадре весь дом.
     ShotPlan planOf(float alpha) const;
+    // Сериал (12а.7): смотреть нечего — общий план самого большого поселения.
+    ShotPlan establishingPlan() const;
+    void enterSeries(CameraController& camera);
+    void leaveSeries(CameraController& camera);
+    // Широкий кадр, затемнение склеек и титры.
+    void drawSeriesFrame();
     // «John Miller идёт мстить Peter Green — 120 м, ~2 мин».
     std::string omenLine(const Foresight& omen) const;
     // Учёт эпизодов: кого показывают сейчас и когда показывали каждого.
@@ -243,6 +272,19 @@ private:
     float recapAt_ = -1.0e9f;
     std::vector<std::uint32_t> recapBefore_; // ранее в сериях
     std::vector<std::uint32_t> recapSince_;  // пока нас не было
+
+    // Режим «Сериал» (12а.7).
+    bool series_ = false;
+    std::optional<bool> seriesRequest_;
+    bool fullscreenAllowed_ = true;
+    bool fullscreen_ = false;        // окно развернул сериал — ему и вернуть
+    ViewMode savedMode_ = ViewMode::TopDown; // к чему вернуться по Esc
+    float savedZoom_ = 1.0f;
+    bool savedEnabled_ = false;
+    float seriesClock_ = 0.0f;       // реальные секунды с начала сериала
+    float bars_ = 0.0f;              // насколько выехали полосы, 0..1
+    CinemaCamera cinema_;
+    mutable EntityId establishing_ = kInvalidId; // поселение для общего плана
 };
 
 } // namespace ui

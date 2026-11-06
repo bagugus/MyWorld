@@ -1,5 +1,7 @@
 #pragma once
 
+struct ImFont;
+
 namespace lw {
 
 class CameraController;
@@ -17,6 +19,13 @@ class Inspector;
 // Вызывать после InitWindow / перед CloseWindow.
 void init();
 void shutdown();
+
+// Шрифты титров режима «Сериал» (этап 12а.7): заголовки (Georgia), надписи
+// монтажа (Georgia курсив) и текст (Segoe UI Light); если их нет в системе —
+// шрифт интерфейса. Размер — любой (ImDrawList::AddText с размером).
+ImFont* titleFont();
+ImFont* italicFont();
+ImFont* captionFont();
 
 // Между beginFrame и endFrame рисуются панели (внутри BeginDrawing/EndDrawing).
 void beginFrame();

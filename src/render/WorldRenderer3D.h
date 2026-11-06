@@ -14,6 +14,8 @@
 namespace lw {
 
 class CameraController;
+struct Building;
+struct BuildingModel;
 class Map;
 class MapRenderer;
 class World;
@@ -63,6 +65,11 @@ public:
     // Куда обращено существо на экране (atan2(dx, dy), сглаженный поворот модели);
     // нет — если оно не рисовалось в прошлом кадре. Для вида из-за плеча.
     std::optional<float> drawnHeading(EntityId id) const;
+    // Коробки зданий (от фундамента до конька) для кинокамеры: она не заходит в
+    // стены (CameraController::setObstacles). Считаются один раз (здания не
+    // меняются) — при отрисовке или раньше; адрес списка не меняется.
+    const std::vector<BoundingBox>& buildingBounds() const { return buildingBounds_; }
+    void updateBuildingBounds(const World& world);
 
 private:
     // Как движется существо на экране: куда смотрит и фаза шага. Только для
@@ -78,6 +85,8 @@ private:
         Color color{};
     };
 
+    // Модель здания без облика сезона и мелочи: участок, земля под ним, дверь.
+    BuildingModel buildingModel(const Building& building, EntityId id) const;
     // Снежный покров для облика: погода или сезон вручную.
     float snowCover(const World& world) const;
     // Облик меняется раз за кадр: второй проход берёт уже посчитанный.
@@ -100,6 +109,7 @@ private:
     std::optional<float> foliageYear_;
     float drawDistance_ = 1500.0f;
     EntityId highlight_ = kInvalidId;
+    std::vector<BoundingBox> buildingBounds_;
     int buildingsDrawn_ = 0;
     int creaturesDrawn_ = 0;
 };
