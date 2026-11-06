@@ -46,10 +46,12 @@ constexpr Color kBridgeAsphalt = {84, 84, 90, 255};
 constexpr Color kBridgeWood = {122, 96, 66, 255};
 constexpr Color kConcreteColor = {150, 150, 146, 255};
 constexpr Color kTimberColor = {92, 70, 50, 255};
-// Поворот к цели движения, радиан в секунду.
-constexpr float kTurnRate = 8.0f;
-// Сколько кадров помнить облик существа, которое не рисуется.
+// Раз в столько кадров аниматор забывает тех, кого давно нет в кадре.
 constexpr std::uint32_t kForgetFrames = 600;
+// Значки эмоций — не дальше этого, метры; высота — не меньше kEmotePixels на экране.
+constexpr float kEmoteRange = 150.0f;
+constexpr float kEmoteSize = 0.42f;
+constexpr float kEmotePixels = 14.0f;
 // Тени — в квадрате вокруг точки взгляда: полусторона растёт с расстоянием
 // камеры ступенями (чтобы при зуме тени не дрожали), дальше kShadowsOff — теней нет.
 constexpr float kShadowMinRadius = 40.0f;
@@ -64,6 +66,9 @@ constexpr Color kZombieSkin = {138, 156, 112, 255};
 constexpr Color kZombieTrousers = {52, 56, 48, 255};
 constexpr Color kDeadSkin = {176, 164, 150, 255};
 constexpr Color kSkinTones[] = {{232, 196, 164, 255}, {198, 150, 112, 255}, {140, 98, 70, 255}};
+constexpr Color kHairTones[] = {{40, 30, 24, 255},    {92, 62, 38, 255},  {150, 110, 62, 255},
+                                {204, 172, 112, 255}, {62, 62, 64, 255},  {168, 168, 168, 255}};
+constexpr Color kZombieHair = {64, 66, 58, 255};
 
 // Разброс облика по id: одинаков от кадра к кадру.
 std::uint64_t mixBits(std::uint64_t value) {
@@ -82,18 +87,6 @@ float angleOf(std::uint64_t bits) {
 // Видимость на расстоянии distance при дальности range: 1 — целиком, 0 — нет.
 float fadeAt(float distance, float range) {
     return std::clamp((range - distance) / (range * kFadeShare), 0.0f, 1.0f);
-}
-
-// Длина шага зверя, метры.
-float animalStride(AnimalKind kind) {
-    switch (kind) {
-    case AnimalKind::Deer:
-        return 2.2f;
-    case AnimalKind::Boar:
-        return 1.4f;
-    default:
-        return 0.9f;
-    }
 }
 
 // Полувысота лежащей на боку туши: на столько её поднять над землёй.
@@ -134,6 +127,97 @@ void drawSmoke(const World& world, const WorldEvent& event, const Terrain3D& ter
         const Vector3 center = {site.x + toX * along * scale, ground + (2.0f + 40.0f * t) * scale,
                                 site.y + toZ * along * scale};
         DrawSphereEx(center, (2.0f + 7.0f * t) * scale, 6, 8, c);
+    }
+}
+
+// Витрина поз: ряды по 8 в точке center, лицом на юг (к камере с юга).
+void emitPoseGallery(Vector3 center, const Terrain3D& terrain, float t, int only) {
+    using namespace pose;
+    const Gait gait{t * 4.0f, 1.0f};
+    struct Entry {
+        HumanPose pose;
+        Prop prop = Prop::None;
+        bool zombie = false;
+        WeaponKind weapon = WeaponKind::Fists;
+        bool aiming = false;
+        bool bag = false;
+        Emote emote = Emote::None;
+    };
+    const float hit = std::fmod(t, 1.5f);
+    const Entry entries[] = {
+        {stand(t, 1)}, {lookAround(t, 2, 0.0f)}, {stretch(std::fmod(t, 5.0f))}, {armsCrossed(t, 3)},
+        {handsOnHips(t, 4)}, {scratchHead(t)}, {walk(gait, 5)}, {run(gait)},
+        {sneak(gait), Prop::None, false, WeaponKind::Rifle, true}, {patrol(gait)}, {limp(gait)}, {backAway(gait)},
+        {pocketsWalk(gait)}, {sitGround(t, 6)}, {sitKnees(t, 7)}, {sitStump(t, 8), Prop::Stump},
+        {lieBack(t, 9)}, {leanWall(t, 10)}, {eat(t, false), Prop::Food}, {eat(t, true), Prop::Food},
+        {drinkBottle(t), Prop::Bottle}, {scoopWater(t)}, {sleepBack(t)}, {sleepCurled(t)},
+        {dig(t), Prop::Shovel}, {reap(t), Prop::Scythe}, {counter(t, 11), Prop::Counter}, {examine(t)},
+        {clipboard(t), Prop::Clipboard}, {lecture(t, 12)}, {patrolStand(t, 13)}, {rummage(t)},
+        {reachHigh(t)}, {pick(t, false), Prop::None, false, WeaponKind::Fists, false, true},
+        {pick(t, true), Prop::None, false, WeaponKind::Fists, false, true}, {butcher(t), Prop::None, false, WeaponKind::Knife},
+        {talk(t, 14, 0.5f)}, {nod(t)}, {laugh(std::fmod(t, 4.0f))}, {listen(t, 15)},
+        {argue(t, 16), Prop::None, false, WeaponKind::Fists, false, false, Emote::Anger}, {hug(t), Prop::None, false,
+        WeaponKind::Fists, false, false, Emote::Heart}, {offer(std::fmod(t, 3.0f)), Prop::Bundle},
+        {attack(guard(t, 0), hit, 0)}, {attack(guard(t, 1), hit, 1), Prop::None, false, WeaponKind::Knife},
+        {attack(guard(t, 2), hit, 2), Prop::None, false, WeaponKind::Axe},
+        {attack(aim(t, 3), hit, 3), Prop::None, false, WeaponKind::Pistol, true},
+        {attack(aim(t, 4), hit, 4), Prop::None, false, WeaponKind::Rifle, true},
+        {reload(t, 4), Prop::None, false, WeaponKind::Shotgun, true}, {bandage(t), Prop::Bandage},
+        {holdWound(t)}, {kneelGrief(t, true), Prop::None, false, WeaponKind::Fists, false, false, Emote::Tear},
+        {standGrief(t)}, {cower(t), Prop::None, false, WeaponKind::Fists, false, false, Emote::Alarm},
+        {tremble(stand(t, 17), t, 1.0f)}, {corpse(18)}, {twitch(corpse(19), t, 1.0f)},
+        {zombieWalk(gait, 0, false), Prop::None, true}, {zombieWalk(gait, 1, false), Prop::None, true},
+        {zombieWalk(gait, 2, false), Prop::None, true}, {zombieWalk(gait, 3, true), Prop::None, true},
+        {zombieStand(t, 1), Prop::None, true}, {zombieFeed(t), Prop::None, true}, {zombieBang(t), Prop::None, true},
+        {zombieAttack(zombieReach(t, 0), hit), Prop::None, true},
+        {zombieRise(std::fmod(t, kRiseSeconds + 1.0f) / kRiseSeconds, 20, 0), Prop::None, true},
+    };
+    constexpr int kColumns = 8;
+    constexpr float kSpacing = 2.4f;
+    const int count = static_cast<int>(std::size(entries));
+    const int rows = (count + kColumns - 1) / kColumns;
+    for (int i = 0; i < count; ++i) {
+        const Entry& entry = entries[i];
+        if (only >= 0 && i / kColumns != only) {
+            continue;
+        }
+        const float x = center.x + (static_cast<float>(i % kColumns) - 0.5f * (kColumns - 1)) * kSpacing;
+        const float row = only >= 0 ? 0.0f : static_cast<float>(i / kColumns) - 0.5f * static_cast<float>(rows);
+        const float z = center.z + row * kSpacing;
+        ModelFrame frame;
+        frame.origin = {x, terrain.standAt(x, z), z};
+        HumanLook look;
+        look.shirt = entry.zombie ? Color{110, 120, 96, 255} : Color{70, 110, 170, 255};
+        look.trousers = entry.zombie ? kZombieTrousers : kTrousersColor;
+        look.skin = entry.zombie ? kZombieSkin : kSkinTones[i % 3];
+        look.hair = entry.zombie ? kZombieHair : kHairTones[i % std::size(kHairTones)];
+        look.zombie = entry.zombie;
+        look.weapon = entry.weapon;
+        look.aiming = entry.aiming;
+        look.prop = entry.prop;
+        look.bag = entry.bag;
+        emitHuman(frame, look, entry.pose);
+        if (entry.emote != Emote::None) {
+            const float head = pelvisHeight(entry.pose) - kHipHeight + 2.1f;
+            emitEmote({x, frame.origin.y + head, z}, 0.0f, entry.emote, 0.42f);
+        }
+    }
+    // Звери: пасётся, прислушивается, чешется, заяц столбиком.
+    if (only >= 0 && only != rows) {
+        return;
+    }
+    const AnimalPose animals[] = {graze(t, 1), listenAnimal(t, 0.7f), scratchAnimal(t), sitUpHare(t)};
+    const float z = center.z + (only >= 0 ? 0.0f : 0.5f * static_cast<float>(rows) * kSpacing + 2.0f);
+    int column = 0;
+    for (const AnimalKind kind : {AnimalKind::Deer, AnimalKind::Boar, AnimalKind::Hare}) {
+        for (const AnimalPose& pose : animals) {
+            const float x = center.x + (static_cast<float>(column) - 5.5f) * 2.6f;
+            ModelFrame frame;
+            frame.origin = {x, terrain.standAt(x, z), z};
+            frame.yaw = PI * 0.5f;
+            emitAnimal(frame, kind, {150, 110, 70, 255}, {}, pose, kind == AnimalKind::Deer);
+            ++column;
+        }
     }
 }
 
@@ -262,43 +346,13 @@ void WorldRenderer3D::updateBuildingBounds(const World& world) {
     }
 }
 
-std::optional<float> WorldRenderer3D::drawnHeading(EntityId id) const {
-    const auto it = motion_.find(id);
-    if (it == motion_.end() || frame_ - it->second.seen > 1) {
-        return std::nullopt;
-    }
-    return it->second.heading;
-}
-
-WorldRenderer3D::Motion& WorldRenderer3D::motionOf(EntityId id, float dx, float dy, float stride, float dt) {
-    const auto [it, inserted] = motion_.try_emplace(id);
-    Motion& motion = it->second;
-    const float speed = std::sqrt(dx * dx + dy * dy);
-    if (inserted) {
-        const std::uint64_t bits = mixBits(id);
-        motion.heading = speed > 0.05f ? headingOf(dx, dy) : angleOf(bits);
-        motion.phase = angleOf(bits >> 20);
-    }
-    // Облик меняется раз за кадр, сколько бы проходов (тень, кадр) его ни рисовали.
-    if (motion.seen == frame_) {
-        return motion;
-    }
-    if (speed > 0.05f) {
-        const float turn = std::remainder(headingOf(dx, dy) - motion.heading, 2.0f * PI);
-        motion.heading += std::clamp(turn, -kTurnRate * dt, kTurnRate * dt);
-        // Фаза растёт с пройденным путём: ноги не скользят. Период — 4π (зомби качается вдвое реже).
-        motion.phase = std::fmod(motion.phase + 2.0f * PI * speed * dt / stride, 4.0f * PI);
-    }
-    motion.seen = frame_;
-    return motion;
-}
-
 void WorldRenderer3D::draw(const World& world, const CameraController& camera, float alpha) {
     const Camera3D& view = camera.camera3d();
     const Vector3 eye = view.position;
     ++frame_;
     updateBuildingBounds(world);
     dt_ = std::min(GetFrameTime(), 0.1f);
+    animator_.beginFrame(world, dt_, alpha);
     const float snow = snowCover(world);
     const Environment environment = environmentAt(world);
 
@@ -410,7 +464,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
 
     // Забыть облик тех, кого давно нет в кадре.
     if (frame_ % kForgetFrames == 0) {
-        std::erase_if(motion_, [this](const auto& entry) { return frame_ - entry.second.seen > kForgetFrames; });
+        animator_.forgetStale();
     }
 
     terrain_.drawWater(time, trees.wind, shading_);
@@ -437,7 +491,6 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         }
         return Vector3DotProduct(Vector3Subtract(point, eye), forward) < -size;
     };
-    const float dt = dt_;
     const float snow = snowCover(world);
 
     const entt::registry& registry = world.registry();
@@ -541,7 +594,10 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
                 ModelFrame frame;
                 frame.origin = {at.x + offset.x * spread, height, at.y + offset.y * spread};
                 frame.yaw = flock->flying ? course : angleOf(mixBits(bits + static_cast<std::uint64_t>(i)));
-                emitBird(frame, flock->flying, flap);
+                // Сидящие клюют — каждая в свой черёд.
+                const float peck =
+                    std::pow(std::max(0.0f, std::sin(wingTime * 0.35f + 1.7f * static_cast<float>(i))), 4.0f);
+                emitBird(frame, flock->flying, flap, peck);
             }
             continue;
         }
@@ -554,83 +610,81 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             emitCrate(frame, empty ? kEmptyCacheColor : kCacheColor);
             continue;
         }
-        if (const auto* corpse = registry.try_get<Corpse>(entity)) {
-            ModelFrame frame;
-            frame.origin = {at.x, stand, at.y};
-            frame.yaw = angleOf(bits);
-            if (corpse->kind == CorpseKind::Animal) {
-                frame.roll = PI * 0.5f; // на боку
-                frame.origin.y += carcassLift(corpse->animal) * frame.scale;
-                emitAnimal(frame, corpse->animal, corpseColor(corpse->kind), {}, false, false);
-            } else {
-                frame.pitch = -PI * 0.5f; // ничком
-                frame.origin.y += 0.12f * frame.scale;
-                HumanLook look;
-                look.shirt = corpseColor(corpse->kind);
-                look.trousers = corpse->kind == CorpseKind::Zombie ? kZombieTrousers : kTrousersColor;
-                look.skin = corpse->kind == CorpseKind::Zombie ? kZombieSkin : kDeadSkin;
-                emitHuman(frame, look, {});
-            }
-            continue;
-        }
-
         const auto* person = registry.try_get<Person>(entity);
         if (person != nullptr && person->indoors) {
             continue; // в доме: снаружи не видно
         }
-        const auto* animal = registry.try_get<Animal>(entity);
-        const float stride = animal != nullptr ? animalStride(animal->kind) : 1.6f;
-        Motion& motion = motionOf(id, velocity.x, velocity.y, stride, dt);
-        // Стоящий в бою поворачивается к цели.
-        const auto* combat = registry.try_get<Combat>(entity);
-        if (combat != nullptr && combat->target != kInvalidId && velocity.x == 0.0f && velocity.y == 0.0f) {
-            const entt::entity target = world.find(combat->target);
-            if (target != entt::null) {
-                if (const auto* aim = registry.try_get<Position>(target)) {
-                    motion.heading = headingOf(aim->x - at.x, aim->y - at.y);
-                }
-            }
-        }
-        const float speed = std::sqrt(velocity.x * velocity.x + velocity.y * velocity.y);
-        const Gait gait = {motion.phase, std::clamp(speed / (0.9f * stride), 0.0f, 1.3f)};
+        // Поза и движение — по занятию (render/Animator); тела падают, зомби встают.
+        const Figure& figure = animator_.animate(world, entity, id, at.x, at.y, velocity.x, velocity.y);
+        const Vector2 drawn = {at.x + figure.offsetX, at.y + figure.offsetY};
         ModelFrame frame;
-        frame.origin = {at.x, stand, at.y};
-        frame.yaw = motion.heading;
+        frame.origin = {drawn.x, terrain_.standAt(drawn.x, drawn.y), drawn.y};
+        frame.yaw = figure.heading;
         creaturesDrawn_ += shadowPass ? 0 : 1;
 
-        if (animal != nullptr) {
-            const bool grazing = animal->state == AnimalState::Graze && speed < 0.05f;
-            emitAnimal(frame, animal->kind, creatureColor(registry, entity), gait, grazing, (bits & 1u) != 0u);
+        if (figure.body == Figure::Body::AnimalCorpse || figure.body == Figure::Body::Animal) {
+            if (const auto* corpse = registry.try_get<Corpse>(entity)) {
+                frame.roll = PI * 0.5f * figure.fall; // валится на бок
+                frame.origin.y += carcassLift(corpse->animal) * figure.fall * frame.scale;
+                emitAnimal(frame, corpse->animal, corpseColor(corpse->kind), {}, figure.animal, false);
+            } else {
+                const auto& animal = registry.get<Animal>(entity);
+                emitAnimal(frame, animal.kind, creatureColor(registry, entity), figure.gait, figure.animal,
+                           (bits & 1u) != 0u);
+            }
             continue;
         }
+
         HumanLook look;
         look.simple = 1.75f * camera.zoomAt(at) < kSimplePixels;
-        look.shirt = creatureColor(registry, entity);
-        if (registry.all_of<Zombie>(entity)) {
-            look.zombie = true;
-            look.trousers = kZombieTrousers;
-            look.skin = kZombieSkin;
-        } else {
-            look.trousers = kTrousersColor;
-            look.skin = kSkinTones[(bits >> 8) % std::size(kSkinTones)];
-            const auto* mind = registry.try_get<Mind>(entity);
-            const auto* walker = registry.try_get<Walker>(entity);
-            look.running = (mind != nullptr && mind->action == Action::Flee) ||
-                           (walker != nullptr && walker->pace > 1.3f);
-            if (const auto* weapon = registry.try_get<Weapon>(entity)) {
-                look.weapon = weapon->kind;
-                look.aiming = combat != nullptr && combat->target != kInvalidId && isFirearm(weapon->kind);
+        look.hair = kHairTones[(bits >> 16) % std::size(kHairTones)];
+        look.skin = kSkinTones[(bits >> 8) % std::size(kSkinTones)];
+        look.trousers = kTrousersColor;
+        look.prop = figure.prop;
+        look.bag = figure.bag;
+        look.aiming = figure.aiming;
+        if (const auto* corpse = registry.try_get<Corpse>(entity)) {
+            look.shirt = corpseColor(corpse->kind);
+            if (corpse->kind == CorpseKind::Zombie) {
+                look.trousers = kZombieTrousers;
+                look.skin = kZombieSkin;
+                look.hair = kZombieHair;
+            } else {
+                look.skin = kDeadSkin;
             }
-            if (person != nullptr && person->asleep) {
-                frame.pitch = PI * 0.5f; // спит под открытым небом — на спине
-                frame.origin.y += 0.12f * frame.scale;
+        } else {
+            look.shirt = creatureColor(registry, entity);
+            if (registry.all_of<Zombie>(entity)) {
+                look.zombie = true;
+                look.trousers = kZombieTrousers;
+                look.skin = kZombieSkin;
+                look.hair = kZombieHair;
             }
         }
-        emitHuman(frame, look, gait);
+        if (const auto* weapon = registry.try_get<Weapon>(entity)) {
+            look.weapon = weapon->kind;
+        }
+        emitHuman(frame, look, figure.human);
+
+        // Значок эмоции над головой — в важный момент: всплывает, качается и тает.
+        if (!shadowPass && figure.emote != Emote::None && distance < kEmoteRange) {
+            const float age = figure.emoteAge;
+            const float pop = pose::smooth(age / 0.2f);
+            const float size = std::max(kEmoteSize, kEmotePixels / camera.zoomAt(at)) * pop;
+            const float head = pelvisHeight(figure.human) - kHipHeight + 1.95f;
+            const float bob = 0.05f * std::sin(age * 4.0f);
+            setModelFade(fade * std::clamp((Animator::kEmoteSeconds - age) / 0.6f, 0.0f, 1.0f));
+            emitEmote({drawn.x, frame.origin.y + head + 0.15f + bob, drawn.y},
+                      headingOf(eye.x - drawn.x, eye.z - drawn.y), figure.emote, size);
+            setModelFade(fade);
+        }
     }
     setModelFade(1.0f);
     if (beacon) {
         emitBeacon({beacon->x, beacon->y, beacon->z}, beacon->w, kBeaconColor);
+    }
+    if (poseGallery_) {
+        emitPoseGallery(view.target, terrain_, static_cast<float>(GetTime()), *poseGallery_);
     }
 }
 

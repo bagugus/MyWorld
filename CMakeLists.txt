@@ -144,6 +144,8 @@ target_link_libraries(lw_headless PRIVATE lw_sim lw_options)
 if(LW_BUILD_APP)
     add_executable(living_world
         src/main.cpp
+        src/render/Animator.cpp
+        src/render/Animator.h
         src/render/CameraController.cpp
         src/render/CameraController.h
         src/render/FieldLayout.cpp
@@ -160,6 +162,8 @@ if(LW_BUILD_APP)
         src/render/Models3D.h
         src/render/Palette.cpp
         src/render/Palette.h
+        src/render/Poses.cpp
+        src/render/Poses.h
         src/render/Props3D.cpp
         src/render/Props3D.h
         src/render/Terrain3D.cpp
@@ -218,4 +222,12 @@ if(LW_BUILD_TESTS)
     )
     target_link_libraries(lw_land_use_tests PRIVATE lw_sim lw_options)
     add_test(NAME land_use COMMAND lw_land_use_tests)
+    # Позы и выбор движений (этап 12а.11) — без графики, только мир.
+    add_executable(lw_animation_tests
+        tests/animation_test.cpp
+        src/render/Animator.cpp
+        src/render/Poses.cpp
+    )
+    target_link_libraries(lw_animation_tests PRIVATE lw_sim lw_options)
+    add_test(NAME animation COMMAND lw_animation_tests)
 endif()

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render/Poses.h"
 #include "sim/Components.h"
 
 #include <raylib.h>
@@ -30,31 +31,32 @@ struct ModelFrame {
 // Направление взгляда по смещению в плоскости мира (x — восток, y — юг).
 float headingOf(float dx, float dy);
 
-// Походка: фаза шага (радианы) и размах (0 — стоит, 1 — обычный шаг).
-struct Gait {
-    float phase = 0.0f;
-    float swing = 0.0f;
-};
-
-// Человек или зомби ростом около 1,75 м.
+// Человек или зомби ростом около 1,75 м в позе pose (render/Poses, этап 12а.11):
+// колени, локти, поворот головы и корпуса, сидит, лежит, на коленях.
 struct HumanLook {
     Color shirt{};      // по занятию или состоянию — как цвет кружка сверху
     Color trousers{};
     Color skin{};
-    bool zombie = false;  // руки вперёд, сутулится, бредёт
-    bool running = false; // наклон вперёд
-    bool aiming = false;  // держит оружие перед собой
+    Color hair{};
+    bool zombie = false;
+    bool aiming = false;  // оружие в руках, а не за спиной или на поясе
     WeaponKind weapon = WeaponKind::Fists;
     bool simple = false;  // издали: ноги одним блоком, без рук и оружия
+    Prop prop = Prop::None; // что в руке или рядом: инструмент, бутылка, прилавок
+    bool bag = false;       // сумка на боку
 };
-void emitHuman(const ModelFrame& frame, const HumanLook& look, Gait gait);
+void emitHuman(const ModelFrame& frame, const HumanLook& look, const HumanPose& pose);
 
-// Зверь своего вида; grazing — голова к земле, antlers — рога (олень).
-void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait, bool grazing,
+// Зверь своего вида: ноги — по шагу, голова и уши — по позе; antlers — рога (олень).
+void emitAnimal(const ModelFrame& frame, AnimalKind kind, Color color, Gait gait, const AnimalPose& pose,
                 bool antlers);
 
-// Ворона: flap — фаза взмаха крыльев, сидящая — со сложенными крыльями.
-void emitBird(const ModelFrame& frame, bool flying, float flap);
+// Ворона: flap — фаза взмаха крыльев, сидящая — со сложенными крыльями;
+// peck — сидящая клюёт (0 — голова поднята, 1 — у земли).
+void emitBird(const ModelFrame& frame, bool flying, float flap, float peck = 0.0f);
+
+// Значок эмоции над головой: base — низ значка, yaw — к зрителю, size — высота, м.
+void emitEmote(Vector3 base, float yaw, Emote emote, float size);
 
 // Ящик груза ивента со стороной около 1,2 м.
 void emitCrate(const ModelFrame& frame, Color color);

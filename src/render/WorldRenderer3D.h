@@ -1,5 +1,6 @@
 #pragma once
 
+#include "render/Animator.h"
 #include "render/LandUse.h"
 #include "render/Lighting3D.h"
 #include "render/Props3D.h"
@@ -26,7 +27,8 @@ class World;
 // грузы и вороны — низкополигональными моделями (render/Models3D), мосты — с
 // перилами и опорами; всё стоит на поверхности. Свет — по времени суток и
 // погоде (render/Lighting, 11.4): солнце или луна с тенями, небо, дымка, ночью —
-// свет в окнах. Леса — отдельными деревьями (Trees3D, 11.6). Вне леса (11.9) —
+// свет в окнах. Существа двигаются по занятию (Animator, этап 12а.11): сидят,
+// едят, копают, дерутся, падают, над головой — значки эмоций. Леса — отдельными деревьями (Trees3D, 11.6). Вне леса (11.9) —
 // посевы, трава, заборы, столбы и прочая мелочь (Props3D) по раскладке
 // LandUse; дворы и столбы она узнаёт по зданиям (updateBuildingBounds). Только читает
 // состояние симуляции. Создавать после InitWindow,
@@ -49,6 +51,10 @@ public:
     const Props3D& props() const { return props_; }
     bool propsEnabled() const { return propsEnabled_; }
     void setPropsEnabled(bool enabled) { propsEnabled_ = enabled; }
+    // Витрина поз (отладка, этап 12а.11): все движения людей, зомби и зверей
+    // рядами в точке взгляда камеры — посмотреть их, не дожидаясь в мире.
+    // row < 0 — все ряды, иначе только этот ряд (крупно); nullopt — выключена.
+    void setPoseGallery(std::optional<int> row) { poseGallery_ = row; }
     // Сколько сеток деревьев и мелочи ещё не построено (снимок ждёт их).
     int pending() const { return trees_.pending() + props_.pending(); }
     // Облик сезона на заданную долю года (0 — 1 марта) вместо календаря: листва
@@ -75,7 +81,7 @@ public:
     void setHighlight(EntityId id) { highlight_ = id; }
     // Куда обращено существо на экране (atan2(dx, dy), сглаженный поворот модели);
     // нет — если оно не рисовалось в прошлом кадре. Для вида из-за плеча.
-    std::optional<float> drawnHeading(EntityId id) const;
+    std::optional<float> drawnHeading(EntityId id) const { return animator_.heading(id); }
     // Коробки зданий (от фундамента до конька) для кинокамеры: она не заходит в
     // стены (CameraController::setObstacles). Считаются один раз (здания не
     // меняются) — при отрисовке или раньше; адрес списка не меняется. Тогда же
@@ -84,13 +90,6 @@ public:
     void updateBuildingBounds(const World& world);
 
 private:
-    // Как движется существо на экране: куда смотрит и фаза шага. Только для
-    // облика — в симуляцию не входит.
-    struct Motion {
-        float heading = 0.0f;
-        float phase = 0.0f;
-        std::uint32_t seen = 0; // кадр, когда существо рисовалось
-    };
     struct Part {
         Vector3 min{};
         Vector3 max{};
@@ -101,8 +100,6 @@ private:
     BuildingModel buildingModel(const Building& building, EntityId id) const;
     // Снежный покров для облика: погода или сезон вручную.
     float snowCover(const World& world) const;
-    // Облик меняется раз за кадр: второй проход берёт уже посчитанный.
-    Motion& motionOf(EntityId id, float dx, float dy, float stride, float dt);
     // Здания, мосты, существа, тела, грузы и вороны — в открытый rlBegin(RL_QUADS).
     // shadowPass — в карту теней: только то, что в её квадрате, без мелочи.
     void emitScene(const World& world, const CameraController& camera, float alpha, bool shadowPass);
@@ -113,7 +110,9 @@ private:
     Props3D props_;
     SceneShading shading_;
     std::vector<Part> bridgeParts_; // перила и опоры мостов: не меняются
-    std::unordered_map<EntityId, Motion> motion_;
+    // Позы и движения существ (этап 12а.11): раз за кадр, второй проход
+    // (тень и кадр) берёт уже посчитанное.
+    Animator animator_;
     std::uint32_t frame_ = 0;
     float dt_ = 0.0f;
     std::unordered_set<EntityId> litBuildings_; // где ночью горит свет
@@ -121,6 +120,7 @@ private:
     bool shadowsEnabled_ = true;
     bool treesEnabled_ = true;
     bool propsEnabled_ = true;
+    std::optional<int> poseGallery_;
     std::optional<float> foliageYear_;
     float drawDistance_ = 1500.0f;
     EntityId highlight_ = kInvalidId;
