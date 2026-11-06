@@ -1,5 +1,7 @@
 #include "render/TreeLayout.h"
 
+#include "render/LandUse.h"
+
 #include <algorithm>
 #include <cmath>
 #include <numbers>
@@ -231,6 +233,104 @@ int treesInCell(const Map& map, Cell cell, TreeSpec* out) {
         finishTree(tree, random);
     }
     return count;
+}
+
+int openTreesInCell(const LandUse& land, Cell cell, TreeSpec* out) {
+    const Map& map = land.map();
+    if (!map.contains(cell) || map.cover.at(cell.x, cell.y) != Cover::None ||
+        map.road.at(cell.x, cell.y) != Road::None || map.water.at(cell.x, cell.y) != Water::None ||
+        map.ground.at(cell.x, cell.y) == Ground::Field) {
+        return 0;
+    }
+    const std::uint8_t flags = land.flags(cell);
+    if ((flags & (LandUse::kBuilding | LandUse::kGarden | LandUse::kDoor)) != 0) {
+        return 0;
+    }
+    // Вероятности дерева и куста по месту.
+    float treeChance = 0.004f;
+    float bushChance = 0.015f;
+    float scale = 0.8f + 0.2f * valueNoise(cell, kAgeCells, 2u);
+    bool fruit = false;
+    bool forestEdge = false;
+    for (int d = 0; d < 4 && !forestEdge; ++d) {
+        constexpr int kDx[] = {1, -1, 0, 0};
+        constexpr int kDy[] = {0, 0, 1, -1};
+        forestEdge = isForest(map, {cell.x + kDx[d], cell.y + kDy[d]});
+    }
+    if ((flags & LandUse::kYard) != 0) {
+        treeChance = 0.18f; // яблони и груши
+        bushChance = 0.1f;  // сирень, смородина
+        fruit = true;
+    } else if ((flags & LandUse::kSettled) != 0) {
+        treeChance = 0.03f;
+        bushChance = 0.04f;
+    } else if (forestEdge) {
+        treeChance = 0.12f;
+        bushChance = 0.25f;
+        scale *= 0.6f;
+    } else if ((flags & LandUse::kShore) != 0) {
+        treeChance = 0.08f; // ивы, ольха
+        bushChance = 0.15f;
+    } else if ((flags & LandUse::kRoadside) != 0) {
+        treeChance = 0.015f;
+        bushChance = 0.1f;
+    } else if (valueNoise(cell, 10, 7u) > 0.78f) {
+        treeChance = 0.55f; // рощица посреди луга
+        bushChance = 0.3f;
+    } else if (map.ground.at(cell.x, cell.y) == Ground::Rock) {
+        treeChance = 0.01f;
+        bushChance = 0.02f;
+    }
+    CellRandom random(cell, 9u);
+    const bool tree = random.next() < treeChance;
+    const bool bush = random.next() < bushChance;
+    if (!tree && !bush) {
+        return 0;
+    }
+    const float x0 = static_cast<float>(cell.x) * Map::kCellSize;
+    const float z0 = static_cast<float>(cell.y) * Map::kCellSize;
+    // Не у самого края клетки: там бывают заборы.
+    const auto place = [&](TreeSpec& spec) {
+        spec.x = x0 + 0.7f + random.next() * (Map::kCellSize - 1.4f);
+        spec.z = z0 + 0.7f + random.next() * (Map::kCellSize - 1.4f);
+    };
+    int count = 0;
+    if (tree) {
+        TreeSpec& spec = out[count++];
+        if (fruit) {
+            spec.kind = TreeKind::Broadleaf;
+            place(spec);
+            sizeTree(spec, 0.45f + 0.15f * random.next(), random);
+            spec.crown *= 1.3f; // плодовое — низкое и раскидистое
+        } else {
+            Site site = siteOf(map, cell);
+            site.edge = true; // на просторе — как на опушке: больше лиственных и берёз
+            if ((flags & LandUse::kShore) != 0) {
+                site.conifer *= 0.3f;
+            }
+            spec.kind = pickKind(site, random);
+            place(spec);
+            sizeTree(spec, scale, random);
+            // Одинокое дерево растёт вширь.
+            spec.crown *= isConifer(spec.kind) ? 1.1f : 1.25f;
+        }
+        finishTree(spec, random);
+    }
+    if (bush) {
+        TreeSpec& spec = out[count++];
+        spec.kind = TreeKind::Bush;
+        place(spec);
+        sizeTree(spec, 1.0f, random);
+        finishTree(spec, random);
+    }
+    return count;
+}
+
+int cellTrees(const Map& map, const LandUse* land, Cell cell, TreeSpec* out) {
+    if (isForest(map, cell)) {
+        return treesInCell(map, cell, out);
+    }
+    return land != nullptr ? openTreesInCell(*land, cell, out) : 0;
 }
 
 float deciduousShareOf(const Map& map, Cell cell) {

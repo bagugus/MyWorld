@@ -146,6 +146,10 @@ if(LW_BUILD_APP)
         src/main.cpp
         src/render/CameraController.cpp
         src/render/CameraController.h
+        src/render/FieldLayout.cpp
+        src/render/FieldLayout.h
+        src/render/LandUse.cpp
+        src/render/LandUse.h
         src/render/Lighting.cpp
         src/render/Lighting.h
         src/render/Lighting3D.cpp
@@ -156,6 +160,8 @@ if(LW_BUILD_APP)
         src/render/Models3D.h
         src/render/Palette.cpp
         src/render/Palette.h
+        src/render/Props3D.cpp
+        src/render/Props3D.h
         src/render/Terrain3D.cpp
         src/render/Terrain3D.h
         src/render/TreeLayout.cpp
@@ -203,4 +209,13 @@ if(LW_BUILD_TESTS)
     add_executable(lw_tests tests/determinism_test.cpp)
     target_link_libraries(lw_tests PRIVATE lw_sim lw_options)
     add_test(NAME sim_core COMMAND lw_tests)
+    # Раскладка облика вне леса (этап 11.9) — без графики, только карта и здания.
+    add_executable(lw_land_use_tests
+        tests/land_use_test.cpp
+        src/render/FieldLayout.cpp
+        src/render/LandUse.cpp
+        src/render/TreeLayout.cpp
+    )
+    target_link_libraries(lw_land_use_tests PRIVATE lw_sim lw_options)
+    add_test(NAME land_use COMMAND lw_land_use_tests)
 endif()

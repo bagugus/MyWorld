@@ -1,6 +1,8 @@
 #pragma once
 
+#include "render/LandUse.h"
 #include "render/Lighting3D.h"
+#include "render/Props3D.h"
 #include "render/Terrain3D.h"
 #include "render/Trees3D.h"
 #include "sim/Id.h"
@@ -24,7 +26,9 @@ class World;
 // грузы и вороны — низкополигональными моделями (render/Models3D), мосты — с
 // перилами и опорами; всё стоит на поверхности. Свет — по времени суток и
 // погоде (render/Lighting, 11.4): солнце или луна с тенями, небо, дымка, ночью —
-// свет в окнах. Леса — отдельными деревьями (Trees3D, 11.6). Только читает
+// свет в окнах. Леса — отдельными деревьями (Trees3D, 11.6). Вне леса (11.9) —
+// посевы, трава, заборы, столбы и прочая мелочь (Props3D) по раскладке
+// LandUse; дворы и столбы она узнаёт по зданиям (updateBuildingBounds). Только читает
 // состояние симуляции. Создавать после InitWindow,
 // уничтожать до CloseWindow.
 class WorldRenderer3D {
@@ -42,6 +46,11 @@ public:
     const Trees3D& trees() const { return trees_; }
     bool treesEnabled() const { return treesEnabled_; }
     void setTreesEnabled(bool enabled) { treesEnabled_ = enabled; }
+    const Props3D& props() const { return props_; }
+    bool propsEnabled() const { return propsEnabled_; }
+    void setPropsEnabled(bool enabled) { propsEnabled_ = enabled; }
+    // Сколько сеток деревьев и мелочи ещё не построено (снимок ждёт их).
+    int pending() const { return trees_.pending() + props_.pending(); }
     // Облик сезона на заданную долю года (0 — 1 марта) вместо календаря: листва
     // и снежный покров — посмотреть лес в любой сезон без промотки. Только
     // облик, симуляция не меняется; nullopt — по календарю и погоде.
@@ -58,6 +67,8 @@ public:
     static constexpr float kMinDrawDistance = 200.0f;
     static constexpr float kMaxDrawDistance = 8000.0f;
     static constexpr float kMaxTreeRange = 2500.0f;
+    // Заборы, столбы, стога и прочая крупная мелочь — не дальше этого.
+    static constexpr float kMaxPropsRange = 900.0f;
     // Подробные модели деревьев — ближе этого, дальше — упрощённые.
     static constexpr float kNearTreeRange = 350.0f;
     // Выбранный в инспекторе: виден на любой дальности, над ним — метка.
@@ -67,7 +78,8 @@ public:
     std::optional<float> drawnHeading(EntityId id) const;
     // Коробки зданий (от фундамента до конька) для кинокамеры: она не заходит в
     // стены (CameraController::setObstacles). Считаются один раз (здания не
-    // меняются) — при отрисовке или раньше; адрес списка не меняется.
+    // меняются) — при отрисовке или раньше; адрес списка не меняется. Тогда же
+    // LandUse раскладывает дворы, заборы, столбы и мостки.
     const std::vector<BoundingBox>& buildingBounds() const { return buildingBounds_; }
     void updateBuildingBounds(const World& world);
 
@@ -95,8 +107,10 @@ private:
     // shadowPass — в карту теней: только то, что в её квадрате, без мелочи.
     void emitScene(const World& world, const CameraController& camera, float alpha, bool shadowPass);
 
+    LandUse land_;
     Terrain3D terrain_;
     Trees3D trees_;
+    Props3D props_;
     SceneShading shading_;
     std::vector<Part> bridgeParts_; // перила и опоры мостов: не меняются
     std::unordered_map<EntityId, Motion> motion_;
@@ -106,6 +120,7 @@ private:
     float lights_ = 0.0f;                      // доля светящихся окон в них
     bool shadowsEnabled_ = true;
     bool treesEnabled_ = true;
+    bool propsEnabled_ = true;
     std::optional<float> foliageYear_;
     float drawDistance_ = 1500.0f;
     EntityId highlight_ = kInvalidId;
