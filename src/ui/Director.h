@@ -8,6 +8,7 @@
 #include "ui/Camerawork.h"
 #include "ui/Captions.h"
 #include "ui/CinemaCamera.h"
+#include "ui/Showrunner.h"
 
 #include <cstdint>
 #include <optional>
@@ -72,6 +73,11 @@ class Inspector;
 // кадре своим оформлением (SeriesFrame). Esc — выход: прежний вид, зум, окна
 // и режим окна (и прежнее состояние режиссёра).
 //
+// Сцены и монтаж (12а.8): в сериале кадр выбирает шоураннер (Showrunner) —
+// эпизоды из сцен, переходы через затемнение и титр места, скачки времени,
+// правило «только знакомые», перебивки с драматической иронией, клиффхэнгер.
+// Режиссёр исполняет его команды: сменить кадр, промотать, остановить мир.
+//
 // Мир режиссёр только читает (скорость времени — не состояние мира). Выбор
 // пользователя (щелчок по другому объекту) выключает режиссёра.
 class Director {
@@ -108,20 +114,8 @@ public:
     void drawCaption(Inspector& inspector);
 
 private:
-    // Кандидат на кадр: линия (с предвестием или без) или предвестие без линии.
-    struct Pick {
-        std::uint32_t story = 0; // Story::id; 0 — линии нет
-        bool hasOmen = false;
-        Foresight omen;          // предвестие, если hasOmen
-        // Навестить главного героя без линии и предвестия (12а.3).
-        EntityId visit = kInvalidId;
-        EntityId target = kInvalidId;
-        float interest = 0.0f;
-
-        bool valid() const { return story != 0 || hasOmen || visit != kInvalidId; }
-        // Тот же кандидат: та же линия, а без линии — то же предвестие.
-        bool same(const Pick& other) const;
-    };
+    // Кандидат на кадр (общий с шоураннером).
+    using Pick = StoryPick;
 
     // За кем следить в линии: герой, иначе то, о чём она (группа, ивент);
     // kInvalidId — ни того, ни другого уже нет в мире.
@@ -154,10 +148,24 @@ private:
         Retarget, // в том же кадре сменился герой
         Calm,     // передышка: мирная сцена после напряжения
         Chosen,   // выбрали в окне
+        Scene,    // сериал: новая сцена или перебивка (шоураннер)
     };
 
     // Перевести камеру на кандидата.
     void show(const Pick& pick, Inspector& inspector, Cut cut);
+    // Пересмотр текущего кадра по свежим кандидатам: тот же кандидат (сменился
+    // герой — к нему), подхваченная линия героя, которого навещали, или
+    // сбывшееся предвестие (досмотреть). Кульминация, передышка, замедление.
+    struct Refresh {
+        std::vector<Pick>::const_iterator found; // текущий среди кандидатов; end — нет
+        float interest = 0.0f;
+        bool urgent = false;
+    };
+    Refresh refreshCurrent(const std::vector<Pick>& picks, Inspector& inspector);
+    // Вид сверху (12а.1–12а.6): сменить кадр, если пора.
+    void choose(const std::vector<Pick>& picks, const Refresh& refresh, Inspector& inspector);
+    // Сериал (12а.8): кадр выбирает шоураннер, режиссёр исполняет его команды.
+    void updateShow(Inspector& inspector, SimDriver& driver, float dt, bool refresh);
     // Насколько напряжён кадр сейчас, 0..1: срочное предвестие — 1, иначе по
     // интересности.
     float intensity() const;
@@ -184,8 +192,6 @@ private:
     void leaveSeries(CameraController& camera);
     // Широкий кадр, затемнение склеек и титры.
     void drawSeriesFrame();
-    // «John Miller идёт мстить Peter Green — 120 м, ~2 мин».
-    std::string omenLine(const Foresight& omen) const;
     // Учёт эпизодов: кого показывают сейчас и когда показывали каждого.
     void trackEpisode();
     // Раздел «Главные герои» в окне; щелчок по герою — к нему.
@@ -285,6 +291,13 @@ private:
     float bars_ = 0.0f;              // насколько выехали полосы, 0..1
     CinemaCamera cinema_;
     mutable EntityId establishing_ = kInvalidId; // поселение для общего плана
+
+    // Сцены и эпизоды сериала (12а.8).
+    Showrunner show_;
+    std::vector<Pick> showPicks_;  // последние кандидаты для шоураннера
+    bool pausedByShow_ = false;    // мир остановил шоураннер (титры эпизода)
+    bool wasPaused_ = false;       // стоял ли мир до этого
+    bool skippedByShow_ = false;   // промотку начал шоураннер (скачок времени)
 };
 
 } // namespace ui

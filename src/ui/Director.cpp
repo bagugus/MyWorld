@@ -11,6 +11,7 @@
 #include "ui/Format.h"
 #include "ui/Inspector.h"
 #include "ui/SeriesFrame.h"
+#include "ui/StoryText.h"
 #include "ui/Ui.h"
 
 #include <imgui.h>
@@ -138,101 +139,9 @@ constexpr float kHouseLookHeight = 3.0f;
 // Общий план поселения: какую долю радиуса уместить.
 constexpr float kEstablishingShare = 0.6f;
 
-const char* heroStatusTitle(HeroStatus status) {
-    constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
-    static_assert(std::size(kNames) == static_cast<std::size_t>(HeroStatus::Count));
-    const auto index = static_cast<std::size_t>(status);
-    return index < std::size(kNames) ? kNames[index] : "?";
-}
-
-const char* omenTitle(ForesightKind kind) {
-    constexpr const char* kNames[] = {"Месть", "Орда", "Обращение", "Гонка за грузом", "Кража"};
-    static_assert(std::size(kNames) == static_cast<std::size_t>(ForesightKind::Count));
-    const auto index = static_cast<std::size_t>(kind);
-    return index < std::size(kNames) ? kNames[index] : "?";
-}
-
-const char* kindTitle(const Story& story) {
-    switch (story.kind) {
-    case StoryKind::Feud:
-        return story.betrayal ? "Предательство" : "Вражда";
-    case StoryKind::Group:
-        return "Группа";
-    case StoryKind::Infection:
-        return "Заражение";
-    case StoryKind::Salvage:
-        return "Гонка за грузом";
-    default:
-        return "?";
-    }
-}
-
-const char* stageTitle(StoryStage stage) {
-    constexpr const char* kNames[] = {"завязка", "нарастание", "кульминация", "развязка"};
-    static_assert(std::size(kNames) == static_cast<std::size_t>(StoryStage::Count));
-    const auto index = static_cast<std::size_t>(stage);
-    return index < std::size(kNames) ? kNames[index] : "?";
-}
-
-const char* endingTitle(StoryEnding ending) {
-    constexpr const char* kNames[] = {"",
-                                      "месть",
-                                      "примирение",
-                                      "обидчик убил",
-                                      "гибель",
-                                      "забылось",
-                                      "обращение",
-                                      "группа распалась",
-                                      "груз забрали",
-                                      "груз никому не достался"};
-    static_assert(std::size(kNames) == static_cast<std::size_t>(StoryEnding::Count));
-    const auto index = static_cast<std::size_t>(ending);
-    return index < std::size(kNames) ? kNames[index] : "?";
-}
-
-// «нарастание — чем кончится: месть?» или «развязка: месть».
-std::string stateLine(const Story& story) {
-    std::string line = stageTitle(story.stage);
-    if (story.active()) {
-        line += " — чем кончится: ";
-        line += endingTitle(expectedEnding(story));
-        line += "?";
-    } else {
-        line += ": ";
-        line += endingTitle(story.ending);
-    }
-    return line;
-}
-
-// «Вражда: John Miller #12 — Peter Green #40».
-std::string titleOf(const Story& story) {
-    std::string title = kindTitle(story);
-    title += ": ";
-    if (story.hero != kInvalidId) {
-        title += idLabel(story.hero);
-    } else if (story.focus != kInvalidId) {
-        title += idLabel(story.focus);
-    }
-    if (story.kind == StoryKind::Feud && story.other != kInvalidId) {
-        title += " — ";
-        title += idLabel(story.other);
-    }
-    return title;
-}
-
 } // namespace
 
 Director::Director(const World& world) : world_(world) {}
-
-bool Director::Pick::same(const Pick& other) const {
-    if (story != 0 || other.story != 0) {
-        return story == other.story;
-    }
-    if (visit != kInvalidId || other.visit != kInvalidId) {
-        return visit == other.visit;
-    }
-    return hasOmen && other.hasOmen && omen.same(other.omen);
-}
 
 void Director::setEnabled(bool enabled) {
     enabled_ = enabled;
@@ -353,6 +262,7 @@ std::vector<Director::Pick> Director::candidates() const {
     }
     for (Pick& pick : picks) {
         rate(pick);
+        pick.hero = protagonistOf(pick);
     }
     // Главные герои без линии и предвестия — навестить (12а.3).
     for (const Protagonist& hero : cast_.heroes()) {
@@ -364,6 +274,7 @@ std::vector<Director::Pick> Director::candidates() const {
         Pick& pick = picks.emplace_back();
         pick.visit = hero.id;
         pick.target = hero.id;
+        pick.hero = hero.id;
         pick.interest = kVisit * (1.0f + kVisitMissed * missed(hero.id));
     }
     std::stable_sort(picks.begin(), picks.end(),
@@ -383,7 +294,7 @@ void Director::show(const Pick& pick, Inspector& inspector, Cut cut) {
     if (pick.target == kInvalidId) {
         return;
     }
-    if (pick.target != shown_) {
+    if (pick.target != shown_ || cut == Cut::Scene) {
         camerawork_.cut(); // далеко — пролёт
         cinema_.cut();     // в сериале — склейка
     }
@@ -418,7 +329,8 @@ void Director::trackEpisode() {
         returnedAfter_ = fresh ? 0.0f : clock_ - episodes.lastSeen;
         episodeStart_ = clock_;
         episodeHero_ = shown_;
-        if (!fresh && returnedAfter_ >= kRecapAfter) {
+        if (!fresh && returnedAfter_ >= kRecapAfter && !series_) {
+            // В сериале «ранее в сериях» — в начале эпизода (шоураннер).
             // Ранее в сериях — и что случилось, пока мы были не с ним (12а.6).
             recapHero_ = shown_;
             recapAt_ = clock_;
@@ -552,8 +464,9 @@ void Director::pace(SimDriver& driver, float dt) {
     int wanted = baseSpeed_;
     if (slowmo_) {
         wanted = 1; // кульминация — в реальном времени
-    } else if (quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
-        !driver.skipping()) {
+    } else if (!series_ && quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
+               !driver.skipping()) {
+        // В сериале затишье не ускоряют, а вырезают скачком (шоураннер).
         wanted = std::max(baseSpeed_, kLullSpeed);
     }
     if (wanted != driver.speed()) {
@@ -566,16 +479,28 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     stories_.update(world_);
     cast_.update(world_);
     clock_ += dt;
-    // Скорость времени — по тому, сколько тиков прошло за кадр.
+    // Скорость времени — по тому, сколько тиков прошло за кадр (скачок времени
+    // шоураннера не считается: это не скорость, а склейка).
     const std::uint64_t tick = world_.tick();
-    if (dt > 0.0f) {
+    if (dt > 0.0f && !skippedByShow_) {
         const float rate = static_cast<float>(tick - std::min(tick, lastTick_)) /
                            static_cast<float>(kTicksPerSecond) / dt;
         simRate_ += (rate - simRate_) * std::min(1.0f, dt * kRateSmoothing);
     }
     lastTick_ = tick;
+    if (!series_ && (pausedByShow_ || skippedByShow_)) {
+        // Сериал кончился посреди титров или скачка: вернуть миру ход.
+        if (pausedByShow_) {
+            driver.setPaused(wasPaused_);
+            pausedByShow_ = false;
+        }
+        if (skippedByShow_) {
+            driver.cancelSkip();
+            skippedByShow_ = false;
+        }
+    }
     sinceChoice_ += dt;
-    const bool refresh = sinceChoice_ >= kChoicePeriod;
+    const bool refresh = sinceChoice_ >= kChoicePeriod || (series_ && show_.wantsFresh());
     if (refresh) {
         sinceChoice_ = 0.0f;
         omens_ = foresee(world_);
@@ -595,23 +520,31 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     trackEpisode();
     trackSubject();
     pace(driver, dt);
+    if (series_) {
+        updateShow(inspector, driver, dt, refresh);
+        return;
+    }
     if (!refresh) {
         return;
     }
-
     const std::vector<Pick> picks = candidates();
-    const auto found = std::find_if(picks.begin(), picks.end(),
-                                    [this](const Pick& pick) { return pick.same(current_); });
+    const Refresh state = refreshCurrent(picks, inspector);
+    choose(picks, state, inspector);
+}
+
+Director::Refresh Director::refreshCurrent(const std::vector<Pick>& picks, Inspector& inspector) {
+    Refresh state;
+    state.found = std::find_if(picks.begin(), picks.end(), [this](const Pick& pick) { return pick.same(current_); });
     float currentInterest = 0.0f;
     bool currentUrgent = false;
     bool resolved = false; // кульминация только что случилась
-    if (found != picks.end()) {
-        if (current_.hasOmen && !found->hasOmen) {
+    if (state.found != picks.end()) {
+        if (current_.hasOmen && !state.found->hasOmen) {
             held_ = 0.0f; // кульминация случилась — досмотреть, что вышло
             resolved = true;
         }
-        const bool retarget = found->target != current_.target;
-        current_ = *found;
+        const bool retarget = state.found->target != current_.target;
+        current_ = *state.found;
         if (retarget) {
             show(current_, inspector, Cut::Retarget); // новый вожак, первый у груза
         }
@@ -656,9 +589,18 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     }
     currentUrgent = currentUrgent || slowmo_;
     currentInterest_ = currentInterest;
+    state.interest = currentInterest;
+    state.urgent = currentUrgent;
+    return state;
+}
+
+void Director::choose(const std::vector<Pick>& picks, const Refresh& state, Inspector& inspector) {
     if (picks.empty()) {
         return;
     }
+    const auto found = state.found;
+    const float currentInterest = state.interest;
+    const bool currentUrgent = state.urgent;
     const bool resting = breather_ > 0.0f;
     if (currentInterest < kDeadInterest) {
         // Кадр остыл. В передышку — мирная сцена, иначе самое интересное.
@@ -704,42 +646,71 @@ void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     }
 }
 
-bool Director::positionOf(EntityId id, float alpha, Vector2& at) const {
-    const entt::entity entity = world_.find(id);
-    if (entity == entt::null) {
-        return false;
+void Director::updateShow(Inspector& inspector, SimDriver& driver, float dt, bool refresh) {
+    if (!show_.active()) {
+        show_.start();
     }
-    const entt::registry& registry = world_.registry();
-    if (const auto* position = registry.try_get<Position>(entity)) {
-        at = {position->x, position->y};
-        if (const auto* velocity = registry.try_get<Velocity>(entity)) {
-            // Как рисует рендер: между прошлым и последним тиком.
-            const float back = (1.0f - std::clamp(alpha, 0.0f, 1.0f)) * kTickDt;
-            at.x -= velocity->x * back;
-            at.y -= velocity->y * back;
+    bool climax = slowmo_ || urgent(current_);
+    if (refresh) {
+        showPicks_ = candidates();
+        climax = refreshCurrent(showPicks_, inspector).urgent;
+    }
+    ShowInput in;
+    in.world = &world_;
+    in.stories = &stories_;
+    in.cast = &cast_;
+    in.omens = &omens_;
+    in.picks = &showPicks_;
+    in.refreshed = refresh;
+    in.current = current_;
+    in.lost = lost_;
+    in.lostFor = lost_ ? held_ : 0.0f;
+    in.currentInterest = currentInterest_;
+    in.climax = climax && current_.hasOmen && !lost_;
+    in.quiet = quiet();
+    in.paused = driver.paused() && !pausedByShow_;
+    in.skipping = driver.skipping();
+    in.simRate = simRate_;
+    const ShowPhase before = show_.phase();
+    const ShowOrders orders = show_.update(in, dt);
+    if (show_.phase() != before) {
+        // В консоль (лог raylib): ход эпизода можно проверить по запуску со снимком.
+        TraceLog(LOG_INFO, "SERIES: %s", frame::clean(show_.status()).c_str());
+    }
+    if (orders.show) {
+        if (orders.show->target != kInvalidId) {
+            show(*orders.show, inspector, Cut::Scene);
+        } else {
+            // Показывать некого — общий план поселения.
+            current_ = {};
+            lost_ = false;
+            shown_ = kInvalidId;
+            cinema_.cut();
         }
-        return true;
     }
-    if (const auto* building = registry.try_get<Building>(entity)) {
-        at = {(static_cast<float>(building->origin.x) + building->width * 0.5f) * Map::kCellSize,
-              (static_cast<float>(building->origin.y) + building->height * 0.5f) * Map::kCellSize};
-        return true;
+    if (orders.recut) {
+        cinema_.cut();
     }
-    if (const auto* horde = registry.try_get<Horde>(entity)) {
-        return positionOf(horde->leader, alpha, at);
+    if (orders.skip > 0) {
+        driver.requestSkip(orders.skip); // скачок времени — порциями промотки
+        skippedByShow_ = true;
+    } else if (skippedByShow_ && !driver.skipping() && show_.phase() != ShowPhase::Jump) {
+        skippedByShow_ = false;
     }
-    if (const auto* group = registry.try_get<Group>(entity)) {
-        return positionOf(group->leader, alpha, at);
+    if (orders.pause) {
+        if (*orders.pause && !pausedByShow_) {
+            wasPaused_ = driver.paused();
+            pausedByShow_ = true;
+            driver.setPaused(true); // титры эпизода: мир ждёт
+        } else if (!*orders.pause && pausedByShow_) {
+            driver.setPaused(wasPaused_);
+            pausedByShow_ = false;
+        }
     }
-    if (const auto* event = registry.try_get<WorldEvent>(entity)) {
-        at = {Map::cellCenter(event->site.x), Map::cellCenter(event->site.y)};
-        return true;
-    }
-    if (const auto* settlement = registry.try_get<Settlement>(entity)) {
-        at = {Map::cellCenter(settlement->center.x), Map::cellCenter(settlement->center.y)};
-        return true;
-    }
-    return false;
+}
+
+bool Director::positionOf(EntityId id, float alpha, Vector2& at) const {
+    return ui::positionOf(world_, id, alpha, at);
 }
 
 ShotPlan Director::planOf(float alpha) const {
@@ -890,6 +861,7 @@ void Director::enterSeries(CameraController& camera) {
     }
     camera.setMode(ViewMode::Cinema);
     cinema_.reset();
+    show_.start(); // эпизод 1
     series_ = true;
     seriesClock_ = 0.0f;
     bars_ = 0.0f;
@@ -903,6 +875,7 @@ void Director::enterSeries(CameraController& camera) {
 void Director::leaveSeries(CameraController& camera) {
     series_ = false;
     bars_ = 0.0f;
+    show_.stop(); // паузу и промотку шоураннера снимет ближайший update
     if (fullscreen_) {
         ToggleBorderlessWindowed();
         fullscreen_ = false;
@@ -941,75 +914,20 @@ void Director::updateCamera(CameraController& camera, std::optional<float> headi
     if (camera.mode() != ViewMode::Cinema) {
         camera.setMode(ViewMode::Cinema);
     }
-    ShotPlan plan = planOf(alpha);
+    // Под вводным титром и на установочном плане — место сцены общим планом
+    // (12а.8), дальше — план кадра.
+    ShotPlan plan;
+    if (show_.establishing()) {
+        plan = show_.placePlan(world_, alpha);
+    }
+    if (!plan.valid) {
+        plan = planOf(alpha);
+    }
     if (!plan.valid) {
         plan = establishingPlan(); // смотреть пока нечего
     }
     shot_ = plan.size;
     cinema_.update(camera, plan, plan.subjectId == shown_ ? heading : std::nullopt, climax, dt);
-}
-
-std::string Director::omenLine(const Foresight& omen) const {
-    const entt::registry& registry = world_.registry();
-    std::string line;
-    char text[160];
-    switch (omen.kind) {
-    case ForesightKind::Revenge:
-        line = idLabel(omen.hero) + " идёт мстить " + idLabel(omen.other);
-        break;
-    case ForesightKind::Raid: {
-        const entt::entity horde = world_.find(omen.focus);
-        const entt::entity place = world_.find(omen.other);
-        const std::size_t size =
-            horde != entt::null ? registry.get<Horde>(horde).members.size() : std::size_t{0};
-        std::snprintf(text, sizeof(text), "Орда (%zu) идёт к поселению %s, там людей: %d", size,
-                      place != entt::null ? registry.get<Settlement>(place).name.c_str() : "?",
-                      omen.crowd);
-        line = text;
-        break;
-    }
-    case ForesightKind::Turning: {
-        const entt::entity body = world_.find(omen.hero);
-        const bool dead = body != entt::null && registry.all_of<Corpse>(body);
-        std::snprintf(text, sizeof(text),
-                      dead ? " вот-вот встанет зомби, рядом людей: %d"
-                           : " заражён, рядом людей: %d — обратится",
-                      omen.crowd);
-        line = (dead ? "Тело " : "") + idLabel(omen.hero) + text;
-        break;
-    }
-    case ForesightKind::CacheRace:
-        std::snprintf(text, sizeof(text), " спешат к грузу (всего %d)", omen.crowd);
-        line = idLabel(omen.hero) + " и " + idLabel(omen.other) + text;
-        break;
-    case ForesightKind::Theft: {
-        const entt::entity thief = world_.find(omen.hero);
-        const auto* person = thief != entt::null ? registry.try_get<Person>(thief) : nullptr;
-        if (person != nullptr && person->home == omen.focus) {
-            line = idLabel(omen.hero) + " хочет сбежать с запасами группы";
-        } else {
-            line = idLabel(omen.hero) + " идёт обокрасть дом " +
-                   idLabel(omen.other != kInvalidId ? omen.other : omen.focus);
-        }
-        break;
-    }
-    default:
-        break;
-    }
-    if (omen.distance >= 1.0f) {
-        std::snprintf(text, sizeof(text), " — %.0f м", omen.distance);
-        line += text;
-    }
-    const auto ticks = static_cast<std::uint64_t>(omen.eta * static_cast<float>(kTicksPerSecond));
-    if (ticks < kTicksPerGameMinute) {
-        line += ", сейчас";
-    } else {
-        char duration[32];
-        formatGameDuration(duration, sizeof(duration), ticks);
-        line += ", через ~";
-        line += duration;
-    }
-    return line;
 }
 
 Director::Pick Director::pickOf(const Story& story) const {
@@ -1114,7 +1032,7 @@ void Director::drawPanel(Inspector& inspector) {
                 const Foresight& omen = omens_[i];
                 ImGui::PushID(static_cast<int>(i));
                 const std::string label =
-                    std::string(omenTitle(omen.kind)) + ": " + omenLine(omen);
+                    std::string(omenTitle(omen.kind)) + ": " + omenLine(world_, omen);
                 const bool watched = enabled_ && current_.hasOmen && current_.omen.same(omen);
                 if (ImGui::Selectable(label.c_str(), watched)) {
                     const Pick pick = pickOf(omen);
@@ -1246,7 +1164,7 @@ void Director::drawCaption(Inspector& inspector) {
             // Что вот-вот случится: ярче, когда кульминация совсем близко.
             const bool soon = urgent(current_);
             const ImVec4 color = soon ? ImVec4{1.0f, 0.62f, 0.3f, 1.0f} : ImVec4{0.95f, 0.85f, 0.5f, 1.0f};
-            ImGui::TextColored(color, "Вот-вот: %s", omenLine(current_.omen).c_str());
+            ImGui::TextColored(color, "Вот-вот: %s", omenLine(world_, current_.omen).c_str());
         }
         if (story != nullptr && !story->beats.empty()) {
             const ChronicleEvent& last = world_.chronicle().events()[story->beats.back().event];
@@ -1330,6 +1248,7 @@ void Director::closeSubject() {
     if (text.empty()) {
         return;
     }
+    show_.note(text); // для «ранее в сериях» следующего эпизода
     summaries_.push_back({who, world_.tick(), std::move(text)});
     summaryAt_ = clock_;
 }
@@ -1500,11 +1419,15 @@ void Director::drawSeriesFrame() {
     const float margin = display.x * 0.07f;
     frame::drawBars(bars_);
     // Начало сериала — проявка из чёрного; склейка — короткая проявка.
-    frame::drawBlackout(std::max(cinema_.blackout(), 1.0f - frame::fade(seriesClock_, kOpeningFade)));
+    // Сцены (12а.8): затемнение между сценами и чёрные титры эпизода.
+    frame::drawBlackout(std::max({cinema_.blackout(), 1.0f - frame::fade(seriesClock_, kOpeningFade),
+                                  show_.curtain()}));
+    show_.draw(bar); // титры шоураннера — поверх затемнения
     const float titles = frame::fade(seriesClock_ - kTitlesDelay, 1.0f);
     if (titles <= 0.0f) {
         return;
     }
+    const bool hidden = show_.hidesTitles();
     const auto tint = [titles](ImVec4 color, float alpha = 1.0f) {
         color.w *= titles * alpha;
         return color;
@@ -1517,19 +1440,14 @@ void Director::drawSeriesFrame() {
 
     // Верхняя полоса: слева — монтаж, по центру — линия, справа — герой
     // сериала; ниже — что вот-вот случится.
-    std::string label;
-    float labelAlpha = 1.0f;
-    if (cut_ == Cut::Parallel && clock_ - cutAt_ < kCutTitle) {
-        label = "Тем временем…";
-        labelAlpha = frame::fade(clock_ - cutAt_, 0.4f, kCutTitle, 1.0f);
-    } else if (breather_ > 0.0f) {
-        label = "Передышка";
-    } else if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
-        label = "Затишье · время ×" + std::to_string(setSpeed_);
-    } else if (slowmo_) {
+    // Монтаж в сериале ведёт шоураннер: перебивка, передышка, будни.
+    std::string label = show_.label();
+    const float labelAlpha = 1.0f;
+    if (label.empty() && slowmo_) {
         label = "Кульминация";
     }
-    std::string heroLine;
+    // Справа — номер эпизода сериала, а в дебют героя — через кого он связан.
+    std::string heroLine = show_.episode() > 0 ? "Эпизод " + std::to_string(show_.episode()) : "";
     if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
         const Protagonist* protagonist = cast_.find(hero);
         const auto it = episodes_.find(hero);
@@ -1540,12 +1458,6 @@ void Director::drawSeriesFrame() {
             if (protagonist->introducedBy != kInvalidId) {
                 heroLine += " · связан с " + idLabel(protagonist->introducedBy);
             }
-        } else if (opening && returnedAfter_ >= kMissedAfter) {
-            char text[96];
-            std::snprintf(text, sizeof(text), "Возвращаемся спустя %.0f мин", returnedAfter_ / 60.0f);
-            heroLine = text;
-        } else if (episode > 0 && hero == episodeHero_) {
-            heroLine = "Эпизод " + std::to_string(episode);
         }
     }
     const Story* story = stories_.find(current_.story);
@@ -1556,13 +1468,21 @@ void Director::drawSeriesFrame() {
         storyLine = omenTitle(current_.omen.kind);
     }
     const float row = bar * 0.2f;
+    if (hidden) {
+        // На чёрном и на общих планах — только титры шоураннера и монтаж.
+        storyLine.clear();
+        if (show_.phase() != ShowPhase::Cutaway && show_.phase() != ShowPhase::Cliffhanger) {
+            label.clear();
+            heroLine.clear();
+        }
+    }
     frame::text(italicFont(), 19.0f * scale, margin, row, Align::Left, tint(muted, labelAlpha), label);
     frame::text(titleFont(), 20.0f * scale, display.x * 0.5f, row, Align::Center, tint(white),
                 frame::clean(storyLine), display.x * 0.5f);
     frame::text(titleFont(), 17.0f * scale, display.x - margin, row, Align::Right, tint(gold),
                 frame::clean(heroLine));
-    if (current_.hasOmen && !lost_) {
-        const std::string omen = "Вот-вот: " + frame::clean(omenLine(current_.omen));
+    if (current_.hasOmen && !lost_ && !hidden) {
+        const std::string omen = "Вот-вот: " + frame::clean(omenLine(world_, current_.omen));
         frame::text(captionFont(), 18.0f * scale, display.x * 0.5f, row + 30.0f * scale, Align::Center,
                     tint(urgent(current_) ? amber : straw), omen, display.x * 0.7f);
     }
@@ -1570,7 +1490,7 @@ void Director::drawSeriesFrame() {
     // Нижняя полоса: имя крупно, рядом — положение, ниже — чего он хочет.
     float y = display.y - bar + bar * 0.14f;
     const float nameAlpha = frame::fade(clock_ - subjectShownAt_, kNameFade);
-    const std::string intent = intentLine(world_, shown_);
+    const std::string intent = hidden ? std::string() : intentLine(world_, shown_);
     if (!intent.empty()) {
         const std::string name = frame::clean(idLabel(shown_));
         const float nameSize = 32.0f * scale;
@@ -1583,7 +1503,7 @@ void Director::drawSeriesFrame() {
         y += height + 2.0f * scale;
         frame::text(captionFont(), 21.0f * scale, margin, y, Align::Left, tint(white, nameAlpha),
                     frame::clean(intent), display.x - 2.0f * margin);
-    } else if (!current_.valid()) {
+    } else if (!current_.valid() && !hidden) {
         if (const entt::entity place = world_.find(establishing_); place != entt::null) {
             const CalendarTime time = calendarAt(world_.tick());
             char when[64];
@@ -1604,9 +1524,13 @@ void Director::drawSeriesFrame() {
     };
     std::vector<Line> lines;
     const float wrap = display.x * 0.6f;
-    if (!summaries_.empty() && clock_ - summaryAt_ < kSummaryTime) {
+    const ShowPhase phase = show_.phase();
+    const bool cards = phase == ShowPhase::Opening || phase == ShowPhase::Closing ||
+                       phase == ShowPhase::Cutaway || phase == ShowPhase::Cliffhanger;
+    if (!summaries_.empty() && clock_ - summaryAt_ < kSummaryTime && !cards) {
+        // В сериале итог подводится сцене (эпизод — у шоураннера).
         const float alpha = frame::fade(clock_ - summaryAt_, 0.5f, kSummaryTime, 1.2f);
-        lines.push_back({italicFont(), 18.0f * scale, tint(muted, alpha), "Итог эпизода"});
+        lines.push_back({italicFont(), 18.0f * scale, tint(muted, alpha), "Итог сцены"});
         lines.push_back({titleFont(), 22.0f * scale, tint(gold, alpha), frame::clean(summaries_.back().text)});
     }
     if (recapHero_ == shown_ && shown_ != kInvalidId && clock_ - recapAt_ < kRecapTime) {

@@ -186,6 +186,10 @@ if(LW_BUILD_APP)
         src/ui/PathTool.h
         src/ui/SeriesFrame.cpp
         src/ui/SeriesFrame.h
+        src/ui/Showrunner.cpp
+        src/ui/Showrunner.h
+        src/ui/StoryText.cpp
+        src/ui/StoryText.h
         src/ui/Ui.cpp
         src/ui/Ui.h
     )
