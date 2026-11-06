@@ -2,7 +2,7 @@
 //   living_world [--seed N] [--event NAME] [--hours H] [--view X Y ZOOM] [--path X1 Y1 X2 Y2]
 //                [--nav-graph] [--select ID] [--3d] [--orbit YAW PITCH] [--foliage F]
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
-//                [--no-peace] [--director] [--screenshot FILE.png]
+//                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
 //
 // --event       начать ивент на старте (drop — сброс груза) и открыть его в инспекторе;
 //               --hours прокручивает мир уже после него
@@ -26,6 +26,7 @@
 // --zombies, --no-peace — как у lw_headless
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
+// --screenshot-delay  снять не сразу, а через S реальных секунд работы окна (режиссёр)
 
 #include "render/CameraController.h"
 #include "render/Palette.h"
@@ -59,6 +60,7 @@ int main(int argc, char** argv) {
     std::uint64_t seed = 1;
     double hours = 0.0;
     const char* screenshot = nullptr;
+    float screenshotDelay = 0.0f;
     bool hasView = false;
     float viewX = 0.0f;
     float viewY = 0.0f;
@@ -82,6 +84,8 @@ int main(int argc, char** argv) {
             hours = std::strtod(argv[++i], nullptr);
         } else if (std::strcmp(argv[i], "--screenshot") == 0 && i + 1 < argc) {
             screenshot = argv[++i];
+        } else if (std::strcmp(argv[i], "--screenshot-delay") == 0 && i + 1 < argc) {
+            screenshotDelay = std::strtof(argv[++i], nullptr);
         } else if (std::strcmp(argv[i], "--view") == 0 && i + 3 < argc) {
             viewX = std::strtof(argv[++i], nullptr);
             viewY = std::strtof(argv[++i], nullptr);
@@ -193,7 +197,7 @@ int main(int argc, char** argv) {
             inspector.handleInput(camera, !lw::ui::wantsMouse());
             driver.advance(dt);
             const float alpha = driver.interpolationAlpha();
-            storyDirector.update(inspector, dt);
+            storyDirector.update(inspector, driver, dt);
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
             // с отрисовкой этого кадра.
             inspector.updateCamera(camera, alpha);
@@ -250,7 +254,8 @@ int main(int argc, char** argv) {
             EndDrawing();
 
             const bool settled = !camera.is3d() || renderer3d.trees().pending() == 0;
-            if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait)) {
+            if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait) &&
+                GetTime() >= screenshotDelay) {
                 const Image image = LoadImageFromScreen();
                 ExportImage(image, screenshot);
                 UnloadImage(image);

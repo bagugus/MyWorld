@@ -1,6 +1,7 @@
 #include "ui/Director.h"
 
 #include "sim/Components.h"
+#include "sim/SimDriver.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 #include "ui/ChronicleView.h"
@@ -64,6 +65,30 @@ constexpr float kVisitMissed = 2.0f;
 constexpr float kEpisodeGap = 30.0f;
 // Сколько секунд в подписи «возвращаемся» и «новый герой».
 constexpr float kEpisodeTitle = 12.0f;
+// Темп и монтаж (12а.4). Параллельный монтаж: две линии не скучнее
+// kParallelMin, вторая — не меньше kParallelShare первой; камера переходит
+// между ними каждые kCrossCut секунд.
+constexpr float kCrossCut = 12.0f;
+constexpr float kParallelMin = 0.35f;
+constexpr float kParallelShare = 0.7f;
+// Напряжение сглаживается за kTensionTime секунд; кульминация, досмотренная
+// при напряжении не ниже kTenseEnough, — передышка на kBreather секунд.
+constexpr float kTensionTime = 8.0f;
+constexpr float kTenseEnough = 0.5f;
+constexpr float kBreather = 20.0f;
+// Затишье: ни одно предвестие интереснее kQuietOmen не случится раньше чем
+// через kQuietEta секунд симуляции, а кадр скучнее kLullInterest. Счёт — в
+// секундах симуляции, чтобы ускорение само не обрывало затишье.
+constexpr float kQuietEta = 240.0f;
+constexpr float kQuietOmen = 0.15f;
+constexpr float kLullInterest = 0.3f;
+// Затишье дольше kQuietDelay секунд — время ×kLullSpeed (если пользователь не
+// менял скорость последние kUserPace секунд).
+constexpr float kQuietDelay = 3.0f;
+constexpr int kLullSpeed = 10;
+constexpr float kUserPace = 30.0f;
+// Сколько секунд подпись «Тем временем…».
+constexpr float kCutTitle = 5.0f;
 
 const char* heroStatusTitle(HeroStatus status) {
     constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
@@ -168,6 +193,11 @@ void Director::setEnabled(bool enabled) {
     shown_ = kInvalidId;
     held_ = 0.0f;
     sinceChoice_ = kChoicePeriod; // выбрать линию сразу
+    partner_ = {};
+    breather_ = 0.0f;
+    tension_ = 0.0f;
+    quietFor_ = 0.0f;
+    currentInterest_ = 0.0f;
 }
 
 bool Director::exists(EntityId id) const {
@@ -299,12 +329,17 @@ bool Director::urgent(const Pick& pick) const {
     return pick.hasOmen && realEta(pick.omen) <= kLead;
 }
 
-void Director::show(const Pick& pick, Inspector& inspector) {
+void Director::show(const Pick& pick, Inspector& inspector, Cut cut) {
     if (pick.target == kInvalidId) {
         return;
     }
     if (!pick.same(current_) || lost_) {
         held_ = 0.0f;
+        cut_ = cut;
+        cutAt_ = clock_;
+        if (cut != Cut::Parallel && cut != Cut::Retarget) {
+            partner_ = {}; // параллельный монтаж кончился
+        }
     }
     current_ = pick;
     lost_ = false;
@@ -332,7 +367,131 @@ void Director::trackEpisode() {
     episodes.lastSeen = clock_;
 }
 
-void Director::update(Inspector& inspector, float dt) {
+float Director::intensity() const {
+    if (!current_.valid()) {
+        return 0.0f;
+    }
+    if (current_.hasOmen && !lost_ && urgent(current_)) {
+        return 1.0f;
+    }
+    return std::clamp(currentInterest_, 0.0f, 1.0f);
+}
+
+bool Director::calm(EntityId id) const {
+    const entt::entity entity = world_.find(id);
+    if (entity == entt::null) {
+        return false;
+    }
+    const auto* mind = world_.registry().try_get<Mind>(entity);
+    if (mind == nullptr) {
+        return false;
+    }
+    switch (mind->action) {
+    case Action::Idle:
+    case Action::Sleep:
+    case Action::Eat:
+    case Action::Drink:
+    case Action::Forage:
+    case Action::Socialize:
+    case Action::Wander:
+    case Action::Treat:
+    case Action::Share:
+    case Action::Trade:
+    case Action::Work:
+    case Action::Buy:
+        return true;
+    default:
+        return false;
+    }
+}
+
+const Director::Pick* Director::parallelPartner(const std::vector<Pick>& picks,
+                                                float currentInterest) const {
+    if (current_.visit != kInvalidId || currentInterest < kParallelMin) {
+        return nullptr;
+    }
+    const float needed = std::max(kParallelMin, kParallelShare * currentInterest);
+    const EntityId hero = protagonistOf(current_);
+    // Та же пара, что и раньше: камера ходит между двумя линиями.
+    if (partner_.valid()) {
+        for (const Pick& pick : picks) {
+            if (pick.same(partner_)) {
+                return pick.interest >= needed && pick.target != current_.target ? &pick : nullptr;
+            }
+        }
+        return nullptr;
+    }
+    for (const Pick& pick : picks) {
+        if (pick.same(current_) || pick.visit != kInvalidId || pick.target == current_.target ||
+            (hero != kInvalidId && protagonistOf(pick) == hero)) {
+            continue;
+        }
+        return pick.interest >= needed ? &pick : nullptr; // picks — по убыванию
+    }
+    return nullptr;
+}
+
+const Director::Pick* Director::calmPick(const std::vector<Pick>& picks) const {
+    // Сперва главный герой за мирным делом, потом кто угодно.
+    for (const bool heroOnly : {true, false}) {
+        for (const Pick& pick : picks) {
+            if (pick.hasOmen || pick.same(current_) || !calm(pick.target) ||
+                (heroOnly && protagonistOf(pick) == kInvalidId)) {
+                continue;
+            }
+            return &pick;
+        }
+    }
+    return nullptr;
+}
+
+bool Director::quiet() const {
+    if (current_.hasOmen && !lost_ && (urgent(current_) || current_.omen.eta < kQuietEta)) {
+        return false;
+    }
+    for (const Foresight& omen : omens_) {
+        if (omen.eta < kQuietEta && omen.interest >= kQuietOmen) {
+            return false;
+        }
+    }
+    return currentInterest_ < kLullInterest;
+}
+
+void Director::pace(SimDriver& driver, float dt) {
+    if (!enabled_ || !tempo_) {
+        // Режиссёр больше не ведёт: вернуть скорость пользователя, если её
+        // с тех пор не меняли.
+        if (baseSpeed_ != 0 && driver.speed() == setSpeed_) {
+            driver.setSpeed(baseSpeed_);
+        }
+        baseSpeed_ = setSpeed_ = 0;
+        quietFor_ = 0.0f;
+        return;
+    }
+    if (baseSpeed_ == 0) {
+        baseSpeed_ = setSpeed_ = driver.speed();
+        userPaced_ = kUserPace;
+    }
+    if (driver.speed() != setSpeed_) {
+        // Скорость сменил пользователь: это новая основа, и какое-то время
+        // режиссёр её не трогает.
+        baseSpeed_ = setSpeed_ = driver.speed();
+        userPaced_ = 0.0f;
+    }
+    userPaced_ += dt;
+    quietFor_ = quiet() ? quietFor_ + dt : 0.0f;
+    int wanted = baseSpeed_;
+    if (quietFor_ >= kQuietDelay && userPaced_ >= kUserPace && !driver.paused() &&
+        !driver.skipping()) {
+        wanted = std::max(baseSpeed_, kLullSpeed);
+    }
+    if (wanted != driver.speed()) {
+        driver.setSpeed(wanted);
+    }
+    setSpeed_ = driver.speed();
+}
+
+void Director::update(Inspector& inspector, SimDriver& driver, float dt) {
     stories_.update(world_);
     cast_.update(world_);
     clock_ += dt;
@@ -350,15 +509,18 @@ void Director::update(Inspector& inspector, float dt) {
         sinceChoice_ = 0.0f;
         omens_ = foresee(world_);
     }
-    if (!enabled_) {
-        return;
-    }
-    if (shown_ != kInvalidId && inspector.selected() != shown_) {
+    if (enabled_ && shown_ != kInvalidId && inspector.selected() != shown_) {
         enabled_ = false; // пользователь выбрал своё — камера его
+    }
+    if (!enabled_) {
+        pace(driver, dt);
         return;
     }
     held_ += dt;
+    breather_ = std::max(0.0f, breather_ - dt);
+    tension_ += (intensity() - tension_) * std::min(1.0f, dt / kTensionTime);
     trackEpisode();
+    pace(driver, dt);
     if (!refresh) {
         return;
     }
@@ -368,14 +530,16 @@ void Director::update(Inspector& inspector, float dt) {
                                     [this](const Pick& pick) { return pick.same(current_); });
     float currentInterest = 0.0f;
     bool currentUrgent = false;
+    bool resolved = false; // кульминация только что случилась
     if (found != picks.end()) {
         if (current_.hasOmen && !found->hasOmen) {
             held_ = 0.0f; // кульминация случилась — досмотреть, что вышло
+            resolved = true;
         }
         const bool retarget = found->target != current_.target;
         current_ = *found;
         if (retarget) {
-            show(current_, inspector); // сменился герой: новый вожак, первый у груза
+            show(current_, inspector, Cut::Retarget); // новый вожак, первый у груза
         }
         currentInterest = current_.interest;
         currentUrgent = urgent(current_);
@@ -389,7 +553,7 @@ void Director::update(Inspector& inspector, float dt) {
         const bool retarget = adopted->target != current_.target;
         current_ = *adopted;
         if (retarget) {
-            show(current_, inspector);
+            show(current_, inspector, Cut::Retarget);
         }
         currentInterest = current_.interest;
         currentUrgent = urgent(current_);
@@ -399,30 +563,59 @@ void Director::update(Inspector& inspector, float dt) {
         if (!lost_) {
             lost_ = true;
             held_ = 0.0f;
+            resolved = current_.hasOmen;
         }
         currentInterest = held_ < kAftermath && exists(current_.target) ? current_.interest : 0.0f;
     }
-    if (picks.empty() || found == picks.begin()) {
+    if (resolved && tension_ >= kTenseEnough) {
+        breather_ = kBreather; // после кульминации — передышка
+    }
+    currentInterest_ = currentInterest;
+    if (picks.empty()) {
         return;
     }
-    const Pick& best = picks.front();
+    const bool resting = breather_ > 0.0f;
     if (currentInterest < kDeadInterest) {
-        show(best, inspector);
+        // Кадр остыл. В передышку — мирная сцена, иначе самое интересное.
+        if (const Pick* rest = resting ? calmPick(picks) : nullptr) {
+            show(*rest, inspector, Cut::Calm);
+        } else if (found != picks.begin()) {
+            show(picks.front(), inspector, Cut::Start);
+        }
         return;
     }
     if (currentUrgent) {
         return; // вот-вот кульминация — от неё не уходят
     }
-    // Успеть к кульминации: срочное предвестие перехватывает камеру раньше срока.
-    const auto rush = std::find_if(picks.begin(), picks.end(),
-                                   [this](const Pick& pick) { return urgent(pick); });
-    if (rush != picks.end() && held_ >= kRushHold &&
-        rush->interest >= kRushShare * currentInterest) {
-        show(*rush, inspector);
-        return;
+    if (found != picks.begin()) {
+        // Успеть к кульминации: срочное предвестие перехватывает камеру раньше
+        // срока. В передышку — только ради главного героя.
+        const auto rush = std::find_if(picks.begin(), picks.end(),
+                                       [this](const Pick& pick) { return urgent(pick); });
+        if (rush != picks.end() && held_ >= kRushHold &&
+            rush->interest >= kRushShare * currentInterest &&
+            (!resting || protagonistOf(*rush) != kInvalidId)) {
+            show(*rush, inspector, Cut::Rush);
+            return;
+        }
     }
-    if (held_ >= kMinHold && best.interest > currentInterest * kSwitchMargin) {
-        show(best, inspector);
+    if (resting) {
+        return; // передышка: камера остаётся, где была
+    }
+    // Параллельный монтаж: две горячие линии по очереди.
+    if (held_ >= kCrossCut) {
+        if (const Pick* partner = parallelPartner(picks, currentInterest)) {
+            const Pick previous = current_;
+            show(*partner, inspector, Cut::Parallel);
+            partner_ = previous;
+            return;
+        }
+        partner_ = {};
+    }
+    const Pick& best = picks.front();
+    if (found != picks.begin() && held_ >= kMinHold &&
+        best.interest > currentInterest * kSwitchMargin) {
+        show(best, inspector, Cut::Switch);
     }
 }
 
@@ -536,6 +729,21 @@ void Director::drawPanel(Inspector& inspector) {
     if (ImGui::Checkbox("Режиссёр: камера сама ведёт историю", &enabled)) {
         setEnabled(enabled);
     }
+    ImGui::Checkbox("Темп: ускорять время в затишье", &tempo_);
+    if (enabled_) {
+        // Темп и монтаж (12а.4): что сейчас делает режиссёр.
+        std::string state = tension_ >= kTenseEnough ? "напряжение" : "спокойно";
+        if (breather_ > 0.0f) {
+            state += ", передышка";
+        }
+        if (partner_.valid()) {
+            state += ", параллельный монтаж";
+        }
+        if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
+            state += ", затишье — время x" + std::to_string(setSpeed_);
+        }
+        ImGui::TextDisabled("%s; напряжение %.2f, на кадре %.0f с", state.c_str(), tension_, held_);
+    }
 
     const std::uint64_t now = world_.tick();
     const std::vector<Story>& all = stories_.stories();
@@ -568,7 +776,7 @@ void Director::drawPanel(Inspector& inspector) {
                 if (ImGui::Selectable(label.c_str(), watched)) {
                     const Pick pick = pickOf(omen);
                     if (enabled_) {
-                        show(pick, inspector); // режиссёр продолжает отсюда
+                        show(pick, inspector, Cut::Chosen); // режиссёр продолжает отсюда
                     } else if (pick.target != kInvalidId) {
                         inspector.select(pick.target);
                     }
@@ -591,7 +799,7 @@ void Director::drawPanel(Inspector& inspector) {
                 opened_ = story.id;
                 const Pick pick = pickOf(story);
                 if (enabled_) {
-                    show(pick, inspector); // режиссёр продолжает с этой линии
+                    show(pick, inspector, Cut::Chosen); // режиссёр продолжает с этой линии
                 } else if (pick.target != kInvalidId) {
                     inspector.select(pick.target);
                 }
@@ -649,6 +857,15 @@ void Director::drawCaption(Inspector& inspector) {
                                         ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
     if (ImGui::Begin("###director-caption", nullptr, kFlags)) {
+        // Монтаж (12а.4): как мы сюда попали.
+        const ImVec4 muted{0.7f, 0.78f, 0.9f, 1.0f};
+        if (cut_ == Cut::Parallel && clock_ - cutAt_ < kCutTitle) {
+            ImGui::TextColored(muted, "Тем временем…");
+        } else if (breather_ > 0.0f) {
+            ImGui::TextColored(muted, "Передышка");
+        } else if (baseSpeed_ != 0 && setSpeed_ > baseSpeed_) {
+            ImGui::TextColored(muted, "Затишье — время x%d", setSpeed_);
+        }
         if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
             drawHeroCaption(hero, inspector);
         }
@@ -759,7 +976,7 @@ void Director::drawCast(Inspector& inspector) {
                     pick.visit = hero.id;
                     pick.target = hero.id;
                     pick.interest = kVisit;
-                    show(pick, inspector); // режиссёр продолжает с этого героя
+                    show(pick, inspector, Cut::Chosen); // режиссёр продолжает с этого героя
                 } else {
                     clicked = hero.id;
                 }
