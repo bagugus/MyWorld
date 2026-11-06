@@ -1,11 +1,13 @@
 #pragma once
 
+#include "sim/Cast.h"
 #include "sim/Foresight.h"
 #include "sim/Id.h"
 #include "sim/Story.h"
 
 #include <cstdint>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lw {
@@ -27,6 +29,13 @@ class Inspector;
 // кандидатом, если линии нет), а когда до кульминации остаётся несколько
 // реальных секунд — перехватывает камеру, не дожидаясь срока, и держит её,
 // пока всё не случится.
+//
+// Главные герои (12а.3): режиссёр знает состав сериала (CastTracker) и ведёт
+// эпизоды — помнит, когда показывал каждого героя. Линии и предвестия с
+// главным героем интереснее остальных (тем больше, чем дольше его не
+// показывали), в линии камера берёт героя сериала; в затишье режиссёр просто
+// навещает давно не виденного героя. Новый герой входит в кадр с подписью,
+// через кого и каким событием он связан с уже знакомыми.
 //
 // Мир режиссёр только читает. Выбор пользователя (щелчок по другому объекту)
 // выключает режиссёра.
@@ -53,10 +62,12 @@ private:
         std::uint32_t story = 0; // Story::id; 0 — линии нет
         bool hasOmen = false;
         Foresight omen;          // предвестие, если hasOmen
+        // Навестить главного героя без линии и предвестия (12а.3).
+        EntityId visit = kInvalidId;
         EntityId target = kInvalidId;
         float interest = 0.0f;
 
-        bool valid() const { return story != 0 || hasOmen; }
+        bool valid() const { return story != 0 || hasOmen || visit != kInvalidId; }
         // Тот же кандидат: та же линия, а без линии — то же предвестие.
         bool same(const Pick& other) const;
     };
@@ -65,6 +76,15 @@ private:
     // kInvalidId — ни того, ни другого уже нет в мире.
     EntityId targetOf(const Story& story) const;
     bool exists(EntityId id) const;
+    // Главный герой, о котором кандидат: кого навещают, за кем следят, герой
+    // или противник линии, кто-то из её участников, герой предвестия.
+    EntityId protagonistOf(const Pick& pick) const;
+    // Насколько по герою соскучились: 0 — видели только что, 1 — давно (или
+    // ни разу).
+    float missed(EntityId hero) const;
+    // Поправка на главных героев: в линии камера берёт героя сериала, а
+    // интересность растёт.
+    void rate(Pick& pick) const;
     // Кандидаты по убыванию интересности.
     std::vector<Pick> candidates() const;
     // Кандидат для линии или предвестия, выбранных в окне.
@@ -78,6 +98,18 @@ private:
     void show(const Pick& pick, Inspector& inspector);
     // «John Miller идёт мстить Peter Green — 120 м, ~2 мин».
     std::string omenLine(const Foresight& omen) const;
+    // Учёт эпизодов: кого показывают сейчас и когда показывали каждого.
+    void trackEpisode();
+    // Раздел «Главные герои» в окне; щелчок по герою — к нему.
+    void drawCast(Inspector& inspector);
+    // Строки о герое сериала в подписи: эпизод, «возвращаемся», дебют.
+    void drawHeroCaption(EntityId hero, Inspector& inspector);
+
+    // Эпизоды главного героя (реальные секунды, только для режиссёра).
+    struct Episodes {
+        int count = 0;          // сколько раз камера возвращалась к нему
+        float lastSeen = 0.0f;  // когда показывали в последний раз (clock_)
+    };
 
     const World& world_;
     StoryTracker stories_;
@@ -94,6 +126,12 @@ private:
     float simRate_ = 1.0f;
     std::uint64_t lastTick_ = 0;
     std::uint32_t opened_ = 0;   // линия, открытая в окне
+    CastTracker cast_;           // главные герои (12а.3)
+    std::unordered_map<EntityId, Episodes> episodes_; // только поиск
+    float clock_ = 0.0f;               // реальные секунды с запуска режиссёра
+    EntityId episodeHero_ = kInvalidId; // чей эпизод идёт
+    float episodeStart_ = 0.0f;
+    float returnedAfter_ = 0.0f;  // сколько его не показывали до этого эпизода
 };
 
 } // namespace ui

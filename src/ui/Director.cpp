@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <iterator>
 #include <limits>
+#include <span>
 #include <string>
 #include <unordered_map>
 #include <utility>
@@ -48,6 +49,28 @@ constexpr float kStillRate = 0.05f;
 constexpr float kRateSmoothing = 2.0f;
 // Сколько предвестий в окне.
 constexpr std::size_t kOmensListed = 8;
+// Главные герои (12а.3). Линия или предвестие с героем сериала интереснее в
+// (1 + kHeroBonus + kMissedBonus × «соскучились»); соскучились — когда героя не
+// показывали дольше kMissedAfter реальных секунд, полностью — ещё через kMissedRamp.
+constexpr float kHeroBonus = 0.5f;
+constexpr float kMissedBonus = 0.6f;
+constexpr float kMissedAfter = 60.0f;
+constexpr float kMissedRamp = 120.0f;
+// Навестить героя в затишье: от kVisit (видели только что) до
+// kVisit × (1 + kVisitMissed) — живая линия всегда интереснее.
+constexpr float kVisit = 0.08f;
+constexpr float kVisitMissed = 2.0f;
+// Перерыв, после которого показ того же героя — новый эпизод.
+constexpr float kEpisodeGap = 30.0f;
+// Сколько секунд в подписи «возвращаемся» и «новый герой».
+constexpr float kEpisodeTitle = 12.0f;
+
+const char* heroStatusTitle(HeroStatus status) {
+    constexpr const char* kNames[] = {"в сериале", "погиб", "обратился", "ушёл со сцены"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(HeroStatus::Count));
+    const auto index = static_cast<std::size_t>(status);
+    return index < std::size(kNames) ? kNames[index] : "?";
+}
 
 const char* omenTitle(ForesightKind kind) {
     constexpr const char* kNames[] = {"Месть", "Орда", "Обращение", "Гонка за грузом", "Кража"};
@@ -132,6 +155,9 @@ bool Director::Pick::same(const Pick& other) const {
     if (story != 0 || other.story != 0) {
         return story == other.story;
     }
+    if (visit != kInvalidId || other.visit != kInvalidId) {
+        return visit == other.visit;
+    }
     return hasOmen && other.hasOmen && omen.same(other.omen);
 }
 
@@ -155,6 +181,61 @@ EntityId Director::targetOf(const Story& story) const {
         }
     }
     return kInvalidId;
+}
+
+EntityId Director::protagonistOf(const Pick& pick) const {
+    if (pick.visit != kInvalidId) {
+        return pick.visit;
+    }
+    if (cast_.isHero(pick.target)) {
+        return pick.target;
+    }
+    if (const Story* story = stories_.find(pick.story)) {
+        for (const EntityId id : {story->hero, story->other}) {
+            if (cast_.isHero(id)) {
+                return id;
+            }
+        }
+        for (const EntityId id : story->cast) {
+            if (cast_.isHero(id)) {
+                return id;
+            }
+        }
+    }
+    if (pick.hasOmen) {
+        for (const EntityId id : {pick.omen.hero, pick.omen.other}) {
+            if (cast_.isHero(id)) {
+                return id;
+            }
+        }
+    }
+    return kInvalidId;
+}
+
+float Director::missed(EntityId hero) const {
+    const auto it = episodes_.find(hero);
+    if (it == episodes_.end()) {
+        return 1.0f; // ни разу не показывали
+    }
+    const float absence = clock_ - it->second.lastSeen;
+    return std::clamp((absence - kMissedAfter) / kMissedRamp, 0.0f, 1.0f);
+}
+
+void Director::rate(Pick& pick) const {
+    // Линия без предвестия: если герой сериала в ней герой или противник —
+    // камера на нём.
+    if (const Story* story = stories_.find(pick.story);
+        story != nullptr && !pick.hasOmen && !cast_.isHero(pick.target)) {
+        for (const EntityId id : {story->hero, story->other}) {
+            if (cast_.isHero(id) && exists(id)) {
+                pick.target = id;
+                break;
+            }
+        }
+    }
+    if (const EntityId hero = protagonistOf(pick); hero != kInvalidId) {
+        pick.interest *= 1.0f + kHeroBonus + kMissedBonus * missed(hero);
+    }
 }
 
 std::vector<Director::Pick> Director::candidates() const {
@@ -190,6 +271,21 @@ std::vector<Director::Pick> Director::candidates() const {
             picks.push_back(pick);
         }
     }
+    for (Pick& pick : picks) {
+        rate(pick);
+    }
+    // Главные герои без линии и предвестия — навестить (12а.3).
+    for (const Protagonist& hero : cast_.heroes()) {
+        if (!hero.alive() || !exists(hero.id) ||
+            std::any_of(picks.begin(), picks.end(),
+                        [&](const Pick& pick) { return protagonistOf(pick) == hero.id; })) {
+            continue;
+        }
+        Pick& pick = picks.emplace_back();
+        pick.visit = hero.id;
+        pick.target = hero.id;
+        pick.interest = kVisit * (1.0f + kVisitMissed * missed(hero.id));
+    }
     std::stable_sort(picks.begin(), picks.end(),
                      [](const Pick& a, const Pick& b) { return a.interest > b.interest; });
     return picks;
@@ -220,8 +316,26 @@ void Director::show(const Pick& pick, Inspector& inspector) {
     inspector.setFollow(true);
 }
 
+void Director::trackEpisode() {
+    if (!enabled_ || !cast_.isHero(shown_)) {
+        episodeHero_ = kInvalidId;
+        return;
+    }
+    Episodes& episodes = episodes_[shown_];
+    const bool fresh = episodes.count == 0;
+    if (shown_ != episodeHero_ || clock_ - episodes.lastSeen > kEpisodeGap) {
+        ++episodes.count; // новый эпизод: к герою вернулись
+        returnedAfter_ = fresh ? 0.0f : clock_ - episodes.lastSeen;
+        episodeStart_ = clock_;
+        episodeHero_ = shown_;
+    }
+    episodes.lastSeen = clock_;
+}
+
 void Director::update(Inspector& inspector, float dt) {
     stories_.update(world_);
+    cast_.update(world_);
+    clock_ += dt;
     // Скорость времени — по тому, сколько тиков прошло за кадр.
     const std::uint64_t tick = world_.tick();
     if (dt > 0.0f) {
@@ -244,6 +358,7 @@ void Director::update(Inspector& inspector, float dt) {
         return;
     }
     held_ += dt;
+    trackEpisode();
     if (!refresh) {
         return;
     }
@@ -261,6 +376,20 @@ void Director::update(Inspector& inspector, float dt) {
         current_ = *found;
         if (retarget) {
             show(current_, inspector); // сменился герой: новый вожак, первый у груза
+        }
+        currentInterest = current_.interest;
+        currentUrgent = urgent(current_);
+    } else if (const auto adopted = std::find_if(picks.begin(), picks.end(),
+                                                 [this](const Pick& pick) {
+                                                     return current_.visit != kInvalidId &&
+                                                            protagonistOf(pick) == current_.visit;
+                                                 });
+               adopted != picks.end()) {
+        // Навещали героя — а у него началась линия: остаёмся с ним.
+        const bool retarget = adopted->target != current_.target;
+        current_ = *adopted;
+        if (retarget) {
+            show(current_, inspector);
         }
         currentInterest = current_.interest;
         currentUrgent = urgent(current_);
@@ -376,6 +505,7 @@ Director::Pick Director::pickOf(const Story& story) const {
             break;
         }
     }
+    rate(pick);
     return pick;
 }
 
@@ -388,6 +518,7 @@ Director::Pick Director::pickOf(const Foresight& omen) const {
     pick.omen = omen;
     pick.target = exists(omen.hero) ? omen.hero : kInvalidId;
     pick.interest = omen.interest;
+    rate(pick);
     return pick;
 }
 
@@ -396,7 +527,7 @@ void Director::drawPanel(Inspector& inspector) {
     // Слева посередине: слева вверху и внизу — время, внизу по центру — летопись,
     // справа — статистика и инспектор.
     ImGui::SetNextWindowPos({12.0f, display.y * 0.3f}, ImGuiCond_FirstUseEver);
-    ImGui::SetNextWindowSize({460.0f, 420.0f}, ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowSize({460.0f, 500.0f}, ImGuiCond_FirstUseEver);
     if (!ImGui::Begin("Режиссёр###director")) {
         ImGui::End();
         return;
@@ -420,6 +551,7 @@ void Director::drawPanel(Inspector& inspector) {
     std::stable_sort(listed.begin(), listed.end(),
                      [](const auto& a, const auto& b) { return a.first > b.first; });
     ImGui::TextDisabled("линий: %zu, идут: %zu; вот-вот: %zu", all.size(), active, omens_.size());
+    drawCast(inspector);
 
     EntityId clicked = kInvalidId;
     // Что вот-вот случится (12а.2): самые интересные предвестия.
@@ -517,7 +649,21 @@ void Director::drawCaption(Inspector& inspector) {
                                         ImGuiWindowFlags_NoSavedSettings |
                                         ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav;
     if (ImGui::Begin("###director-caption", nullptr, kFlags)) {
-        if (story != nullptr) {
+        if (const EntityId hero = protagonistOf(current_); hero != kInvalidId) {
+            drawHeroCaption(hero, inspector);
+        }
+        if (current_.visit != kInvalidId) {
+            // Навещаем героя: что было с ним последним.
+            const std::span<const std::uint32_t> biography =
+                world_.chronicle().eventsOf(current_.visit);
+            if (!biography.empty()) {
+                const ChronicleEvent& last = world_.chronicle().events()[biography.back()];
+                if (const EntityId id = drawChronicleEvent(last, kInvalidId); id != kInvalidId) {
+                    enabled_ = false;
+                    inspector.select(id);
+                }
+            }
+        } else if (story != nullptr) {
             ImGui::TextUnformatted(titleOf(*story).c_str());
             ImGui::TextDisabled("%s", stateLine(*story).c_str());
         } else {
@@ -541,6 +687,99 @@ void Director::drawCaption(Inspector& inspector) {
         }
     }
     ImGui::End();
+}
+
+void Director::drawHeroCaption(EntityId hero, Inspector& inspector) {
+    const Protagonist* protagonist = cast_.find(hero);
+    if (protagonist == nullptr) {
+        return;
+    }
+    const auto it = episodes_.find(hero);
+    const int episode = it != episodes_.end() ? it->second.count : 0;
+    const bool opening = hero == episodeHero_ && clock_ - episodeStart_ < kEpisodeTitle;
+    const ImVec4 gold{1.0f, 0.82f, 0.35f, 1.0f};
+    if (opening && episode == 1) {
+        // Дебют: кто это и как связан с уже знакомыми.
+        if (protagonist->introducedBy == kInvalidId) {
+            ImGui::TextColored(gold, "Новый герой: %s", idLabel(hero).c_str());
+            return;
+        }
+        ImGui::TextColored(gold, "Новый герой: %s — связан с %s", idLabel(hero).c_str(),
+                           idLabel(protagonist->introducedBy).c_str());
+        if (protagonist->via != Protagonist::kNoEvent) {
+            const ChronicleEvent& event = world_.chronicle().events()[protagonist->via];
+            if (const EntityId id = drawChronicleEvent(event, kInvalidId); id != kInvalidId) {
+                enabled_ = false;
+                inspector.select(id);
+            }
+        }
+        return;
+    }
+    if (episode > 0 && hero == episodeHero_) {
+        ImGui::TextColored(gold, "%s — главный герой, эпизод %d", idLabel(hero).c_str(), episode);
+    } else {
+        ImGui::TextColored(gold, "%s — главный герой", idLabel(hero).c_str());
+    }
+    if (opening && returnedAfter_ >= kMissedAfter) {
+        ImGui::TextDisabled("возвращаемся к герою спустя %.0f мин", returnedAfter_ / 60.0f);
+    }
+}
+
+void Director::drawCast(Inspector& inspector) {
+    const std::vector<Protagonist>& heroes = cast_.heroes();
+    char header[96];
+    std::snprintf(header, sizeof(header), "Главные герои: %zu из %zu###cast", cast_.living(),
+                  CastTracker::kRoster);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return;
+    }
+    if (heroes.empty()) {
+        ImGui::TextDisabled("пока никого: героев делают события");
+        return;
+    }
+    EntityId clicked = kInvalidId;
+    // Сначала живые, потом выбывшие — и те и другие по порядку вхождения.
+    for (const bool living : {true, false}) {
+        for (const Protagonist& hero : heroes) {
+            if (hero.alive() != living) {
+                continue;
+            }
+            ImGui::PushID(static_cast<int>(hero.id));
+            const auto it = episodes_.find(hero.id);
+            const int episodes = it != episodes_.end() ? it->second.count : 0;
+            std::string label = (living ? "* " : "  ") + idLabel(hero.id);
+            if (!living) {
+                label += std::string(" — ") + heroStatusTitle(hero.status);
+                ImGui::PushStyleColor(ImGuiCol_Text, ImGui::GetStyleColorVec4(ImGuiCol_TextDisabled));
+            }
+            const bool watched = enabled_ && hero.id == episodeHero_;
+            if (ImGui::Selectable(label.c_str(), watched)) {
+                if (living && enabled_) {
+                    Pick pick;
+                    pick.visit = hero.id;
+                    pick.target = hero.id;
+                    pick.interest = kVisit;
+                    show(pick, inspector); // режиссёр продолжает с этого героя
+                } else {
+                    clicked = hero.id;
+                }
+            }
+            if (!living) {
+                ImGui::PopStyleColor();
+            }
+            if (hero.introducedBy != kInvalidId && ImGui::IsItemHovered()) {
+                ImGui::SetTooltip("введён через %s", idLabel(hero.introducedBy).c_str());
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("биография %.0f, линий %zu, эпизодов %d", cast_.weight(hero.id),
+                                stories_.storiesOf(hero.id).size(), episodes);
+            ImGui::PopID();
+        }
+    }
+    if (clicked != kInvalidId) {
+        enabled_ = false; // пользователь выбрал своё
+        inspector.select(clicked);
+    }
 }
 
 } // namespace lw::ui

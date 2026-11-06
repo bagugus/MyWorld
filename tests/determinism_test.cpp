@@ -8,6 +8,7 @@
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/Calendar.h"
+#include "sim/Cast.h"
 #include "sim/Chronicle.h"
 #include "sim/Climate.h"
 #include "sim/Death.h"
@@ -6277,6 +6278,76 @@ void testForesight() {
 
 } // namespace
 
+// Главные герои (этап 12а.3): первые двое входят в состав по весу биографии,
+// дальше — только через связь с уже знакомым героем; погибший и обратившийся
+// выбывают, а опустевшее ядро снова пополняется. Итог не зависит от того, как
+// часто звать update.
+void testCast() {
+    using K = lw::ChronicleKind;
+    constexpr std::uint64_t kHour = lw::kTicksPerGameHour;
+    lw::Chronicle chronicle;
+    std::uint32_t stoleIndex = 0;
+    const auto add = [&chronicle](std::uint64_t tick, K kind, lw::EntityId subject,
+                                  lw::EntityId object = lw::kInvalidId, std::int32_t a = 0,
+                                  lw::EntityId third = lw::kInvalidId) {
+        chronicle.add({tick, kind, subject, object, a, 0, third});
+        return static_cast<std::uint32_t>(chronicle.events().size() - 1);
+    };
+    for (const lw::EntityId id : {10, 20, 30, 40, 50}) {
+        add(0, K::Settled, id, 500 + id);
+    }
+    add(10, K::GroupFormed, 10, 900);    // 10 — самый яркий
+    add(20, K::Avenged, 10, 99, 1);      // 99 — не человек: веса ему нет
+    add(30, K::Bitten, 30, 98);
+    add(40, K::Feverish, 30);
+    add(50, K::Stole, 30, 540, 0, 40);   // 30 обокрал дом 40
+    add(kHour * 5 / 2, K::GroupFormed, 50, 901); // 50 ярок, но ни с кем из героев не связан
+    add(kHour * 5 / 2 + 1, K::Deserted, 50, 901, 3, 51);
+    stoleIndex = add(3 * kHour, K::Stole, 20, 510, 0, 10); // 20 обокрал дом героя 10
+    add(3 * kHour + 1, K::Bitten, 20, 98);
+    add(5 * kHour, K::Died, 10, 99);
+    add(5 * kHour + 1, K::Died, 30, 98);
+    add(5 * kHour + 2, K::Turned, 30);
+
+    constexpr std::uint64_t kEnd = 10 * kHour;
+    lw::CastTracker cast;
+    cast.update(chronicle, kEnd);
+    const std::vector<lw::Protagonist>& heroes = cast.heroes();
+    CHECK(heroes.size() == 4);
+    if (heroes.size() != 4) {
+        return;
+    }
+    CHECK(heroes[0].id == 10 && heroes[0].since == kHour && heroes[0].introducedBy == lw::kInvalidId);
+    CHECK(heroes[1].id == 30 && heroes[1].since == 2 * kHour);
+    // Сложившийся сериал: 50 не связан с героями — ждёт; 20 входит через 10.
+    CHECK(heroes[2].id == 20 && heroes[2].since == 4 * kHour);
+    CHECK(heroes[2].introducedBy == 10 && heroes[2].via == stoleIndex);
+    CHECK(heroes[0].status == lw::HeroStatus::Dead && heroes[0].ended == 5 * kHour);
+    CHECK(heroes[1].status == lw::HeroStatus::Turned);
+    // Живых героев меньше двух — 50 входит и без связи.
+    CHECK(heroes[3].id == 50 && heroes[3].since == 6 * kHour &&
+          heroes[3].introducedBy == lw::kInvalidId);
+    CHECK(cast.living() == 2 && cast.isHero(20) && cast.isHero(50) && !cast.isHero(10));
+    CHECK(cast.weight(99) == 0.0f && cast.link(20, 10) > 0.0f);
+
+    // То же, если звать update после каждого кусочка летописи.
+    lw::Chronicle partial;
+    lw::CastTracker step;
+    std::size_t next = 0;
+    for (std::uint64_t now = 0; now <= kEnd; now += 700) {
+        while (next < chronicle.events().size() && chronicle.events()[next].tick < now) {
+            partial.add(chronicle.events()[next++]);
+        }
+        step.update(partial, now);
+    }
+    step.update(chronicle, kEnd);
+    CHECK(step.heroes().size() == heroes.size());
+    for (std::size_t i = 0; i < std::min(step.heroes().size(), heroes.size()); ++i) {
+        CHECK(step.heroes()[i].id == heroes[i].id && step.heroes()[i].since == heroes[i].since &&
+              step.heroes()[i].introducedBy == heroes[i].introducedBy);
+    }
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -6403,6 +6474,7 @@ int main() {
     testPoliceDefends();
     testStoryLines();
     testForesight();
+    testCast();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

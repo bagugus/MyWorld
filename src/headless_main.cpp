@@ -15,10 +15,12 @@
 //   lw_headless --seed 42 --phase collapse               сразу в фазу коллапса (этап 7.4)
 //   lw_headless --seed 42 --phase panic --stories        и сюжетные линии из летописи (этап 12а)
 //   lw_headless --seed 42 --phase panic --foresight      что предвиделось и сбылось ли (этап 12а.2)
+//   lw_headless --seed 42 --phase panic --cast           главные герои: кто, когда и через кого (этап 12а.3)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Events.h"
+#include "sim/Cast.h"
 #include "sim/Foresight.h"
 #include "sim/Names.h"
 #include "sim/Perception.h"
@@ -739,6 +741,47 @@ void printStories(const lw::World& world) {
     }
 }
 
+// Главные герои (этап 12а.3): состав по порядку вхождения — когда вошёл, через
+// кого и каким событием, вес биографии, линии и чем кончилось.
+void printCast(const lw::World& world) {
+    lw::CastTracker cast;
+    cast.update(world);
+    lw::StoryTracker tracker;
+    tracker.update(world);
+    const std::vector<lw::ChronicleEvent>& events = world.chronicle().events();
+    const auto when = [](std::uint64_t tick) {
+        const lw::CalendarTime time = lw::calendarAt(tick);
+        char text[32];
+        std::snprintf(text, sizeof(text), "day %d %02d:%02d", time.day, time.hour, time.minute);
+        return std::string(text);
+    };
+    std::printf("cast: %zu heroes, alive %zu\n", cast.heroes().size(), cast.living());
+    for (const lw::Protagonist& hero : cast.heroes()) {
+        std::printf("  %-28s since %s, weight %.1f, deeds %u, stories %zu, %s",
+                    label(world, hero.id).c_str(), when(hero.since).c_str(), cast.weight(hero.id),
+                    cast.deeds(hero.id), tracker.storiesOf(hero.id).size(),
+                    lw::heroStatusName(hero.status));
+        if (!hero.alive()) {
+            std::printf(" at %s", when(hero.ended).c_str());
+        }
+        std::printf("\n");
+        if (hero.introducedBy != lw::kInvalidId) {
+            std::printf("    via %s (link %.1f)", label(world, hero.introducedBy).c_str(),
+                        cast.link(hero.id, hero.introducedBy));
+            if (hero.via != lw::Protagonist::kNoEvent) {
+                const lw::ChronicleEvent& event = events[hero.via];
+                std::printf(": %s %s %s -> %s", when(event.tick).c_str(),
+                            lw::chronicleKindName(event.kind), label(world, event.subject).c_str(),
+                            label(world, event.object).c_str());
+                if (event.third != lw::kInvalidId) {
+                    std::printf(" third=%s", label(world, event.third).c_str());
+                }
+            }
+            std::printf("\n");
+        }
+    }
+}
+
 // Предвкушение (этап 12а.2): предвестия, замеченные по ходу прогона (раз в
 // игровую минуту), — сбылись ли и насколько заранее их было видно.
 class ForesightLog {
@@ -1296,6 +1339,7 @@ int main(int argc, char** argv) {
     bool eventLog = false;
     bool storyLog = false;
     bool foresightLog = false;
+    bool castLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1327,6 +1371,8 @@ int main(int argc, char** argv) {
             storyLog = true;
         } else if (std::strcmp(argv[i], "--foresight") == 0) {
             foresightLog = true;
+        } else if (std::strcmp(argv[i], "--cast") == 0) {
+            castLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
             config.events = true;
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
@@ -1352,7 +1398,7 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--stories] [--foresight] [--profile]\n");
+                        "[--stories] [--foresight] [--cast] [--profile]\n");
             return 2;
         }
     }
@@ -1430,6 +1476,9 @@ int main(int argc, char** argv) {
     }
     if (foresightLog) {
         foresight.print(world);
+    }
+    if (castLog) {
+        printCast(world);
     }
     if (elapsed.count() > 0.0) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),

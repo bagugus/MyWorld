@@ -33,6 +33,8 @@ endif()
 add_library(lw_sim STATIC
     src/sim/Calendar.cpp
     src/sim/Calendar.h
+    src/sim/Cast.cpp
+    src/sim/Cast.h
     src/sim/Chronicle.cpp
     src/sim/Chronicle.h
     src/sim/Climate.cpp
