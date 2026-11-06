@@ -1181,8 +1181,20 @@ void Showrunner::startScene(const ShowInput& in, const StoryPick& pick, ShowOrde
     }
     scene_.wasAlive = isPersonAlive(world, pick.target);
     orders.show = pick;
-    setPhase(ShowPhase::Intro);
-    curtainTarget_ = 1.0f;
+    // Вводная карточка на чёрном — только с титром времени, в начале эпизода или
+    // после значимого затемнения в незнакомом месте. Иначе — смена кадра: новое
+    // место общим планом с подписью внизу, знакомое — сразу сцена.
+    const bool black = curtain_ >= 0.999f;
+    const bool card = !jumpText_.empty() || scenes_ == 0 || (black && lastMattered_ && !scene_.familiar);
+    if (card) {
+        setPhase(ShowPhase::Intro);
+        curtainTarget_ = 1.0f;
+    } else {
+        setPhase(ShowPhase::Intro); // establishing() смотрит на фазу
+        const bool wide = establishing();
+        setPhase(wide ? ShowPhase::Establishing : ShowPhase::Scene);
+        curtainTarget_ = 0.0f;
+    }
     sceneStarted(in, pick);
     ++scenes_;
     last_ = pick;
@@ -1244,7 +1256,9 @@ void Showrunner::startJump(const ShowInput& in, ShowOrders& orders) {
     jumpStart_ = in.world->tick();
     jumpReal_ = 0.0f;
     jumpCursor_ = in.world->chronicle().events().size();
-    orders.skip = jumpChunk(in);
+    wokeMatters_ = false;
+    // Мотать — только под чёрным кадром: после простой склейки он ещё гаснет.
+    orders.skip = hidden() ? jumpChunk(in) : 0;
 }
 
 std::uint64_t Showrunner::jumpChunk(const ShowInput& in) const {
@@ -1271,11 +1285,13 @@ bool Showrunner::wake(const ShowInput& in) {
         }
     }
     jumpCursor_ = events.size();
+    wokeMatters_ = woke;
     if (woke) {
         return true;
     }
     for (const StoryPick& pick : *in.picks) {
         if (pick.hasOmen && pick.omen.eta <= kWakeEta && involves(in, pick, true)) {
+            wokeMatters_ = true;
             return true; // вот-вот кульминация у знакомых
         }
     }
@@ -1294,8 +1310,12 @@ void Showrunner::endScene(const ShowInput& in, bool hurry) {
     jumpedIdle_ = false;
     fadeHurry_ = hurry;
     next_ = Next::Choose;
+    // Затемнение — только после значимого: кульминация, гибель, ответ на вопрос
+    // сюжетной сцены. Остальное — простая смена кадра, без чёрного.
+    lastMattered_ = scene_.sawClimax || scene_.deadFor > 0.0f || (in.lost && scene_.pick.hasOmen);
+    softEnd_ = !lastMattered_ && !breatherDue_;
     setPhase(ShowPhase::FadeOut);
-    curtainTarget_ = 1.0f;
+    curtainTarget_ = softEnd_ ? curtain_ : 1.0f;
 }
 
 void Showrunner::startCliffhanger(const ShowInput& in, ShowOrders& orders) {
@@ -1983,7 +2003,7 @@ bool Showrunner::returnTo(const ShowInput& in, std::size_t index, ShowOrders& or
     if (pick.target == kInvalidId || world.find(pick.target) == entt::null) {
         return false;
     }
-    if (jumpText_.empty() && world.tick() - std::min(world.tick(), wait.since) >= kReturnTitleAfter) {
+    if (jumpText_.empty() && lastMattered_ && world.tick() - std::min(world.tick(), wait.since) >= kReturnTitleAfter) {
         jumpText_ = jumpPhrase(wait.since, world.tick());
     }
     startScene(in, pick, orders, false, true);
@@ -2448,7 +2468,8 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
         break;
     }
     case ShowPhase::FadeOut:
-        if (curtain_ >= 1.0f) {
+        if (curtain_ >= 1.0f || (softEnd_ && next_ == Next::Choose)) {
+            softEnd_ = false;
             if (next_ == Next::Closing) {
                 // Конец эпизода: «ранее в сериях» для следующего — итоги сцен и клиффхэнгер.
                 recap_.clear();
@@ -2473,6 +2494,9 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
         }
         break;
     case ShowPhase::Jump: {
+        if (!hidden()) {
+            break; // кадр ещё гаснет: ускорения зритель видеть не должен
+        }
         jumpReal_ += dt;
         jumpChainReal_ += dt;
         if (in.skipping) {
@@ -2481,9 +2505,15 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
         const std::uint64_t elapsed = world.tick() - std::min(world.tick(), jumpStart_);
         // Будит развязка отложенной сцены (камера успевает к ней заранее) или
         // то, что назрело у героев.
-        const bool woke = dueWait(in) >= 0 || wake(in);
+        const bool due = dueWait(in) >= 0;
+        const bool woke = due || wake(in);
         if (woke || elapsed >= kJumpMax || jumpReal_ >= kJumpReal || jumpChainReal_ >= kJumpChainReal || in.paused) {
-            jumpText_ = jumpPhrase(jumpFrom_, world.tick());
+            // «Три часа спустя» — только между значимыми событиями: прошлая сцена
+            // чем-то кончилась, и разбудило важное (событие у знакомых, развязка,
+            // вот-вот кульминация). Иначе — молча, просто следующий кадр.
+            const bool matters = lastMattered_ && (due || wokeMatters_) &&
+                                 world.tick() - std::min(world.tick(), jumpFrom_) >= kTicksPerGameHour;
+            jumpText_ = matters ? jumpPhrase(jumpFrom_, world.tick()) : std::string();
             jumpedIdle_ = !woke;
             TraceLog(LOG_INFO, "SERIES: скачок на %llu тиков за %.2f с (с начала склейки %llu за %.2f с)%s",
                      static_cast<unsigned long long>(elapsed), jumpReal_,
