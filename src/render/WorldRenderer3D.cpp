@@ -810,7 +810,7 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
                 continue;
             }
             at = {placed->x, placed->z};
-            velocity = {0.0f, 0.0f};
+            velocity = {placed->vx, placed->vz}; // идёт к новому месту — шаг, иначе стоит
         }
         // Поза и движение — по занятию (render/Animator); тела падают, зомби встают.
         const Figure& figure = animator_.animate(world, entity, id, at.x, at.y, velocity.x, velocity.y, placed);

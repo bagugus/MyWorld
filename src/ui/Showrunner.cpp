@@ -132,8 +132,13 @@ constexpr std::uint64_t kReturnTitleAfter = 30 * kTicksPerGameMinute;
 // kIntroFamiliar секунд и без установочного плана.
 constexpr float kPlaceKnown = 240.0f;
 constexpr float kIntroFamiliar = 1.6f;
-// Выдохшуюся сцену помнят столько тиков.
-constexpr std::uint64_t kStaleFor = 3 * kTicksPerGameHour;
+// Выдохшуюся сцену помнят столько реальных секунд: по времени зрителя, а не
+// мира — скачок проматывает часы за секунду, а «опять то же самое» зритель
+// видит всё равно.
+constexpr float kStaleReal = 300.0f;
+// Быт дома (отдыхают, едят, спят, болтают) снова — не раньше, чем через столько
+// реальных секунд, если там с тех пор ничего не случилось.
+constexpr float kHomeRepeat = 420.0f;
 // Двое ближе этого (метры) — средний план (как у режиссёра).
 constexpr float kNearPair = 250.0f;
 constexpr float kEstablish = 4.0f;
@@ -753,6 +758,9 @@ float Showrunner::score(const ShowInput& in, const StoryPick& pick) const {
     if (stale(in, pick)) {
         return 0.0f; // выдохлась, и ничего не изменилось
     }
+    if (!ripe && homeSeen(in, pick)) {
+        return 0.0f; // этот дом и его быт зритель уже видел — ничего нового
+    }
     if (pick.hasOmen && !ripe &&
         std::any_of(established_.begin(), established_.end(),
                     [&](const Foresight& omen) { return omen.same(pick.omen); })) {
@@ -1122,7 +1130,7 @@ StoryPick Showrunner::visitPick(const ShowInput& in) const {
         StoryPick candidate;
         candidate.visit = candidate.target = candidate.hero = id;
         candidate.interest = kSceneDull;
-        if (repeats(in, candidate) || stale(in, candidate)) {
+        if (repeats(in, candidate) || stale(in, candidate) || homeSeen(in, candidate)) {
             continue;
         }
         const auto it = lastShown_.find(id);
@@ -1469,6 +1477,7 @@ const char* Showrunner::waitTitle(WaitKind kind) {
 }
 
 void Showrunner::sceneStarted(const ShowInput& in, const StoryPick& pick) {
+    markHome(in, pick.target);
     lastKey_ = keyOf(in, pick);
     hasLastKey_ = pick.valid() && lastKey_.place != 0;
     lastInterlude_ = false;
@@ -1682,6 +1691,13 @@ Showrunner::ShotKey Showrunner::keyOf(const ShowInput& in, const StoryPick& pick
     if (person != nullptr) {
         const auto* mind = registry.try_get<Mind>(entity);
         key.doing = person->asleep ? 50 : mind != nullptr ? static_cast<int>(mind->action) : 0;
+        if (person->indoors && (mind == nullptr || (mind->action != Action::Fight && mind->action != Action::Flee))) {
+            // Дома всё — один быт: отдыхает, ест, спит, болтает с домашними —
+            // для зрителя та же сцена «они дома».
+            key.doing = 60;
+            key.size = ShotSize::Medium;
+            return key;
+        }
     } else if (registry.all_of<Corpse>(entity)) {
         key.doing = 100;
     } else if (registry.all_of<Zombie>(entity)) {
@@ -1694,14 +1710,13 @@ Showrunner::ShotKey Showrunner::keyOf(const ShowInput& in, const StoryPick& pick
 }
 
 bool Showrunner::stale(const ShowInput& in, const StoryPick& pick) const {
-    const std::uint64_t now = in.world->tick();
     for (const Stale& entry : stale_) {
         // Навещание и линия того же человека — одна сцена (режиссёр подхватывает
         // линию навещаемого героя).
         const bool match = entry.pick.same(pick) ||
                            ((pick.visit != kInvalidId || entry.pick.visit != kInvalidId) &&
                             entry.pick.target == pick.target);
-        if (!match || now - std::min(now, entry.tick) > kStaleFor) {
+        if (!match || clock_ - entry.clock > kStaleReal) {
             continue;
         }
         const Story* story = in.stories->find(pick.story);
@@ -1722,6 +1737,59 @@ bool Showrunner::repeats(const ShowInput& in, const StoryPick& pick) const {
     }
     const ShotKey key = keyOf(in, pick);
     return key.place != 0 && key == lastKey_;
+}
+
+EntityId Showrunner::homeOf(const World& world, EntityId id) const {
+    const entt::entity entity = id != kInvalidId ? world.find(id) : entt::null;
+    const auto* person = entity != entt::null ? world.registry().try_get<Person>(entity) : nullptr;
+    if (person == nullptr || !person->indoors || person->home == kInvalidId) {
+        return kInvalidId;
+    }
+    if (const auto* mind = world.registry().try_get<Mind>(entity);
+        mind != nullptr && (mind->action == Action::Fight || mind->action == Action::Flee)) {
+        return kInvalidId; // дома драка — это не быт
+    }
+    return person->home;
+}
+
+bool Showrunner::homeSeen(const World& world, EntityId home, EntityId who) const {
+    const auto it = homes_.find(home);
+    if (it == homes_.end() || clock_ - it->second.clock > kHomeRepeat) {
+        return false;
+    }
+    // С тем, о ком кадр, с тех пор случилось важное — дом снова интересен.
+    const Chronicle& chronicle = world.chronicle();
+    const auto own = chronicle.eventsOf(who);
+    for (auto index = own.rbegin(); index != own.rend(); ++index) {
+        const ChronicleEvent& event = chronicle.events()[*index];
+        if (event.tick <= it->second.tick) {
+            break;
+        }
+        if (chronicleWeight(event, who) >= kWakeWeight) {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Showrunner::homeSeen(const ShowInput& in, const StoryPick& pick) const {
+    const EntityId home = homeOf(*in.world, pick.target);
+    if (home == kInvalidId) {
+        return false;
+    }
+    if (const Story* story = in.stories->find(pick.story); story != nullptr) {
+        const auto it = homes_.find(home);
+        if (it != homes_.end() && story->updated > it->second.tick) {
+            return false; // в линии случилось новое
+        }
+    }
+    return homeSeen(*in.world, home, pick.target);
+}
+
+void Showrunner::markHome(const ShowInput& in, EntityId id) {
+    if (const EntityId home = homeOf(*in.world, id); home != kInvalidId) {
+        homes_[home] = {clock_, in.world->tick()};
+    }
 }
 
 float Showrunner::rateOf(const ShowInput& in) const {
@@ -2067,7 +2135,8 @@ bool Showrunner::familyMeal(const ShowInput& in, StoryPick& pick, std::string& t
     const Table* best = nullptr;
     for (const auto& [building, table] : tables) {
         if (table.people.size() < 2 || !table.eating || table.known == kInvalidId ||
-            std::any_of(meals_.begin(), meals_.end(), [&](const auto& meal) { return meal.first == building; })) {
+            std::any_of(meals_.begin(), meals_.end(), [&](const auto& meal) { return meal.first == building; }) ||
+            homeSeen(world, building, table.known)) {
             continue;
         }
         const bool better = best == nullptr || isHero(table.known) > isHero(best->known) ||
@@ -2480,6 +2549,7 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
             }
         }
         if (over) {
+            markHome(in, in.current.target); // быт этого дома досмотрели
             // Вопрос не решён (или за ответом — новый: тело встанет), а смотреть
             // нечего — отложить и вернуться к развязке.
             if (Wait wait; makeWait(in, wait)) {
@@ -2494,11 +2564,12 @@ ShowOrders Showrunner::update(const ShowInput& in, float dt) {
                 const std::uint64_t now = world.tick();
                 std::erase_if(stale_, [&](const Stale& entry) {
                     return entry.pick.same(in.current) || entry.pick.same(scene.pick) ||
-                           now - std::min(now, entry.tick) > kStaleFor;
+                           clock_ - entry.clock > kStaleReal;
                 });
-                stale_.push_back({in.current, keyOf(in, in.current), now});
+                stale_.push_back({in.current, keyOf(in, in.current), now, clock_});
                 if (scene.pick.valid() && !scene.pick.same(in.current)) {
-                    stale_.push_back({scene.pick, keyOf(in, scene.pick), now}); // навещали, а режиссёр взял линию
+                    // навещали, а режиссёр взял линию
+                    stale_.push_back({scene.pick, keyOf(in, scene.pick), now, clock_});
                 }
             }
             if (!hurry && episodeClock_ >= kEpisodeMin) {

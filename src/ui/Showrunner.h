@@ -149,6 +149,11 @@ public:
     ShowPhase phase() const { return phase_; }
     // Чёрный кадр поверх всего: 1 — чёрный, 0 — нет.
     float curtain() const { return curtain_; }
+    // Кадр гаснет в конце сцены: камера стоит, дом не открывают и не
+    // закрывают — что бы ни случилось, в затемнении ничего не двигается.
+    bool fading() const { return phase_ == ShowPhase::FadeOut && curtain_ < 1.0f; }
+    // Кадр закрыт чёрным целиком.
+    bool hidden() const { return curtain_ >= 0.999f; }
     // Сейчас нужен установочный план места сцены (и под вводным титром — чтобы
     // камера уже стояла там, когда кадр проявится).
     bool establishing() const;
@@ -227,6 +232,13 @@ private:
     struct Stale {
         StoryPick pick;
         ShotKey key;
+        std::uint64_t tick = 0;
+        float clock = 0.0f; // clock_, когда выдохлась: помнят по реальному времени —
+                            // скачок мотает часы за секунду, а зритель помнит
+    };
+    // Дом, который зритель уже видел изнутри (быт): когда и на каком тике.
+    struct HomeSeen {
+        float clock = 0.0f;
         std::uint64_t tick = 0;
     };
     // Отложенная сцена: к ней вернутся к развязке.
@@ -318,6 +330,14 @@ private:
     bool repeats(const ShowInput& in, const StoryPick& pick) const;
     // Сцена выдохлась и с тех пор в ней ничего не изменилось.
     bool stale(const ShowInput& in, const StoryPick& pick) const;
+    // Дом, где сейчас тот, о ком кадр (он дома); kInvalidId — не дома.
+    EntityId homeOf(const World& world, EntityId id) const;
+    // Быт этого дома зритель видел недавно, и с тех пор там ничего не
+    // случилось: показывать снова незачем (сколько бы часов ни прошло).
+    bool homeSeen(const ShowInput& in, const StoryPick& pick) const;
+    bool homeSeen(const World& world, EntityId home, EntityId who) const;
+    // Запомнить, что быт дома показан (на начало и на конец сцены).
+    void markHome(const ShowInput& in, EntityId id);
     // Секунд симуляции на реальную секунду сейчас.
     float rateOf(const ShowInput& in) const;
     // Отложить текущую сцену до развязки; false — ждать нечего.
@@ -398,6 +418,7 @@ private:
     // Без пустых моментов (12а.9).
     std::vector<Wait> waits_;            // отложенные сцены
     std::vector<Stale> stale_;           // выдохшиеся сцены
+    std::unordered_map<EntityId, HomeSeen> homes_; // дом → когда показывали быт в нём
     std::unordered_map<std::string, float> places_; // место → clock_, когда его показывали
     std::vector<Loss> losses_;           // недавние потери знакомых
     std::size_t lossCursor_ = 0;         // с какой записи летописи искать потери
