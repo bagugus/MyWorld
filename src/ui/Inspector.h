@@ -71,6 +71,10 @@ private:
     bool drawMemories(entt::entity entity);
     // Что человек знает об ивентах. false — щёлкнули по ссылке.
     bool drawLeads(entt::entity entity);
+    // Тревога: что человек знает о беде (этап 7.6). false — щёлкнули по ссылке.
+    bool drawAlarm(entt::entity entity);
+    // Уехал из края с колонной эвакуации (этап 7.6).
+    void drawEvacuated(entt::entity entity);
     void drawBuilding(entt::entity entity);
     void drawSettlement(entt::entity entity);
     // События летописи с участием выбранного; есть и у исчезнувших объектов.

@@ -25,6 +25,9 @@ constexpr ProfessionSpec kSpecs[] = {
     {BuildingKind::PoliceStation, 8 * kHour, 16 * kHour, 14 * kHour, 22 * kHour, 5, false, 7},
     {BuildingKind::School, 8 * kHour, 14 * kHour, 0, 0, 5, true, 6},                      // учитель
     {BuildingKind::School, 8 * kHour, 14 * kHour, 0, 0, 5, true, 0},                      // школьник
+    // Солдат (этап 7.6): пункт эвакуации — обычно школа; без выходных, днём —
+    // на посту, ночью спит там же. Жалованье платит армия, не край.
+    {BuildingKind::School, 6 * kHour, 22 * kHour, 0, 0, 7, false, 0},
 };
 static_assert(std::size(kSpecs) == static_cast<std::size_t>(Profession::Count));
 
@@ -137,6 +140,7 @@ bool isOnDuty(const World& world, entt::entity entity) {
     const bool working = mind->action == Action::Work;
     switch (job->profession) {
     case Profession::PoliceOfficer:
+    case Profession::Soldier: // на посту у пункта эвакуации (этап 7.6)
         return working;
     case Profession::Farmer:
         if (working && mind->phase == ActionPhase::Perform) {
@@ -162,7 +166,9 @@ bool policeNearby(const World& world, float x, float y, float radius) {
         .nearest(x, y, radius,
                  [&](const SpatialHit& hit) {
                      const auto* job = registry.try_get<Job>(hit.entity);
-                     return job != nullptr && job->profession == Profession::PoliceOfficer &&
+                     return job != nullptr &&
+                            (job->profession == Profession::PoliceOfficer ||
+                             job->profession == Profession::Soldier) &&
                             isOnDuty(world, hit.entity);
                  })
         .has_value();

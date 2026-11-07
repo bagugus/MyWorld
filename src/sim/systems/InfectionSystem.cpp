@@ -2,6 +2,7 @@
 
 #include "sim/Family.h"
 #include "sim/Infection.h"
+#include "sim/Society.h"
 #include "sim/Work.h"
 #include "sim/World.h"
 
@@ -91,6 +92,26 @@ InfectionRoute routeBetween(const World& world, const Source& source, entt::enti
     return InfectionRoute::Nearby;
 }
 
+// Осторожность встревоженного (этап 7.6): держится подальше, не трогает,
+// моет руки, больного дома кладут отдельно, врач — в маске и перчатках. Доля
+// частоты пути, которую снимает тревога 1 (alarmWorry), — по пути.
+float cautionOf(InfectionRoute route) {
+    switch (route) {
+    case InfectionRoute::Household:
+        return kHouseholdCaution;
+    case InfectionRoute::Care:
+        return kCareCaution;
+    case InfectionRoute::Contact:
+        return kContactCaution;
+    case InfectionRoute::Nearby:
+        return kNearbyCaution;
+    case InfectionRoute::Body:
+        return kBodyCaution;
+    default:
+        return 0.0f;
+    }
+}
+
 float rateOf(InfectionRoute route) {
     switch (route) {
     case InfectionRoute::Household:
@@ -146,7 +167,8 @@ void tickInfection(World& world) {
                 continue;
             }
             const InfectionRoute route = routeBetween(world, source, hit.entity, hit.id);
-            const float chance = rateOf(route) * source.shedding / 60.0f;
+            const float caution = 1.0f - cautionOf(route) * alarmWorry(alarmOf(registry, hit.entity));
+            const float chance = rateOf(route) * caution * source.shedding / 60.0f;
             if (chance > 0.0f && rng.chance(chance)) {
                 infect(world, hit.entity, route, source.id);
             }

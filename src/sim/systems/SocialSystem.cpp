@@ -4,6 +4,7 @@
 #include "sim/Events.h"
 #include "sim/Memory.h"
 #include "sim/Relations.h"
+#include "sim/Society.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -82,6 +83,7 @@ struct Told {
     float weight = 1.0f;           // в разговоре — 1, просто рядом — kNearShare
     bool news = false;
     Lead lead{};                   // весть об ивенте
+    float alarm = 0.0f;            // о беде (этап 7.6): до какого уровня поверит слушатель
 };
 
 // О ком teller скажет listener: самое сильное чувство (|симпатия| × знакомство)
@@ -233,6 +235,13 @@ void updateRelations(World& world, float minutes) {
             item.lead = *lead;
             told.push_back(item);
         }
+        // О беде (этап 7.6): кто знает — рассказывает всем, тем же порядком.
+        if (const float alarm = rumorTime ? alarmToShare(world, talk.tellerEntity, talk.listenerEntity) : 0.0f;
+            alarm > 0.0f) {
+            Told item{talk.listener, talk.teller, talk.listenerEntity};
+            item.alarm = alarm;
+            told.push_back(item);
+        }
         const Relations& tellers = registry.get<Relations>(talk.tellerEntity);
         const Relations& listeners = registry.get<Relations>(talk.listenerEntity);
         const EntityId subject = opinionSubject(world, tellers, talk.listener, listeners);
@@ -245,14 +254,18 @@ void updateRelations(World& world, float minutes) {
         }
     }
     // Услышанное — по слушателю и рассказчику (от одного рассказчика сначала
-    // слух, потом весть, потом мнение — так они и собраны): не зависит от
-    // порядка реестра.
+    // слух, потом весть, потом тревога, потом мнение — так они и собраны): не
+    // зависит от порядка реестра.
     std::stable_sort(told.begin(), told.end(), [](const Told& a, const Told& b) {
         return std::tie(a.listener, a.teller) < std::tie(b.listener, b.teller);
     });
     for (const Told& item : told) {
         if (item.rumor) {
             hearRumor(world, item.listenerEntity, item.teller, item.memory);
+            continue;
+        }
+        if (item.alarm > 0.0f) {
+            raiseAlarm(world, item.listenerEntity, item.alarm, AlarmClue::Told, item.teller);
             continue;
         }
         if (item.news) {

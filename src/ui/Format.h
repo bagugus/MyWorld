@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Components.h"
+#include "sim/Society.h"
 #include "sim/Id.h"
 
 #include <cstddef>
@@ -52,6 +53,11 @@ const char* eventKindName(EventKind kind);
 // Сценарий и фаза мира (этап 7.4): «зомби-вирус», «паника».
 const char* scenarioKindName(ScenarioKind kind);
 const char* phaseName(WorldPhase phase);
+// Реакция общества (этап 7.6): стадия тревоги «ходит странная болезнь»,
+// откуда узнал «видел зомби», официальное сообщение «эвакуация из городов».
+const char* alarmStageText(AlarmStage stage);
+const char* alarmClueText(AlarmClue clue);
+const char* broadcastText(BroadcastKind kind);
 // Предмет: «бинт», «патроны к винтовке».
 const char* itemName(ItemKind kind);
 // Строка «еда 3, вода 2, бинт 1» — непустые позиции инвентаря; «пусто».

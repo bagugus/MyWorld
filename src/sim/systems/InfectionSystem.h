@@ -18,6 +18,14 @@ inline constexpr float kCareRate = 0.35f;      // в больнице: осмо�
 inline constexpr float kContactRate = 0.25f;   // лицом к лицу: разговор, встреча, обмен
 inline constexpr float kNearbyRate = 0.04f;    // просто рядом: на работе, в магазине
 inline constexpr float kBodyRate = 0.3f;       // у тела: обыскивает, оплакивает
+// Осторожность (этап 7.6): какую долю частоты пути снимает тревога у того, кто
+// ещё здоров (alarmWorry — от 0 до «странной болезни» до 1 у ужаса). Дома
+// больного не бросишь, поэтому меньше всего.
+inline constexpr float kHouseholdCaution = 0.4f;
+inline constexpr float kCareCaution = 0.6f;
+inline constexpr float kContactCaution = 0.6f;
+inline constexpr float kNearbyCaution = 0.7f;
+inline constexpr float kBodyCaution = 0.6f;
 
 // Раз в игровую минуту: кто заразился рядом с больными и телами заражённых.
 // Порядок — по id заразных, рядом с каждым — по id; рандом — поток

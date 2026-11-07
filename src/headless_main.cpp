@@ -31,6 +31,7 @@
 #include "sim/Relations.h"
 #include "sim/Rng.h"
 #include "sim/Scenario.h"
+#include "sim/Society.h"
 #include "sim/Story.h"
 #include "sim/Work.h"
 #include "sim/World.h"
@@ -149,7 +150,7 @@ void printPeople(const lw::World& world) {
                                         "forage", "socialize", "wander", "go home", "flee",
                                         "fight",  "hunt",      "treat",  "share",   "trade",
                                         "steal",  "avenge",    "salvage", "work",
-                                        "buy",    "doctor"};
+                                        "buy",    "doctor",    "evacuate", "reunite"};
     static_assert(std::size(kActions) == static_cast<std::size_t>(lw::Action::Count));
     std::size_t actions[std::size(kActions)] = {};
     for (const auto [entity, mind] : registry.view<const lw::Mind>().each()) {
@@ -1385,10 +1386,119 @@ void printOutbreak(const lw::World& world, bool detailed) {
     }
 }
 
+// Реакция общества (этап 7.6): тревога по стадиям и как узнавали, передачи,
+// карантины, эвакуация, солдаты, «к своим». detailed — журнал по порядку.
+void printSociety(const lw::World& world, bool detailed) {
+    using K = lw::ChronicleKind;
+    const entt::registry& registry = world.registry();
+    if (lw::scenarioOf(world) == nullptr) {
+        return;
+    }
+    std::size_t stages[4] = {};
+    for (const auto [entity, person, alarm] : registry.view<const lw::Person, const lw::Alarm>().each()) {
+        ++stages[static_cast<std::size_t>(lw::alarmStage(alarm.level))];
+    }
+    constexpr auto kClues = static_cast<std::size_t>(lw::AlarmClue::Count);
+    std::size_t clues[kClues] = {};
+    std::size_t firstClue[kClues] = {};
+    std::unordered_map<lw::EntityId, bool> seen;
+    const lw::Chronicle& chronicle = world.chronicle();
+    int fetched = 0;
+    int movedIn = 0;
+    int expelledSick = 0;
+    int refused = 0;
+    int soldiersLeft = 0;
+    for (const lw::ChronicleEvent& event : chronicle.events()) {
+        if (event.kind == K::Alarmed) {
+            ++clues[static_cast<std::size_t>(event.b)];
+            if (!seen[event.subject]) {
+                seen[event.subject] = true;
+                ++firstClue[static_cast<std::size_t>(event.b)];
+            }
+        } else if (event.kind == K::Reunited) {
+            (event.b == 1 ? movedIn : fetched) += 1;
+        } else if (event.kind == K::Expelled && event.a == 1) {
+            ++expelledSick;
+        } else if (event.kind == K::EvacuationRefused) {
+            ++refused;
+        } else if (event.kind == K::Evacuated && event.a == 1) {
+            ++soldiersLeft;
+        }
+    }
+    constexpr const char* kClueNames[] = {"none", "fever", "sick", "body", "bitten", "zombie", "told", "broadcast"};
+    static_assert(std::size(kClueNames) == kClues);
+    const lw::ScenarioStats stats = lw::scenarioStats(world);
+    std::printf("society: alarm calm %zu, uneasy %zu, alarmed %zu, terrified %zu; first learned:", stages[0],
+                stages[1], stages[2], stages[3]);
+    for (std::size_t i = 1; i < kClues; ++i) {
+        std::printf(" %s %zu%s", kClueNames[i], firstClue[i], i + 1 < kClues ? "," : "");
+    }
+    std::printf("; stage rises:");
+    for (std::size_t i = 1; i < kClues; ++i) {
+        std::printf(" %s %zu%s", kClueNames[i], clues[i], i + 1 < kClues ? "," : "\n");
+    }
+    std::size_t quarantined = registry.view<const lw::Quarantine>().size();
+    std::printf("  quarantines declared %zu, lifted %zu, active %zu, broke cordon %zu; broadcasts %zu\n",
+                chronicle.countOf(K::QuarantineDeclared), chronicle.countOf(K::QuarantineLifted), quarantined,
+                chronicle.countOf(K::BrokeQuarantine), chronicle.countOf(K::Broadcast));
+    std::printf("  evacuation points %zu, convoys with people %zu, evacuated %d (refused %d), soldiers alive %d, "
+                "left with army %d, stayed %zu\n",
+                chronicle.countOf(K::EvacuationOpened), chronicle.countOf(K::ConvoyLeft), stats.evacuated, refused,
+                stats.soldiers, soldiersLeft, chronicle.countOf(K::StayedBehind));
+    std::printf("  reunited: fetched child %d, moved in with kin %d; expelled infected from groups %d\n", fetched,
+                movedIn, expelledSick);
+    if (!detailed) {
+        return;
+    }
+    std::printf("society log:\n");
+    for (const lw::ChronicleEvent& event : chronicle.events()) {
+        switch (event.kind) {
+        case K::Broadcast:
+        case K::QuarantineDeclared:
+        case K::QuarantineLifted:
+        case K::BrokeQuarantine:
+        case K::EvacuationOpened:
+        case K::Evacuated:
+        case K::EvacuationRefused:
+        case K::ConvoyLeft:
+        case K::EvacuationEnded:
+        case K::StayedBehind:
+        case K::Reunited:
+            break;
+        case K::Alarmed:
+            if (event.a < static_cast<int>(lw::AlarmStage::Alarmed)) {
+                continue; // «странная болезнь» — слишком много строк
+            }
+            break;
+        case K::Expelled:
+            if (event.a != 1) {
+                continue;
+            }
+            break;
+        default:
+            continue;
+        }
+        std::printf("  %s %-18s %s", dayTime(event.tick).c_str(), lw::chronicleKindName(event.kind),
+                    label(world, event.subject).c_str());
+        if (event.object != lw::kInvalidId) {
+            std::printf(" -> %s", label(world, event.object).c_str());
+        }
+        if (event.kind == K::Alarmed) {
+            std::printf(" (stage %d, %s)", event.a, kClueNames[static_cast<std::size_t>(event.b)]);
+        } else {
+            std::printf(" (a %d, b %d)", event.a, event.b);
+        }
+        if (event.third != lw::kInvalidId) {
+            std::printf(" [%s]", label(world, event.third).c_str());
+        }
+        std::printf("\n");
+    }
+}
+
 void printDailyHeader() {
     std::printf("day season phase | people (hungry thirsty) | zombies hordes | animals | died: wounds "
                 "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
-                "forest | ammo | bought money | workers shops | infected sick zres\n");
+                "forest | ammo | bought money | workers shops | infected sick zres | alarmed quar evac\n");
 }
 
 void printDaily(const lw::World& world) {
@@ -1442,8 +1552,13 @@ void printDaily(const lw::World& world) {
     }
     const lw::Chronicle& chronicle = world.chronicle();
     const lw::ScenarioStats stats = lw::scenarioStats(world);
+    std::size_t alarmed = 0;
+    for (const auto [entity, person, alarm] : registry.view<const lw::Person, const lw::Alarm>().each()) {
+        alarmed += alarm.level >= lw::kAlarmedLevel ? 1 : 0;
+    }
     std::printf("%3d %d %-8s | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
-                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f | %3zu %3zu | %3d %3d %3d\n",
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f | %3zu %3zu | %3d %3d %3d | "
+                "%3zu %2zu %3d\n",
                 time.day, static_cast<int>(time.season), lw::rulesOf(world).name, people, hungry,
                 thirsty,
                 registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
@@ -1453,7 +1568,8 @@ void printDaily(const lw::World& world) {
                 chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
                 world.resources().forestTotal(), ammo, chronicle.countOf(lw::ChronicleKind::Bought),
                 people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0, onDuty,
-                shops, stats.infected, stats.sick, stats.residents);
+                shops, stats.infected, stats.sick, stats.residents, alarmed,
+                registry.view<const lw::Quarantine>().size(), stats.evacuated);
     std::fflush(stdout);
 }
 
@@ -1625,6 +1741,7 @@ int main(int argc, char** argv) {
     bool castLog = false;
     bool familyLog = false;
     bool infectionLog = false;
+    bool societyLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1660,6 +1777,8 @@ int main(int argc, char** argv) {
             familyLog = true;
         } else if (std::strcmp(argv[i], "--infections") == 0) {
             infectionLog = true;
+        } else if (std::strcmp(argv[i], "--society") == 0) {
+            societyLog = true;
         } else if (std::strcmp(argv[i], "--cast") == 0) {
             castLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
@@ -1687,7 +1806,8 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--stories] [--foresight] [--cast] [--families] [--infections] [--profile]\n");
+                        "[--stories] [--foresight] [--cast] [--families] [--infections] [--society] "
+                        "[--profile]\n");
             return 2;
         }
     }
@@ -1742,6 +1862,7 @@ int main(int argc, char** argv) {
     printWeather(world);
     printScenario(world);
     printOutbreak(world, infectionLog);
+    printSociety(world, societyLog);
     printPeople(world);
     printWork(world);
     printRelations(world);

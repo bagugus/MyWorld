@@ -25,6 +25,11 @@ inline constexpr Color kSmokeColor = {222, 92, 80, 255};
 inline constexpr Color kBuildingOutline = {40, 34, 30, 255};
 // Больной в лихорадке (этап 7.5) — кольцо вокруг кружка на виде сверху.
 inline constexpr Color kFeverRingColor = {255, 140, 50, 255};
+// Реакция общества (этап 7.6): кордон карантина — красный пунктир вокруг
+// поселения, пункт эвакуации — зелёная рамка, солдат — оливковый.
+inline constexpr Color kQuarantineColor = {226, 60, 52, 220};
+inline constexpr Color kEvacuationColor = {80, 210, 120, 255};
+inline constexpr Color kSoldierColor = {120, 132, 70, 255};
 // Небо в 3D: фон и то, что отражает вода. Ночью его затемняет погода.
 inline constexpr Color kSkyColor = {132, 166, 200, 255};
 

@@ -844,6 +844,19 @@ void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector
                 driver.requestPhase(following);
             }
         }
+        // Реакция общества (этап 7.6): что передают, где карантин, сколько уехало.
+        if (scenario->broadcast != 0) {
+            ImGui::TextWrapped("По радио: «%s»", broadcastText(static_cast<BroadcastKind>(scenario->broadcast)));
+        }
+        const ScenarioStats stats = scenarioStats(world);
+        int alarmed = 0;
+        for (const auto [entity, person, alarm] : registry.view<const Person, const Alarm>().each()) {
+            alarmed += alarm.level >= kAlarmedLevel ? 1 : 0;
+        }
+        if (scenario->phase != WorldPhase::Peace) {
+            ImGui::Text("Встревожены: %d; карантин: %zu; эвакуированы: %d; солдат: %d", alarmed,
+                        registry.view<const Quarantine>().size(), stats.evacuated, stats.soldiers);
+        }
     } else {
         ImGui::TextDisabled("Нет: мир начат без мирной жизни\nи живёт по правилам выживания");
     }

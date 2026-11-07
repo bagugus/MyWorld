@@ -20,6 +20,7 @@
 #include "sim/systems/ResourceSystem.h"
 #include "sim/systems/ScenarioSystem.h"
 #include "sim/systems/SocialSystem.h"
+#include "sim/systems/SocietySystem.h"
 #include "sim/systems/UtilityAiSystem.h"
 #include "sim/systems/WeatherSystem.h"
 #include "sim/systems/WorkSystem.h"
@@ -95,8 +96,9 @@ namespace {
 
 constexpr const char* kPhaseNames[World::kStepPhases] = {
     "weather",    "resources", "scenario", "events",  "work",       "needs",
-    "infection",  "relations", "memories", "groups",  "bodies",     "perception",
-    "zombies",    "animals",   "utility ai", "combat", "movement",  "spatial sync"};
+    "infection",  "society",   "relations", "memories", "groups",   "bodies",
+    "perception", "zombies",   "animals",   "utility ai", "combat", "movement",
+    "spatial sync"};
 
 } // namespace
 
@@ -136,6 +138,10 @@ void World::step() {
     // Заражение от больных (этап 7.5) — после нужд: заражение уже подросло за
     // эту минуту, кто стал заразен — заразен сразу.
     tickInfection(*this);
+    lap();
+    // Реакция общества (этап 7.6): передачи, увиденное, карантин, колонны
+    // эвакуации — до отношений и решений: кто уехал, того в мире уже нет.
+    updateSociety(*this);
     lap();
     // Отношения — по тому, кто был рядом и чем занят на начало тика.
     tickRelations(*this);
@@ -362,6 +368,34 @@ std::uint64_t World::stateHash() const {
             hasher.add(scenario->population);
             hasher.add(scenario->patientZero);
             hasher.add(scenario->quietSince);
+            hasher.add(scenario->broadcast);
+            hasher.add(scenario->broadcastAt);
+        }
+        if (const auto* alarm = registry_.try_get<Alarm>(entity)) {
+            hasher.add(std::uint64_t{37});
+            hasher.add(alarm->level);
+            hasher.add(static_cast<std::uint8_t>(alarm->clue));
+            hasher.add(alarm->source);
+            hasher.add(alarm->since);
+            hasher.add(alarm->refusedAt);
+        }
+        if (const auto* quarantine = registry_.try_get<Quarantine>(entity)) {
+            hasher.add(std::uint64_t{38});
+            hasher.add(quarantine->since);
+            hasher.add(quarantine->cases);
+            hasher.add(quarantine->clearSince);
+        }
+        if (const auto* point = registry_.try_get<EvacuationPoint>(entity)) {
+            hasher.add(std::uint64_t{39});
+            hasher.add(point->settlement);
+            hasher.add(point->opened);
+            hasher.add(point->convoys);
+            hasher.add(point->evacuated);
+        }
+        if (const auto* evacuated = registry_.try_get<Evacuated>(entity)) {
+            hasher.add(std::uint64_t{40});
+            hasher.add(evacuated->tick);
+            hasher.add(evacuated->point);
         }
         if (const auto* cache = registry_.try_get<Cache>(entity)) {
             hasher.add(std::uint64_t{29});
