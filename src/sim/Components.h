@@ -96,6 +96,63 @@ struct Traits {
     float chronotype = 0.5f;  // 0 — жаворонок, 1 — сова: время сна сдвигается на ±1,5 ч
 };
 
+// Возраст человека, полных лет (этап 7.3). Как и Name — отдельный компонент:
+// остаётся у тела и у вставшего зомби («узнал в зомби своего сына»). Пол —
+// по имени (isFemaleName). Пока возраст не растёт.
+struct Age {
+    std::uint8_t years = 30;
+};
+// Совершеннолетие: младше — ребёнок (не работает, не ворует, не мстит, о нём
+// заботится опекун).
+inline constexpr std::uint8_t kAdultAge = 18;
+
+// Кем родственник приходится человеку (этап 7.3). Значения попадают в хеш и
+// сохранения: новые добавлять только в конец (перед Count).
+enum class KinKind : std::uint8_t {
+    Spouse,      // муж или жена
+    Parent,      // отец или мать
+    Child,       // сын или дочь
+    Sibling,     // брат или сестра
+    Grandparent, // дед или бабушка
+    Grandchild,  // внук или внучка
+    Count
+};
+
+struct Relative {
+    EntityId id = kInvalidId;
+    KinKind kind = KinKind::Spouse; // кем id приходится владельцу Kin
+};
+
+// Семья человека (этап 7.3): родня с рождения мира, в том числе живущая в
+// другом доме или поселении. Остаётся после смерти — и у живых о погибшем, и
+// у тела. Опекун — у несовершеннолетнего: кто о нём заботится и в чьём доме он
+// живёт (обычно родитель; осиротевшего берёт к себе родня или сосед,
+// FamilySystem).
+struct Kin {
+    static constexpr std::size_t kMaxRelatives = 12;
+
+    Relative relatives[kMaxRelatives] = {};
+    std::uint8_t count = 0;
+    EntityId guardian = kInvalidId;
+
+    const Relative* find(EntityId id) const {
+        for (std::size_t i = 0; i < count; ++i) {
+            if (relatives[i].id == id) {
+                return &relatives[i];
+            }
+        }
+        return nullptr;
+    }
+    // Добавить, если такого ещё нет и есть место. false — не добавлен.
+    bool add(EntityId id, KinKind kind) {
+        if (find(id) != nullptr || count == kMaxRelatives) {
+            return false;
+        }
+        relatives[count++] = {id, kind};
+        return true;
+    }
+};
+
 // Предметы (этап 5.6). Значения попадают в хеш и сохранения: новые добавлять
 // только в конец (перед Count). Вес и прочее — sim/Items.h.
 enum class ItemKind : std::uint8_t {
@@ -206,6 +263,21 @@ struct Mind {
     Danger dangers[kDangerMemory] = {};
 };
 
+// Откуда люди знают друг друга (этап 7.3): так связь заведена. Значения
+// попадают в хеш и сохранения: новые добавлять только в конец (перед Count).
+enum class BondOrigin : std::uint8_t {
+    Met,        // познакомились уже в мире: рядом, в разговоре, по поступку
+    Housemate,  // живут под одной крышей, но не родня
+    Neighbour,  // соседи по поселению
+    Kin,        // родня — кем именно, хранит Kin
+    Colleague,  // работают в одном месте
+    Classmate,  // учатся в одной школе (или учитель и ученик)
+    OldFriend,  // давние друзья — дружба из прошлой, мирной жизни
+    OldFeud,    // давняя вражда — соседская ссора, старые счёты
+    ExPartner,  // бывшие супруги
+    Count
+};
+
 // Связь человека с другим человеком — его взгляд, не общий: у другого своя
 // связь в ответ, и она может быть другой (этап 6.2). Правила — sim/Relations.h.
 struct Bond {
@@ -228,6 +300,9 @@ struct Bond {
     float debt = 0.0f;
     // Обида 0..1: что другой ему сделал — обокрал, бросил в беде (этап 6.2).
     float grudge = 0.0f;
+    // Откуда знакомы (этап 7.3). Родня (BondOrigin::Kin) не забывается и не
+    // вытесняется новыми знакомствами.
+    BondOrigin origin = BondOrigin::Met;
 
     bool friendly() const { return (flags & kFriend) != 0; }
     bool hostile() const { return (flags & kFoe) != 0; }
@@ -328,6 +403,7 @@ enum class Profession : std::uint8_t {
     Doctor,        // врач: пока он в больнице, там лечат
     PoliceOfficer, // полицейский: обходит поселение, при нём не воруют
     Teacher,       // учитель
+    Pupil,         // школьник (этап 7.3): уроки в городской школе, платы нет
     Count
 };
 

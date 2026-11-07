@@ -8,6 +8,7 @@
 #include "render/TreeLayout.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Family.h"
 #include "sim/Scenario.h"
 #include "sim/TimeScale.h"
 #include "sim/Weapons.h"
@@ -868,6 +869,11 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
         }
         if (const auto* weapon = registry.try_get<Weapon>(entity)) {
             look.weapon = weapon->kind;
+        }
+        // Дети (этап 7.3) ниже ростом: та же модель в масштабе — от метра в 4
+        // года до взрослого роста к 18.
+        if (const int years = ageOf(registry, entity); registry.all_of<Age>(entity) && years < kAdultAge) {
+            frame.scale = std::clamp((1.0f + 0.055f * static_cast<float>(years - 4)) / 1.75f, 0.55f, 1.0f);
         }
         setModelIndoor(placed != nullptr);
         emitHuman(frame, look, figure.human);

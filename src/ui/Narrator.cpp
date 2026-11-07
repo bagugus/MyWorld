@@ -1,10 +1,12 @@
 #include "ui/Narrator.h"
 
 #include "sim/Calendar.h"
+#include "sim/Family.h"
 #include "sim/Map.h"
 #include "sim/Names.h"
 #include "sim/Scenario.h"
 #include "sim/Story.h"
+#include "sim/Work.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 #include "ui/Captions.h"
@@ -85,16 +87,6 @@ std::string firstName(const World& world, EntityId id) {
         }
     }
     return "зомби";
-}
-
-std::string lastName(const World& world, EntityId id) {
-    const entt::entity entity = entityOf(world, id);
-    if (entity != entt::null) {
-        if (const auto* name = world.registry().try_get<Name>(entity)) {
-            return name->last;
-        }
-    }
-    return {};
 }
 
 // Местоимения: он/она, его/её, ему/ей, нём/ней.
@@ -577,7 +569,24 @@ std::string introduction(const World& world, EntityId id) {
     const Town town = townOf(world, home);
     const auto* job = registry.try_get<Job>(entity);
     const WorldPhase phase = worldPhase(world);
-    const bool employed = job != nullptr && job->profession != Profession::None;
+    const bool employed = isEmployed(job);
+    const int years = ageOf(registry, entity);
+    // Где живёт, сказано ли уже (с работой или школой).
+    bool placed = employed;
+    if (registry.all_of<Age>(entity) && years < kAdultAge) {
+        // Ребёнок (этап 7.3): возраст и школа.
+        const bool pupil = job != nullptr && job->profession == Profession::Pupil;
+        std::string line = fill("{Ему|Ей} ", f) + ageText(years) + ".";
+        if (pupil && phase < WorldPhase::Panic) {
+            line += " Ходит в школу" + (town.in.empty() ? std::string() : " " + town.in) + ".";
+            placed = true;
+        } else if (pupil) {
+            line += " Школа закрыта — и неизвестно, откроется ли снова.";
+        }
+        sentences.push_back(line);
+    } else if (!employed && registry.all_of<Age>(entity) && years >= 67 && phase < WorldPhase::Collapse) {
+        sentences.push_back(fill("{Ему|Ей} ", f) + ageText(years) + ", давно на пенсии.");
+    }
     if (employed) {
         const Trade trade = tradeOf(job->profession, f);
         const std::string from = town.from.empty() ? std::string() : " из " + town.from;
@@ -596,7 +605,7 @@ std::string introduction(const World& world, EntityId id) {
         sentences.push_back(line);
     }
     // Где живёт — если не сказано вместе с работой.
-    const std::string where = employed || town.in.empty() ? std::string() : " " + town.in;
+    const std::string where = placed || town.in.empty() ? std::string() : " " + town.in;
 
     // С кем живёт: группа, семья, соседи.
     const entt::entity group = entityOf(world, person->group);
@@ -624,12 +633,13 @@ std::string introduction(const World& world, EntityId id) {
             }
         }
         std::sort(mates.begin(), mates.end()); // порядок вида не детерминирован
-        const std::string surname = lastName(world, id);
+        // Родня — «жена Mary», «сын Tom» (этап 7.3); остальные — по именам.
         std::vector<std::string> family;
         std::vector<std::string> others;
         for (const EntityId mate : mates) {
-            if (lastName(world, mate) == surname) {
-                family.push_back(firstName(world, mate));
+            const KinKind kind = kinOf(registry, entity, mate);
+            if (kind != KinKind::Count) {
+                family.push_back(std::string(kinWord(kind, female(world, mate))) + " " + firstName(world, mate));
             } else {
                 others.push_back(fullName(world, mate));
             }
@@ -920,14 +930,14 @@ std::string bridge(const World& world, EntityId from, EntityId to) {
         const auto* rb = registry.try_get<Relations>(b);
         const Bond* ab = ra != nullptr ? ra->find(to) : nullptr;
         const Bond* ba = rb != nullptr ? rb->find(from) : nullptr;
-        if (pa.home != kInvalidId && pa.home == pb.home && pa.group == kInvalidId) {
-            relation = lastName(world, from) == lastName(world, to)
-                           ? "из одной семьи с " + aName
-                           : std::string(g(bf, "сосед ", "соседка ")) + aName + " по дому";
-        } else if (lastName(world, from) == lastName(world, to)) {
-            // Одна фамилия — одна семья (жильцы дома при рождении мира), даже если
-            // теперь живут порознь.
-            relation = "из одной семьи с " + aName;
+        // Родня — кем приходится (этап 7.3): «сын John», даже если живут порознь.
+        if (const KinKind kind = kinOf(registry, a, to); kind != KinKind::Count) {
+            relation = std::string(kinWord(kind, bf)) + " " + aName;
+        } else if (pa.home != kInvalidId && pa.home == pb.home && pa.group == kInvalidId) {
+            relation = std::string(g(bf, "сосед ", "соседка ")) + aName + " по дому";
+        } else if (ab != nullptr && (ab->origin == BondOrigin::OldFriend || ab->origin == BondOrigin::ExPartner ||
+                                     ab->origin == BondOrigin::Colleague)) {
+            relation = std::string(bondOriginName(ab->origin, bf)) + " " + aName;
         } else if (pa.group != kInvalidId && pa.group == pb.group) {
             relation = "из одной группы с " + aName;
         } else if ((ab != nullptr && ab->friendly()) || (ba != nullptr && ba->friendly())) {

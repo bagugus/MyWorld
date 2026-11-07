@@ -10,6 +10,7 @@
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
 #include "sim/systems/EventSystem.h"
+#include "sim/systems/FamilySystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
@@ -137,6 +138,9 @@ void World::step() {
     // Память — угасание и находки (тела близких, близкие среди зомби).
     tickMemories(*this);
     lap();
+    // Семьи — раз в час: у каждого ребёнка опекун (этап 7.3); до групп —
+    // ребёнок идёт в группу за опекуном.
+    tickFamilies(*this);
     // Группы — раз в час, по отношениям: кто вступил, ушёл, кто вожак.
     tickGroups(*this);
     lap();
@@ -295,6 +299,19 @@ std::uint64_t World::stateHash() const {
             hasher.add(workplace->onDuty);
             hasher.add(workplace->till);
             hasher.add(workplace->harvest);
+        }
+        if (const auto* age = registry_.try_get<Age>(entity)) {
+            hasher.add(std::uint64_t{35});
+            hasher.add(age->years);
+        }
+        if (const auto* kin = registry_.try_get<Kin>(entity)) {
+            hasher.add(std::uint64_t{36});
+            hasher.add(kin->count);
+            for (std::size_t i = 0; i < kin->count; ++i) {
+                hasher.add(kin->relatives[i].id);
+                hasher.add(static_cast<std::uint8_t>(kin->relatives[i].kind));
+            }
+            hasher.add(kin->guardian);
         }
         if (const auto* name = registry_.try_get<Name>(entity)) {
             hasher.add(std::uint64_t{31});
@@ -521,6 +538,7 @@ std::uint64_t World::stateHash() const {
                 hasher.add(bond.flags);
                 hasher.add(bond.debt);
                 hasher.add(bond.grudge);
+                hasher.add(static_cast<std::uint8_t>(bond.origin));
             }
         }
         if (const auto* memories = registry_.try_get<Memories>(entity)) {

@@ -257,6 +257,9 @@ std::string intentLine(const World& world, EntityId id) {
     case Action::Treat:
         return "перевязывает раны";
     case Action::Work:
+        if (const auto* job = registry.try_get<Job>(entity); job != nullptr && job->profession == Profession::Pupil) {
+            return travel ? "идёт в школу" : "на уроках"; // этап 7.3
+        }
         if (const auto* job = registry.try_get<Job>(entity)) {
             return std::string(travel ? "идёт на работу — " : "на работе — ") +
                    professionName(job->profession);

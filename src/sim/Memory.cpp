@@ -1,5 +1,6 @@
 #include "sim/Memory.h"
 
+#include "sim/Family.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
@@ -286,7 +287,8 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
 
     if (!heard && own) {
         if (impression.chronicle != ChronicleKind::Count) {
-            world.record(impression.chronicle, id, who, a);
+            // b — кем он ему (этап 7.3): «нашёл тело сына», «бросил брат».
+            world.record(impression.chronicle, id, who, a, kinCode(world, self, who));
         }
     } else if (!heard) {
         // Видел, как обидели (или выручили) близкого.
@@ -295,7 +297,7 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
                          account.victim);
         }
     } else if (!deed) {
-        world.record(ChronicleKind::Mourned, id, who, 0, 0, account.source);
+        world.record(ChronicleKind::Mourned, id, who, 0, kinCode(world, self, who), account.source);
     } else if (own) {
         world.record(ChronicleKind::HeardOf, id, who, static_cast<std::int32_t>(kind), 0,
                      account.source);
@@ -442,8 +444,9 @@ void witnessAttack(World& world, entt::entity victim, EntityId attacker) {
         if (mind == nullptr || !registry.all_of<Person>(other)) {
             continue;
         }
-        if (mind->action == Action::Flee) {
-            // Бросил близкий или товарищ по группе (этап 6.4).
+        if (mind->action == Action::Flee && !isMinor(registry, other)) {
+            // Бросил близкий или товарищ по группе (этап 6.4); ребёнку бежать
+            // не стыдно (этап 7.3).
             const Bond* bond = relations != nullptr ? relations->find(contact.id) : nullptr;
             const Person& theirs = registry.get<Person>(other);
             const bool mate = group != kInvalidId && theirs.group == group;

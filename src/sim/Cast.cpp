@@ -126,6 +126,10 @@ Roles rolesOf(const ChronicleEvent& event) {
         return {0.3f};
     case K::LeftWork:
         return {0.8f};
+    case K::Orphaned:
+        return {2.5f, 1.0f}; // сирота; погибший родитель — только связь (этап 7.3)
+    case K::TookIn:
+        return {2.0f, 2.0f}; // взял к себе — и ребёнок: теперь они связаны
     default:
         return {};
     }

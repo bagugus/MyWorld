@@ -18,6 +18,17 @@ namespace lw::ui {
 const char* buildingName(BuildingKind kind);
 // Профессия: «продавец», «без работы».
 const char* professionName(Profession profession);
+
+// Родство (этап 7.3) — кем приходится, по полу родственника: «сын» и «дочь».
+// Падежи: именительный («сын»), родительный («о гибели сына»), винительный
+// («узнал в зомби сына»), творительный («был его сыном»).
+enum class Case : std::uint8_t { Nominative, Genitive, Accusative, Instrumental };
+const char* kinWord(KinKind kind, bool female, Case grammaticalCase = Case::Nominative);
+// Откуда знакомы: «коллега», «давняя подруга», «бывший муж»; пусто — ничего
+// особенного (познакомились в мире). female — пол того, о ком речь.
+const char* bondOriginName(BondOrigin origin, bool female);
+// «34 года», «1 год», «5 лет».
+std::string ageText(int years);
 const char* settlementKindName(SettlementKind kind);
 // Занятие человека: «спит», «ищет припасы».
 const char* actionName(Action action);

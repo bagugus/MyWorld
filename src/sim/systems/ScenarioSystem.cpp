@@ -30,7 +30,9 @@ void recordQuitters(World& world, WorldPhase before, WorldPhase after) {
          registry.view<const Id, const Person, const Job>().each()) {
         const auto* traits = registry.try_get<Traits>(entity);
         const Traits& t = traits != nullptr ? *traits : kAverage;
-        if (keepsWorking(before, job.profession, t) && !keepsWorking(after, job.profession, t)) {
+        // Школа закрылась — дети не «бросают работу» (этап 7.3).
+        if (job.profession != Profession::Pupil && keepsWorking(before, job.profession, t) &&
+            !keepsWorking(after, job.profession, t)) {
             quitters.emplace_back(id.value, job.workplace);
         }
     }

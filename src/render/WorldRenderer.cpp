@@ -3,6 +3,7 @@
 #include "render/Palette.h"
 
 #include "sim/Components.h"
+#include "sim/Family.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 
@@ -132,7 +133,10 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
             DrawRectangleV({at.x - half, at.y - half}, {2.0f * half, 2.0f * half}, color);
             continue;
         }
-        const float size = registry.all_of<Animal>(entity) ? radius * 0.8f : radius;
+        // Звери и дети (этап 7.3) — кружком поменьше.
+        const float size = registry.all_of<Animal>(entity)                               ? radius * 0.8f
+                           : registry.all_of<Age>(entity) && isMinor(registry, entity) ? radius * 0.7f
+                                                                                       : radius;
         DrawCircleV(at, size, creatureColor(registry, entity));
     }
 }

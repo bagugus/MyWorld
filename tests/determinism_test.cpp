@@ -13,11 +13,13 @@
 #include "sim/Climate.h"
 #include "sim/Death.h"
 #include "sim/Events.h"
+#include "sim/Family.h"
 #include "sim/Foresight.h"
 #include "sim/Components.h"
 #include "sim/Items.h"
 #include "sim/Map.h"
 #include "sim/Memory.h"
+#include "sim/Names.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Relations.h"
@@ -37,6 +39,7 @@
 #include "sim/systems/AnimalSystem.h"
 #include "sim/systems/CombatSystem.h"
 #include "sim/systems/EventSystem.h"
+#include "sim/systems/FamilySystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
@@ -1374,12 +1377,13 @@ void testPeople() {
     CHECK(walked > 0);
     CHECK(atHome() < 120);
 
-    // К трём часам ночи почти все дома.
+    // К трём часам ночи почти все дома (кто ушёл навестить родню или друзей
+    // в соседнее поселение, ночует там — этап 7.3).
     const std::uint64_t night = lw::nextTimeOfDay(world.tick(), 3, 0);
     while (world.tick() < night) {
         world.step();
     }
-    CHECK(atHome() >= 140);
+    CHECK(atHome() >= 135);
 }
 
 // Шаг движения может быть длиннее тика: за один шаг человек проходит весь путь.
@@ -2125,8 +2129,19 @@ void testAiSurvives() {
     float thirst = 0.0f;
     std::size_t actions = 0;
     bool kinds[static_cast<std::size_t>(lw::Action::Count)] = {};
-    for (const auto [entity, needs, mind] : registry.view<const lw::Needs, const lw::Mind>().each()) {
-        worst = std::min(worst, needs.health);
+    // Здоровье — у тех, на кого не нападали: без мирной жизни родня мстит
+    // вору за своих (этап 7.3), и драки бывают уже в первые сутки.
+    std::vector<lw::EntityId> assaulted;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::AssaultedBy) {
+            assaulted.push_back(event.subject);
+        }
+    }
+    for (const auto [entity, id, needs, mind] :
+         registry.view<const lw::Id, const lw::Needs, const lw::Mind>().each()) {
+        if (std::find(assaulted.begin(), assaulted.end(), id.value) == assaulted.end()) {
+            worst = std::min(worst, needs.health);
+        }
         hunger = std::max(hunger, needs.hunger);
         thirst = std::max(thirst, needs.thirst);
         kinds[static_cast<std::size_t>(mind.action)] = true;
@@ -2466,6 +2481,28 @@ struct Field {
         std::sort(people.begin(), people.end(), [this](entt::entity a, entt::entity b) {
             return id(a) < id(b);
         });
+        // Люди поля — неродственные взрослые без прошлого: семьи (этап 7.3) —
+        // в своих тестах.
+        entt::registry& registry = world.registry();
+        for (const entt::entity person : people) {
+            registry.get<lw::Age>(person).years = 30;
+            registry.get<lw::Kin>(person) = {};
+            lw::Walker& walker = registry.get<lw::Walker>(person);
+            walker.speed = std::max(walker.speed, 1.2f);
+            lw::Relations& relations = registry.get<lw::Relations>(person);
+            std::size_t kept = 0;
+            for (std::size_t i = 0; i < relations.count; ++i) {
+                const lw::BondOrigin origin = relations.bonds[i].origin;
+                if (origin == lw::BondOrigin::Met || origin == lw::BondOrigin::Housemate ||
+                    origin == lw::BondOrigin::Neighbour) {
+                    relations.bonds[kept++] = relations.bonds[i];
+                }
+            }
+            for (std::size_t i = kept; i < relations.count; ++i) {
+                relations.bonds[i] = {};
+            }
+            relations.count = static_cast<std::uint8_t>(kept);
+        }
     }
 
     lw::EntityId id(entt::entity entity) const {
@@ -5270,8 +5307,17 @@ void testPeacefulStart() {
     CHECK(town);
 
     int employed = 0;
+    int pupils = 0;
     for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
-        ++employed;
+        // Работают взрослые, учатся дети (этап 7.3).
+        const int age = lw::ageOf(registry, entity);
+        if (job.profession == lw::Profession::Pupil) {
+            ++pupils;
+            CHECK(age < lw::kAdultAge);
+        } else {
+            ++employed;
+            CHECK(age >= lw::kAdultAge);
+        }
         const entt::entity workplace = world.find(job.workplace);
         CHECK(workplace != entt::null);
         if (workplace == entt::null) {
@@ -5284,10 +5330,12 @@ void testPeacefulStart() {
         CHECK(registry.all_of<lw::Workplace>(workplace));
     }
     CHECK(employed > 20);
+    CHECK(pupils > 0);
     CHECK(world.chronicle().countOf(lw::ChronicleKind::Employed) == static_cast<std::size_t>(employed));
     for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        // У взрослых — сбережения, у детей — карманные деньги, бывает и ноль.
         const auto* wallet = registry.try_get<lw::Wallet>(entity);
-        CHECK(wallet != nullptr && wallet->money > 0);
+        CHECK(wallet != nullptr && (wallet->money > 0 || lw::isMinor(registry, entity)));
     }
 
     // Без мирной жизни — ни профессий, ни денег.
@@ -5508,9 +5556,11 @@ void testRestock() {
         CHECK(registry.get<lw::Inventory>(farm).food() == 0); // урожай фермы — в магазин
     }
     for (std::size_t i = 0; i < people.size(); ++i) {
+        // Пособие — взрослым без работы; детям — нет (этап 7.3).
         const auto* job = registry.try_get<lw::Job>(people[i]);
         const int income = registry.get<lw::Wallet>(people[i]).money - money[i];
-        CHECK(income == (job == nullptr ? lw::kAllowance : 0));
+        const bool allowance = !lw::isEmployed(job) && !lw::isMinor(registry, people[i]);
+        CHECK(income == (allowance ? lw::kAllowance : 0));
     }
 }
 
@@ -5868,7 +5918,7 @@ void testPhaseTransitions() {
     // Кто работал, бросил работу — каждый по разу.
     std::size_t employed = 0;
     for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
-        employed += job.profession != lw::Profession::None ? 1 : 0;
+        employed += lw::isEmployed(&job) ? 1 : 0; // школа закрылась — дети работу не бросают
     }
     CHECK(employed > 0);
     CHECK(world.chronicle().countOf(lw::ChronicleKind::LeftWork) == employed);
@@ -5983,6 +6033,11 @@ void testPanicRules() {
     }
     const entt::entity a = idle[0];
     const entt::entity b = idle[1];
+    // Не родня и взрослые: с роднёй группу не основывают (этап 7.3).
+    for (const entt::entity person : {a, b}) {
+        registry.get<lw::Kin>(person) = {};
+        registry.get<lw::Age>(person).years = 30;
+    }
     registry.get<lw::Traits>(a).leadership = 0.8f;
     registry.get<lw::Traits>(b).leadership = 0.3f;
     registry.get<lw::Person>(b).home = registry.get<lw::Person>(a).home;
@@ -6348,6 +6403,352 @@ void testCast() {
     }
 }
 
+// --- Семьи и прошлое (этап 7.3) ------------------------------------------------
+
+// План домов: ровно столько людей, родство взаимно, у каждого ребёнка —
+// взрослый опекун из того же дома, родители старше детей, часть родни живёт
+// отдельно; один seed — один план.
+void testHouseholdPlan() {
+    lw::Rng rng(11);
+    const lw::HouseholdPlan plan = lw::planHouseholds(rng, 300);
+    CHECK(plan.people.size() == 300);
+    CHECK(plan.guardian.size() == plan.people.size());
+    std::size_t minors = 0;
+    std::size_t elders = 0;
+    std::size_t apart = 0;
+    bool symmetric = true;
+    bool parentsOlder = true;
+    bool adultsMarry = true;
+    std::vector<int> relatives(plan.people.size(), 0);
+    for (const lw::PlannedKin& link : plan.kin) {
+        ++relatives[static_cast<std::size_t>(link.a)];
+        const bool back = std::any_of(plan.kin.begin(), plan.kin.end(), [&](const lw::PlannedKin& k) {
+            return k.a == link.b && k.b == link.a && k.kind == lw::inverseKin(link.kind);
+        });
+        symmetric = symmetric && back;
+        const lw::PlannedPerson& a = plan.people[static_cast<std::size_t>(link.a)];
+        const lw::PlannedPerson& b = plan.people[static_cast<std::size_t>(link.b)];
+        if (link.kind == lw::KinKind::Parent) {
+            parentsOlder = parentsOlder && b.age >= a.age + 16;
+        }
+        if (link.kind == lw::KinKind::Spouse) {
+            adultsMarry = adultsMarry && a.age >= lw::kAdultAge && b.age >= lw::kAdultAge;
+        }
+        apart += a.household != b.household ? 1 : 0;
+    }
+    CHECK(symmetric);
+    CHECK(parentsOlder);
+    CHECK(adultsMarry);
+    CHECK(apart > 0);
+    bool guarded = true;
+    for (std::size_t i = 0; i < plan.people.size(); ++i) {
+        const lw::PlannedPerson& p = plan.people[i];
+        CHECK(relatives[i] <= static_cast<int>(lw::Kin::kMaxRelatives));
+        elders += p.age >= 65 ? 1 : 0;
+        if (p.age >= lw::kAdultAge) {
+            guarded = guarded && plan.guardian[i] == -1;
+            continue;
+        }
+        ++minors;
+        const int g = plan.guardian[i];
+        guarded = guarded && g >= 0 && plan.people[static_cast<std::size_t>(g)].age >= lw::kAdultAge &&
+                  plan.people[static_cast<std::size_t>(g)].household == p.household;
+    }
+    CHECK(guarded);
+    CHECK(minors > 30 && minors < 120);
+    CHECK(elders > 10);
+    CHECK(plan.households.size() > 80 && plan.households.size() < 160);
+
+    lw::Rng again(11);
+    const lw::HouseholdPlan twin = lw::planHouseholds(again, 300);
+    CHECK(twin.people.size() == plan.people.size() && twin.kin.size() == plan.kin.size());
+    bool same = twin.lineages == plan.lineages;
+    for (std::size_t i = 0; same && i < plan.people.size(); ++i) {
+        same = twin.people[i].age == plan.people[i].age && twin.people[i].lineage == plan.people[i].lineage;
+    }
+    CHECK(same);
+}
+
+// Семьи в мире: у всех возраст и родня, родня знакома всю жизнь, ребёнок живёт
+// с опекуном, супруги носят одну фамилию; школьники — городские дети, коллеги
+// знакомы, у части людей есть прошлое.
+void testFamiliesInWorld() {
+    lw::World world(7, peaceConfig(300));
+    const entt::registry& registry = world.registry();
+    std::size_t kinBonds = 0;
+    std::size_t colleagues = 0;
+    std::size_t past = 0;
+    std::size_t minors = 0;
+    bool allAged = true;
+    bool kinKnown = true;
+    bool withGuardian = true;
+    bool spousesNamed = true;
+    for (const auto [entity, id, person, relations] :
+         registry.view<const lw::Id, const lw::Person, const lw::Relations>().each()) {
+        allAged = allAged && registry.all_of<lw::Age, lw::Kin>(entity);
+        const lw::Kin& kin = registry.get<lw::Kin>(entity);
+        for (std::size_t i = 0; i < kin.count; ++i) {
+            const lw::Bond* bond = relations.find(kin.relatives[i].id);
+            kinKnown = kinKnown && bond != nullptr && bond->origin == lw::BondOrigin::Kin &&
+                       bond->familiarity >= 0.85f;
+            const entt::entity other = world.find(kin.relatives[i].id);
+            kinKnown = kinKnown && lw::kinOf(registry, other, id.value) == lw::inverseKin(kin.relatives[i].kind);
+            if (kin.relatives[i].kind == lw::KinKind::Spouse) {
+                spousesNamed = spousesNamed && registry.get<lw::Name>(entity).last == registry.get<lw::Name>(other).last;
+            }
+        }
+        for (std::size_t i = 0; i < relations.count; ++i) {
+            kinBonds += relations.bonds[i].origin == lw::BondOrigin::Kin ? 1 : 0;
+            colleagues += relations.bonds[i].origin == lw::BondOrigin::Colleague ? 1 : 0;
+            past += relations.bonds[i].origin == lw::BondOrigin::OldFriend ||
+                            relations.bonds[i].origin == lw::BondOrigin::OldFeud ||
+                            relations.bonds[i].origin == lw::BondOrigin::ExPartner
+                        ? 1
+                        : 0;
+        }
+        if (lw::isMinor(registry, entity)) {
+            ++minors;
+            const entt::entity guardian = world.find(kin.guardian);
+            withGuardian = withGuardian && guardian != entt::null && !lw::isMinor(registry, guardian) &&
+                           registry.get<lw::Person>(guardian).home == person.home;
+            const auto* job = registry.try_get<lw::Job>(entity);
+            withGuardian = withGuardian && (job == nullptr || job->profession == lw::Profession::Pupil);
+        }
+    }
+    CHECK(allAged);
+    CHECK(kinKnown);
+    CHECK(withGuardian);
+    CHECK(spousesNamed);
+    CHECK(kinBonds > 100);
+    CHECK(colleagues > 0);
+    CHECK(past > 0);
+    CHECK(minors > 0);
+    // Один seed — одни и те же семьи.
+    lw::World twin(7, peaceConfig(300));
+    CHECK(world.stateHash() == twin.stateHash());
+}
+
+// Родню не забывают, даже если давно не виделись, и новое знакомство её не
+// вытесняет; код родства в летописи читается обратно.
+void testKinRemembered() {
+    lw::World world(7, peaceConfig(120));
+    entt::registry& registry = world.registry();
+    entt::entity self = entt::null;
+    lw::EntityId relative = lw::kInvalidId;
+    for (const auto [entity, id, kin] : registry.view<const lw::Id, const lw::Kin>().each()) {
+        if (kin.count > 0 && (self == entt::null || id.value < registry.get<lw::Id>(self).value)) {
+            self = entity;
+            relative = kin.relatives[0].id;
+        }
+    }
+    CHECK(self != entt::null);
+    if (self == entt::null) {
+        return;
+    }
+    lw::Bond* bond = registry.get<lw::Relations>(self).find(relative);
+    CHECK(bond != nullptr);
+    if (bond == nullptr) {
+        return;
+    }
+    // Давно не виделись: месяц без встреч.
+    const float familiarity = bond->familiarity;
+    for (int step = 0; step < 30 * 24; ++step) {
+        for (int i = 0; i < 1000; ++i) {
+            world.step(); // «давно» — по тикам мира
+        }
+        if (world.tick() > 3 * lw::kTicksPerGameDay) {
+            break;
+        }
+    }
+    bond = registry.get<lw::Relations>(self).find(relative);
+    bond->seen = 0;
+    lw::updateRelations(world, 30.0f * 24.0f * 60.0f);
+    CHECK(registry.get<lw::Relations>(self).find(relative)->familiarity >= familiarity - 1e-6f);
+
+    // Связи полны и все — родня: незнакомца не запомнить.
+    lw::Relations full;
+    for (std::size_t i = 0; i < lw::Relations::kMaxBonds; ++i) {
+        lw::Bond* kin = lw::acquireBond(full, 1000 + i, 0.0f, 0);
+        kin->origin = lw::BondOrigin::Kin;
+    }
+    CHECK(lw::acquireBond(full, 5000, 0.0f, 0) == nullptr);
+
+    lw::KinKind kind = lw::KinKind::Count;
+    bool female = true;
+    CHECK(!lw::decodeKin(0, kind, female));
+    CHECK(lw::decodeKin(1 + 2 * static_cast<int>(lw::KinKind::Child) + 1, kind, female) &&
+          kind == lw::KinKind::Child && female);
+}
+
+// Дети: не охотятся, не воруют, не мстят и не торгуют; младший не дерётся с
+// зомби, а бежит. Опекун за своего ребёнка дерётся охотнее, чем за чужого.
+void testChildBehaviour() {
+    Field field(3);
+    if (!field.open || field.people.size() != 3) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity child = field.people[0];
+    const entt::entity parent = field.people[1];
+    const entt::entity stranger = field.people[2];
+    registry.get<lw::Age>(child).years = 9;
+    for (const entt::entity person : field.people) {
+        registry.get<lw::Traits>(person) = {};
+        registry.get<lw::Weapon>(person) = {lw::WeaponKind::Rifle, 10};
+        registry.get<lw::Needs>(person).hunger = 0.9f;
+        registry.get<lw::Inventory>(person) = {};
+    }
+    const lw::ActionScores calm = lw::evaluateActions(field.world, child);
+    CHECK(calm[static_cast<std::size_t>(lw::Action::Hunt)] == 0.0f);
+    CHECK(calm[static_cast<std::size_t>(lw::Action::Steal)] == 0.0f);
+    CHECK(calm[static_cast<std::size_t>(lw::Action::Avenge)] == 0.0f);
+    CHECK(calm[static_cast<std::size_t>(lw::Action::Trade)] == 0.0f);
+
+    // Зомби гонится за ребёнком.
+    field.place(child, 10);
+    field.place(parent, 8);
+    field.place(stranger, 12);
+    const entt::entity zombie = field.zombie(13);
+    lw::Zombie& chaser = registry.get<lw::Zombie>(zombie);
+    chaser.state = lw::ZombieState::Chase;
+    chaser.target = field.id(child);
+    for (const entt::entity person : field.people) {
+        letSee(field, person, zombie);
+    }
+    const lw::ActionScores scared = lw::evaluateActions(field.world, child);
+    CHECK(scared[static_cast<std::size_t>(lw::Action::Fight)] == 0.0f);
+    CHECK(scared[static_cast<std::size_t>(lw::Action::Flee)] > 0.0f);
+    const float strangerFight = lw::evaluateActions(field.world, parent)[static_cast<std::size_t>(lw::Action::Fight)];
+    lw::Kin& kin = registry.get<lw::Kin>(child);
+    kin.add(field.id(parent), lw::KinKind::Parent);
+    kin.guardian = field.id(parent);
+    registry.get<lw::Kin>(parent).add(field.id(child), lw::KinKind::Child);
+    const float parentFight = lw::evaluateActions(field.world, parent)[static_cast<std::size_t>(lw::Action::Fight)];
+    CHECK(strangerFight > 0.0f);
+    CHECK(parentFight > 1.5f * strangerFight);
+}
+
+// Сирота: погибли родители — летопись «осиротел», опекуном становится родня
+// (здесь — дед из другого дома), ребёнок переезжает к нему. Без родни берёт
+// добрый знакомый взрослый; ребёнок ему обязан.
+void testOrphanTakenIn() {
+    Field field(5);
+    if (!field.open || field.people.size() != 5) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity child = field.people[0];
+    const entt::entity mother = field.people[1];
+    const entt::entity grandpa = field.people[2];
+    const entt::entity neighbour = field.people[3];
+    registry.get<lw::Age>(child).years = 8;
+    registry.get<lw::Age>(grandpa).years = 70;
+    const lw::EntityId home = registry.get<lw::Person>(mother).home;
+    registry.get<lw::Person>(child).home = home;
+    const lw::EntityId other = nearbyHome(field.world, home, 2000.0f);
+    CHECK(other != lw::kInvalidId);
+    registry.get<lw::Person>(grandpa).home = other;
+    const auto relate = [&](entt::entity a, entt::entity b, lw::KinKind kind) {
+        registry.get<lw::Kin>(a).add(field.id(b), kind);
+        registry.get<lw::Kin>(b).add(field.id(a), lw::inverseKin(kind));
+    };
+    relate(child, mother, lw::KinKind::Parent);
+    relate(child, grandpa, lw::KinKind::Grandparent);
+    relate(mother, grandpa, lw::KinKind::Parent);
+    registry.get<lw::Kin>(child).guardian = field.id(mother);
+
+    lw::updateFamilies(field.world);
+    CHECK(registry.get<lw::Kin>(child).guardian == field.id(mother)); // мать жива
+    CHECK(field.count(lw::ChronicleKind::Orphaned) == 0);
+
+    lw::die(field.world, mother, lw::DeathCause::Wounds, lw::kInvalidId);
+    lw::updateFamilies(field.world);
+    CHECK(field.count(lw::ChronicleKind::Orphaned) == 1);
+    CHECK(field.count(lw::ChronicleKind::TookIn) == 1);
+    CHECK(registry.get<lw::Kin>(child).guardian == field.id(grandpa));
+    CHECK(registry.get<lw::Person>(child).home == other);
+    // Повторно — ничего нового.
+    lw::updateFamilies(field.world);
+    CHECK(field.count(lw::ChronicleKind::Orphaned) == 1 && field.count(lw::ChronicleKind::TookIn) == 1);
+
+    // Деда нет — берёт сосед, который ребёнка знает и добр к нему.
+    lw::die(field.world, grandpa, lw::DeathCause::Wounds, lw::kInvalidId);
+    registry.get<lw::Traits>(neighbour).altruism = 0.9f;
+    setBond(registry, neighbour, field.id(child), 0.8f, 0.6f, 0.5f);
+    CHECK(lw::chooseGuardian(field.world, child) == field.id(neighbour));
+    lw::updateFamilies(field.world);
+    CHECK(registry.get<lw::Kin>(child).guardian == field.id(neighbour));
+    CHECK(registry.get<lw::Person>(child).home == registry.get<lw::Person>(neighbour).home);
+    const lw::Bond* owed = registry.get<lw::Relations>(child).find(field.id(neighbour));
+    CHECK(owed != nullptr && owed->debt > 0.0f);
+    CHECK(field.count(lw::ChronicleKind::TookIn) == 2);
+    CHECK(field.count(lw::ChronicleKind::Orphaned) == 1); // сиротой стал однажды
+}
+
+// Семья в группе: с роднёй группу не основывают; вступивший приводит супруга,
+// ребёнок идёт за опекуном и уходит вместе с ним; ребёнок не вожак.
+void testFamilyInGroup() {
+    Field field(4);
+    if (!field.open || field.people.size() != 4) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity leader = field.people[0];
+    const entt::entity husband = field.people[1];
+    const entt::entity wife = field.people[2];
+    const entt::entity son = field.people[3];
+    for (const entt::entity person : field.people) {
+        registry.get<lw::Relations>(person) = {};
+        registry.get<lw::Traits>(person) = {};
+        registry.get<lw::Traits>(person).leadership = 0.3f;
+    }
+    registry.get<lw::Traits>(husband).leadership = 0.8f;
+    registry.get<lw::Age>(son).years = 12;
+    registry.get<lw::Traits>(son).leadership = 1.0f;
+    const lw::EntityId familyHome = registry.get<lw::Person>(husband).home;
+    registry.get<lw::Person>(wife).home = familyHome;
+    registry.get<lw::Person>(son).home = familyHome;
+    const lw::EntityId base = nearbyHome(field.world, familyHome, 1000.0f);
+    CHECK(base != lw::kInvalidId);
+    registry.get<lw::Person>(leader).home = base;
+    const auto relate = [&](entt::entity a, entt::entity b, lw::KinKind kind) {
+        registry.get<lw::Kin>(a).add(field.id(b), kind);
+        registry.get<lw::Kin>(b).add(field.id(a), lw::inverseKin(kind));
+    };
+    relate(husband, wife, lw::KinKind::Spouse);
+    relate(son, husband, lw::KinKind::Parent);
+    relate(son, wife, lw::KinKind::Parent);
+    registry.get<lw::Kin>(son).guardian = field.id(husband);
+
+    // Супруги — взаимные друзья, но это семья, а не группа.
+    befriend(registry, field, husband, wife);
+    lw::updateGroups(field.world);
+    CHECK(groupOf(field.world, husband) == nullptr);
+
+    // Друг не из родни — группа; жена и сын переезжают с мужем.
+    befriend(registry, field, husband, leader);
+    registry.get<lw::Traits>(leader).leadership = 0.9f;
+    lw::updateGroups(field.world);
+    const lw::Group* group = groupOf(field.world, husband);
+    CHECK(group != nullptr);
+    if (group == nullptr) {
+        return;
+    }
+    CHECK(groupOf(field.world, wife) == group && groupOf(field.world, son) == group);
+    CHECK(group->members.size() == 4);
+    CHECK(group->leader == field.id(leader));
+    CHECK(registry.get<lw::Person>(son).home == base);
+    CHECK(lw::authorityOf(field.world, *group, field.id(son)) == 0.0f);
+
+    // Муж невзлюбил вожака и ушёл — сын с ним, жена осталась.
+    setBond(registry, husband, field.id(leader), 0.9f, -0.6f, -0.2f);
+    lw::updateGroups(field.world);
+    CHECK(groupOf(field.world, husband) == nullptr);
+    CHECK(groupOf(field.world, son) == nullptr);
+    CHECK(registry.get<lw::Person>(son).home == familyHome);
+    CHECK(groupOf(field.world, wife) != nullptr);
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -6475,6 +6876,12 @@ int main() {
     testStoryLines();
     testForesight();
     testCast();
+    testHouseholdPlan();
+    testFamiliesInWorld();
+    testKinRemembered();
+    testChildBehaviour();
+    testOrphanTakenIn();
+    testFamilyInGroup();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

@@ -16,10 +16,12 @@
 //   lw_headless --seed 42 --phase panic --stories        и сюжетные линии из летописи (этап 12а)
 //   lw_headless --seed 42 --phase panic --foresight      что предвиделось и сбылось ли (этап 12а.2)
 //   lw_headless --seed 42 --phase panic --cast           главные герои: кто, когда и через кого (этап 12а.3)
+//   lw_headless --seed 42 --ticks 0 --families           семьи: дома, родня, сироты, прошлое (этап 7.3)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Events.h"
+#include "sim/Family.h"
 #include "sim/Cast.h"
 #include "sim/Foresight.h"
 #include "sim/Names.h"
@@ -206,22 +208,27 @@ void printWork(const lw::World& world) {
     long long money = 0;
     int poorest = 0;
     std::size_t broke = 0;
+    std::size_t adults = 0;
     for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
         ++people;
         const auto* job = registry.try_get<lw::Job>(entity);
         ++byProfession[static_cast<std::size_t>(job != nullptr ? job->profession : lw::Profession::None)];
-        onDuty += lw::isOnDuty(world, entity) ? 1 : 0;
-        if (const auto* wallet = registry.try_get<lw::Wallet>(entity)) {
+        onDuty += lw::isOnDuty(world, entity) && job->profession != lw::Profession::Pupil ? 1 : 0;
+        // Деньги — у взрослых: у детей карманные (этап 7.3).
+        const auto* wallet = registry.try_get<lw::Wallet>(entity);
+        if (wallet != nullptr && !lw::isMinor(registry, entity)) {
+            ++adults;
             money += wallet->money;
-            poorest = people == 1 ? wallet->money : std::min(poorest, wallet->money);
+            poorest = adults == 1 ? wallet->money : std::min(poorest, wallet->money);
             broke += wallet->money < lw::kFoodPrice ? 1 : 0;
         }
     }
+    const std::size_t pupils = byProfession[static_cast<std::size_t>(lw::Profession::Pupil)];
     std::printf("work: employed %zu of %zu (shopkeepers %zu, farmers %zu, doctors %zu, police %zu, "
-                "teachers %zu), on duty %zu; money mean %.0f (min %d, broke %zu)\n",
-                people - byProfession[0], people, byProfession[1], byProfession[2], byProfession[3],
-                byProfession[4], byProfession[5], onDuty,
-                people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0, poorest,
+                "teachers %zu), pupils %zu, on duty %zu; adults' money mean %.0f (min %d, broke %zu)\n",
+                people - byProfession[0] - pupils, people, byProfession[1], byProfession[2], byProfession[3],
+                byProfession[4], byProfession[5], pupils, onDuty,
+                adults > 0 ? static_cast<double>(money) / static_cast<double>(adults) : 0.0, poorest,
                 broke);
     // Здания по видам: всего, с работниками, открыто, еды в тех, где работают.
     constexpr lw::BuildingKind kKinds[] = {lw::BuildingKind::Shop, lw::BuildingKind::Barn,
@@ -259,8 +266,7 @@ void printWork(const lw::World& world) {
             const entt::entity home = world.find(person.home);
             if (home != entt::null && registry.get<lw::Building>(home).settlement == place.id) {
                 ++residents;
-                const auto* job = registry.try_get<lw::Job>(entity);
-                employed += job != nullptr && job->profession != lw::Profession::None ? 1 : 0;
+                employed += lw::isEmployed(registry.try_get<lw::Job>(entity)) ? 1 : 0;
             }
         }
         std::printf(" %s %zu/%zu", registry.get<lw::Settlement>(world.find(place.id)).name.c_str(),
@@ -293,16 +299,20 @@ void printRelations(const lw::World& world) {
     std::size_t mutual = 0;
     std::size_t foes = 0;
     std::size_t lonely = 0;
+    std::size_t friendless = 0; // нет живого друга вне семьи
     std::size_t gone = 0;
+    std::size_t kin = 0;
     float familiarity = 0.0f;
     for (const auto [entity, id, person, relations] :
          registry.view<const lw::Id, const lw::Person, const lw::Relations>().each()) {
         ++people;
         bonds += relations.count;
         bool hasFriend = false;
+        bool hasOutsideFriend = false;
         for (std::size_t i = 0; i < relations.count; ++i) {
             const lw::Bond& bond = relations.bonds[i];
             familiarity += bond.familiarity;
+            kin += bond.origin == lw::BondOrigin::Kin ? 1 : 0;
             const entt::entity other = world.find(bond.other);
             const bool alive = other != entt::null && registry.all_of<lw::Person>(other);
             gone += alive ? 0 : 1;
@@ -310,6 +320,7 @@ void printRelations(const lw::World& world) {
             if (bond.friendly()) {
                 ++friends;
                 hasFriend = hasFriend || alive;
+                hasOutsideFriend = hasOutsideFriend || (alive && bond.origin != lw::BondOrigin::Kin);
                 const auto* theirs = alive ? registry.try_get<lw::Relations>(other) : nullptr;
                 const lw::Bond* back = theirs != nullptr ? theirs->find(id.value) : nullptr;
                 // Пара считается один раз — у меньшего id.
@@ -317,16 +328,164 @@ void printRelations(const lw::World& world) {
             }
         }
         lonely += hasFriend ? 0 : 1;
+        friendless += hasOutsideFriend ? 0 : 1;
     }
     if (people == 0) {
         return;
     }
-    std::printf("relations: %.1f bonds per person (mean familiarity %.2f), friends %zu "
+    std::printf("relations: %.1f bonds per person (mean familiarity %.2f, kin %zu), friends %zu "
                 "(mutual pairs %zu), foes %zu, bonds with the dead %zu; no living friend %zu "
-                "of %zu\n",
+                "of %zu (outside the family %zu)\n",
                 static_cast<double>(bonds) / static_cast<double>(people),
-                bonds > 0 ? familiarity / static_cast<float>(bonds) : 0.0f, friends, mutual, foes,
-                gone, lonely, people);
+                bonds > 0 ? familiarity / static_cast<float>(bonds) : 0.0f, kin, friends, mutual, foes,
+                gone, lonely, people, friendless);
+}
+
+// Семьи и прошлое (этап 7.3): возраст, родня, опекуны, прошлые связи; с
+// detailed — состав домов и события сирот.
+void printFamilies(const lw::World& world, bool detailed) {
+    const entt::registry& registry = world.registry();
+    std::size_t people = 0;
+    std::size_t children = 0;
+    std::size_t elders = 0;
+    std::size_t orphans = 0;   // ребёнок без живых родителей
+    std::size_t fostered = 0;  // опекун — не родитель
+    std::size_t alone = 0;     // ребёнок без опекуна
+    std::size_t apart = 0;     // родня, живущая в другом доме (связей)
+    constexpr auto kKinds = static_cast<std::size_t>(lw::KinKind::Count);
+    std::size_t links[kKinds] = {};
+    constexpr auto kOrigins = static_cast<std::size_t>(lw::BondOrigin::Count);
+    std::size_t origins[kOrigins] = {};
+    long long ageSum = 0;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        ++people;
+        const int age = lw::ageOf(registry, entity);
+        ageSum += age;
+        elders += age >= 65 ? 1 : 0;
+        if (const auto* kin = registry.try_get<lw::Kin>(entity)) {
+            bool parent = false;
+            for (std::size_t i = 0; i < kin->count; ++i) {
+                const lw::Relative& relative = kin->relatives[i];
+                ++links[static_cast<std::size_t>(relative.kind)];
+                const entt::entity other = world.find(relative.id);
+                const auto* theirs = other != entt::null ? registry.try_get<lw::Person>(other) : nullptr;
+                apart += theirs != nullptr && theirs->home != person.home ? 1 : 0;
+                parent = parent || (relative.kind == lw::KinKind::Parent && theirs != nullptr);
+            }
+            if (age < lw::kAdultAge) {
+                ++children;
+                orphans += parent ? 0 : 1;
+                alone += kin->guardian == lw::kInvalidId ? 1 : 0;
+                fostered += kin->guardian != lw::kInvalidId &&
+                                    lw::kinOf(registry, entity, kin->guardian) != lw::KinKind::Parent
+                                ? 1
+                                : 0;
+            }
+        }
+        if (const auto* relations = registry.try_get<lw::Relations>(entity)) {
+            for (std::size_t i = 0; i < relations->count; ++i) {
+                ++origins[static_cast<std::size_t>(relations->bonds[i].origin)];
+            }
+        }
+    }
+    if (people == 0) {
+        return;
+    }
+    const lw::Chronicle& chronicle = world.chronicle();
+    // Связи — с обеих сторон: пары — пополам.
+    std::printf("families: children %zu, elders 65+ %zu, mean age %.0f; spouses %zu pairs, parent-child %zu, "
+                "siblings %zu pairs, grandparent-grandchild %zu; kin living apart %zu links; orphans %zu, "
+                "fostered %zu, alone %zu; orphaned %zu, took in %zu\n",
+                children, elders, static_cast<double>(ageSum) / static_cast<double>(people),
+                links[static_cast<std::size_t>(lw::KinKind::Spouse)] / 2,
+                links[static_cast<std::size_t>(lw::KinKind::Child)],
+                links[static_cast<std::size_t>(lw::KinKind::Sibling)] / 2,
+                links[static_cast<std::size_t>(lw::KinKind::Grandchild)], apart, orphans, fostered, alone,
+                chronicle.countOf(lw::ChronicleKind::Orphaned), chronicle.countOf(lw::ChronicleKind::TookIn));
+    std::printf("  bonds by origin: met %zu, housemates %zu, neighbours %zu, kin %zu, colleagues %zu, "
+                "classmates %zu, old friends %zu, old feuds %zu, ex-partners %zu\n",
+                origins[0], origins[1], origins[2], origins[3], origins[4], origins[5], origins[6],
+                origins[7], origins[8]);
+    if (!detailed) {
+        return;
+    }
+    static constexpr const char* kKinNames[] = {"spouse", "parent", "child", "sibling", "grandparent",
+                                                "grandchild"};
+    static_assert(std::size(kKinNames) == kKinds);
+    // Дома с жильцами — по id дома: кто живёт и кем друг другу приходятся.
+    std::vector<std::pair<lw::EntityId, lw::EntityId>> residents; // дом, человек
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        if (person.home != lw::kInvalidId) {
+            residents.emplace_back(person.home, id.value);
+        }
+    }
+    std::sort(residents.begin(), residents.end());
+    std::printf("households (first 20 homes):\n");
+    int shown = 0;
+    for (std::size_t begin = 0; begin < residents.size() && shown < 20; ++shown) {
+        std::size_t end = begin;
+        while (end < residents.size() && residents[end].first == residents[begin].first) {
+            ++end;
+        }
+        std::printf("  home #%llu:", static_cast<unsigned long long>(residents[begin].first));
+        for (std::size_t i = begin; i < end; ++i) {
+            const entt::entity entity = world.find(residents[i].second);
+            std::printf(" %s (%d)", label(world, residents[i].second).c_str(), lw::ageOf(registry, entity));
+        }
+        std::printf("\n");
+        for (std::size_t i = begin; i < end; ++i) {
+            const auto* kin = registry.try_get<lw::Kin>(world.find(residents[i].second));
+            if (kin == nullptr || kin->count == 0) {
+                continue;
+            }
+            std::printf("    %s:", label(world, residents[i].second).c_str());
+            for (std::size_t k = 0; k < kin->count; ++k) {
+                const lw::Relative& relative = kin->relatives[k];
+                const entt::entity other = world.find(relative.id);
+                const auto* theirs = other != entt::null ? registry.try_get<lw::Person>(other) : nullptr;
+                std::printf(" %s %s%s", kKinNames[static_cast<std::size_t>(relative.kind)],
+                            label(world, relative.id).c_str(),
+                            theirs != nullptr && theirs->home != residents[begin].first ? " (elsewhere)" : "");
+            }
+            if (kin->guardian != lw::kInvalidId) {
+                std::printf("; guardian %s", label(world, kin->guardian).c_str());
+            }
+            std::printf("\n");
+        }
+        begin = end;
+    }
+    // Прошлые связи и судьбы детей — по летописи и связям.
+    std::printf("past ties:\n");
+    int ties = 0;
+    for (const auto [entity, id, relations] : registry.view<const lw::Id, const lw::Relations>().each()) {
+        for (std::size_t i = 0; i < relations.count && ties < 15; ++i) {
+            const lw::Bond& bond = relations.bonds[i];
+            if (bond.other < id.value || (bond.origin != lw::BondOrigin::OldFriend &&
+                                          bond.origin != lw::BondOrigin::OldFeud &&
+                                          bond.origin != lw::BondOrigin::ExPartner)) {
+                continue;
+            }
+            static constexpr const char* kPast[] = {"old friends", "old feud", "ex-partners"};
+            ++ties;
+            std::printf("  %s: %s and %s (affinity %+.2f)\n",
+                        kPast[static_cast<int>(bond.origin) - static_cast<int>(lw::BondOrigin::OldFriend)],
+                        label(world, id.value).c_str(), label(world, bond.other).c_str(), bond.affinity);
+        }
+    }
+    for (const lw::ChronicleEvent& event : chronicle.events()) {
+        if (event.kind == lw::ChronicleKind::Orphaned) {
+            std::printf("  tick %llu: %s orphaned (last parent %s)\n", static_cast<unsigned long long>(event.tick),
+                        label(world, event.subject).c_str(), label(world, event.object).c_str());
+        } else if (event.kind == lw::ChronicleKind::TookIn) {
+            lw::KinKind kind = lw::KinKind::Count;
+            bool female = false;
+            const bool kin = lw::decodeKin(event.a, kind, female);
+            std::printf("  tick %llu: %s took in %s (%s)%s\n", static_cast<unsigned long long>(event.tick),
+                        label(world, event.subject).c_str(), label(world, event.object).c_str(),
+                        kin ? kKinNames[static_cast<std::size_t>(kind)] : "not kin",
+                        event.b == 1 ? ", into the group" : "");
+        }
+    }
 }
 
 // Память (этап 6.1), долг и обида (этап 6.2) у живых.
@@ -1340,6 +1499,7 @@ int main(int argc, char** argv) {
     bool storyLog = false;
     bool foresightLog = false;
     bool castLog = false;
+    bool familyLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1371,6 +1531,8 @@ int main(int argc, char** argv) {
             storyLog = true;
         } else if (std::strcmp(argv[i], "--foresight") == 0) {
             foresightLog = true;
+        } else if (std::strcmp(argv[i], "--families") == 0) {
+            familyLog = true;
         } else if (std::strcmp(argv[i], "--cast") == 0) {
             castLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
@@ -1398,7 +1560,7 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--stories] [--foresight] [--cast] [--profile]\n");
+                        "[--stories] [--foresight] [--cast] [--families] [--profile]\n");
             return 2;
         }
     }
@@ -1455,6 +1617,7 @@ int main(int argc, char** argv) {
     printPeople(world);
     printWork(world);
     printRelations(world);
+    printFamilies(world, familyLog);
     printMemories(world);
     printGroups(world);
     printPerception(world);

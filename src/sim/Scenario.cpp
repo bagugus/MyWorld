@@ -19,7 +19,7 @@ constexpr std::uint32_t bit(Profession profession) {
 
 constexpr std::uint32_t kEveryone = bit(Profession::Shopkeeper) | bit(Profession::Farmer) |
                                     bit(Profession::Doctor) | bit(Profession::PoliceOfficer) |
-                                    bit(Profession::Teacher);
+                                    bit(Profession::Teacher) | bit(Profession::Pupil);
 
 // Правила по порядку WorldPhase. Числа и почему такие — docs/architecture.md,
 // «Сценарий и фазы мира».
@@ -41,7 +41,7 @@ constexpr PhaseRules kRules[] = {
     // выходят те, кто держится за неё; вечером — по домам.
     {.name = "panic",
      .supply = 0.5f,
-     .professions = kEveryone & ~bit(Profession::Teacher),
+     .professions = kEveryone & ~bit(Profession::Teacher) & ~bit(Profession::Pupil),
      .dutyNeeded = 0.45f,
      .eveningHome = 0.35f,
      .stockpile = 2.5f,
@@ -159,6 +159,9 @@ float dutyOf(Profession profession, const Traits& t) {
     case Profession::Teacher:
         duty = 0.2f + 0.3f * t.altruism + 0.3f * t.bravery;
         break;
+    case Profession::Pupil:
+        duty = 1.0f; // пока школа открыта, дети ходят на уроки
+        break;
     default:
         break;
     }
@@ -189,7 +192,8 @@ std::vector<EntityId> mannedWorkplaces(const World& world) {
     std::vector<EntityId> manned;
     for (const auto [entity, person, job] : registry.view<const Person, const Job>().each()) {
         const auto* traits = registry.try_get<Traits>(entity);
-        if (keepsWorking(phase, job.profession, traits != nullptr ? *traits : kAverage)) {
+        if (job.profession != Profession::Pupil &&
+            keepsWorking(phase, job.profession, traits != nullptr ? *traits : kAverage)) {
             manned.push_back(job.workplace);
         }
     }

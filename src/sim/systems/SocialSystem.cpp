@@ -136,7 +136,8 @@ void updateRelations(World& world, float minutes) {
             kGrudgeHours * (0.5f + mine.aggression) * (1.5f - mine.altruism);
         for (std::size_t i = 0; i < relations.count; ++i) {
             Bond& bond = relations.bonds[i];
-            if (tick > bond.seen + kForgetAfterTicks) {
+            // Родню не забывают, даже если давно не виделись (этап 7.3).
+            if (tick > bond.seen + kForgetAfterTicks && bond.origin != BondOrigin::Kin) {
                 bond.familiarity = std::max(0.0f, bond.familiarity - hours / kForgetHours);
             }
             if (bond.debt > 0.0f) {

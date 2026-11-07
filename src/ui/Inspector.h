@@ -65,6 +65,8 @@ private:
     bool drawPerception(entt::entity entity);
     // Кого человек знает и как к нему относится. false — щёлкнули по ссылке.
     bool drawRelations(entt::entity entity);
+    // Семья (этап 7.3): родня, опекун; false — выбран другой объект.
+    bool drawFamily(entt::entity entity);
     // Что человек помнит о других. false — щёлкнули по ссылке.
     bool drawMemories(entt::entity entity);
     // Что человек знает об ивентах. false — щёлкнули по ссылке.

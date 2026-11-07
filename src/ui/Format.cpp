@@ -36,10 +36,58 @@ const char* buildingName(BuildingKind kind) {
 
 const char* professionName(Profession profession) {
     constexpr const char* kNames[] = {"без работы", "продавец", "фермер", "врач", "полицейский",
-                                      "учитель"};
+                                      "учитель", "школьник"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Profession::Count));
     const auto index = static_cast<std::size_t>(profession);
     return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* kinWord(KinKind kind, bool female, Case grammaticalCase) {
+    // По KinKind: мужской и женский род в четырёх падежах.
+    static constexpr const char* kWords[][2][4] = {
+        {{"муж", "мужа", "мужа", "мужем"}, {"жена", "жены", "жену", "женой"}},
+        {{"отец", "отца", "отца", "отцом"}, {"мать", "матери", "мать", "матерью"}},
+        {{"сын", "сына", "сына", "сыном"}, {"дочь", "дочери", "дочь", "дочерью"}},
+        {{"брат", "брата", "брата", "братом"}, {"сестра", "сестры", "сестру", "сестрой"}},
+        {{"дед", "деда", "деда", "дедом"}, {"бабушка", "бабушки", "бабушку", "бабушкой"}},
+        {{"внук", "внука", "внука", "внуком"}, {"внучка", "внучки", "внучку", "внучкой"}},
+    };
+    static_assert(std::size(kWords) == static_cast<std::size_t>(KinKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    if (index >= std::size(kWords)) {
+        return "родственник";
+    }
+    return kWords[index][female ? 1 : 0][static_cast<std::size_t>(grammaticalCase)];
+}
+
+const char* bondOriginName(BondOrigin origin, bool female) {
+    switch (origin) {
+    case BondOrigin::Housemate:
+        return female ? "соседка по дому" : "сосед по дому";
+    case BondOrigin::Neighbour:
+        return female ? "соседка" : "сосед";
+    case BondOrigin::Kin:
+        return "родня";
+    case BondOrigin::Colleague:
+        return "коллега";
+    case BondOrigin::Classmate:
+        return "по школе";
+    case BondOrigin::OldFriend:
+        return female ? "давняя подруга" : "давний друг";
+    case BondOrigin::OldFeud:
+        return "давняя вражда";
+    case BondOrigin::ExPartner:
+        return female ? "бывшая жена" : "бывший муж";
+    default:
+        return "";
+    }
+}
+
+std::string ageText(int years) {
+    const int last = years % 10;
+    const int lastTwo = years % 100;
+    const char* word = lastTwo >= 11 && lastTwo <= 14 ? "лет" : last == 1 ? "год" : last >= 2 && last <= 4 ? "года" : "лет";
+    return std::to_string(years) + " " + word;
 }
 
 const char* settlementKindName(SettlementKind kind) {

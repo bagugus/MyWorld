@@ -1,5 +1,6 @@
 #include "sim/Work.h"
 
+#include "sim/Family.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -23,6 +24,7 @@ constexpr ProfessionSpec kSpecs[] = {
     {BuildingKind::Hospital, 8 * kHour, 16 * kHour, 14 * kHour, 22 * kHour, 5, false, 9}, // врач
     {BuildingKind::PoliceStation, 8 * kHour, 16 * kHour, 14 * kHour, 22 * kHour, 5, false, 7},
     {BuildingKind::School, 8 * kHour, 14 * kHour, 0, 0, 5, true, 6},                      // учитель
+    {BuildingKind::School, 8 * kHour, 14 * kHour, 0, 0, 5, true, 0},                      // школьник
 };
 static_assert(std::size(kSpecs) == static_cast<std::size_t>(Profession::Count));
 
@@ -31,6 +33,14 @@ static_assert(std::size(kSpecs) == static_cast<std::size_t>(Profession::Count));
 constexpr int kSavingsMin = 20;
 constexpr int kSavingsMax = 100;
 constexpr float kSavingsPrudence = 150.0f;
+// Карманные деньги детей (этап 7.3): у маленьких — до kPocketYoung, у
+// подростков — до kPocketTeen.
+constexpr int kPocketYoung = 5;
+constexpr int kPocketTeen = 30;
+constexpr int kTeenAge = 12;
+// Работают взрослые младше kRetireAge; в школу ходят с kSchoolAge.
+constexpr int kRetireAge = 67;
+constexpr int kSchoolAge = 6;
 
 // Сколько жителей приходится на одно место работы (больше — больше мест, но
 // не больше потолка): врачи и полиция, учителя, продавцы; фермеров — по
@@ -175,8 +185,12 @@ void assignJobs(World& world) {
         return traits != nullptr ? *traits : kAverage;
     };
     for (const auto& [id, entity] : people) {
-        const int savings = rng.rangeInt(kSavingsMin, kSavingsMax) +
-                            static_cast<int>(std::lround(kSavingsPrudence * traitsOf(entity).prudence));
+        const int age = ageOf(registry, entity);
+        const int savings = age < kTeenAge  ? rng.rangeInt(0, kPocketYoung)
+                            : age < kAdultAge ? rng.rangeInt(0, kPocketTeen)
+                                              : rng.rangeInt(kSavingsMin, kSavingsMax) +
+                                                    static_cast<int>(std::lround(kSavingsPrudence *
+                                                                                 traitsOf(entity).prudence));
         registry.emplace_or_replace<Wallet>(entity, Wallet{savings});
     }
 
@@ -243,7 +257,9 @@ void assignJobs(World& world) {
             std::size_t best = residents.size();
             float bestFit = 0.0f;
             for (std::size_t i = 0; i < residents.size(); ++i) {
-                if (taken[i]) {
+                // Работают взрослые, ещё не на пенсии (этап 7.3).
+                const int age = ageOf(registry, residents[i].second);
+                if (taken[i] || age < kAdultAge || age >= kRetireAge) {
                     continue;
                 }
                 const float fit = fitness(profession, traitsOf(residents[i].second)) +
@@ -307,7 +323,29 @@ void assignJobs(World& world) {
             }
             begin = end;
         }
+
+        // Школьники (этап 7.3): дети школьного возраста ходят в школу своего
+        // поселения — она есть только в городе.
+        const auto schools = ofKind(BuildingKind::School);
+        if (!schools.empty()) {
+            const ProfessionSpec& spec = professionSpec(Profession::Pupil);
+            for (const auto& [id, entity] : residents) {
+                const int age = ageOf(registry, entity);
+                if (age < kSchoolAge || age >= kAdultAge) {
+                    continue;
+                }
+                Job job;
+                job.profession = Profession::Pupil;
+                job.workplace = schools.front()->id;
+                job.start = static_cast<std::uint16_t>(spec.start);
+                job.end = static_cast<std::uint16_t>(spec.end);
+                job.days = 0b0011111;
+                registry.emplace_or_replace<Job>(entity, job);
+            }
+        }
     }
+    // Коллеги и одноклассники знакомы с начала мира.
+    introduceColleagues(world);
 }
 
 } // namespace lw
