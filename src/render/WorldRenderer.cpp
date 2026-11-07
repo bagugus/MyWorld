@@ -5,6 +5,7 @@
 #include "sim/Components.h"
 #include "sim/Family.h"
 #include "sim/Infection.h"
+#include "sim/Society.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 
@@ -97,6 +98,30 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
         if (world.tick() < event.signalUntil) {
             drawSmoke(world, event, zoom);
         }
+    }
+
+    // Реакция общества (этап 7.6): кордон карантина — пунктир по краю, пункт
+    // эвакуации — рамка вокруг здания и кольцо у двери, видное издалека.
+    for (const auto [entity, settlement, quarantine] :
+         world.registry().view<const Settlement, const Quarantine>().each()) {
+        const Vector2 center = {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)};
+        const float r = static_cast<float>(settlement.radius) * Map::kCellSize + kCordonMargin;
+        const float width = std::max(1.5f, 3.0f / zoom);
+        constexpr int kDashes = 36;
+        for (int i = 0; i < kDashes; i += 2) {
+            const float from = 360.0f * static_cast<float>(i) / kDashes;
+            DrawRing(center, r, r + width, from, from + 360.0f / kDashes, 4, kQuarantineColor);
+        }
+    }
+    for (const auto [entity, building, point] : world.registry().view<const Building, const EvacuationPoint>().each()) {
+        const Rectangle rect = {static_cast<float>(building.origin.x) * Map::kCellSize - 2.0f,
+                                static_cast<float>(building.origin.y) * Map::kCellSize - 2.0f,
+                                static_cast<float>(building.width) * Map::kCellSize + 4.0f,
+                                static_cast<float>(building.height) * Map::kCellSize + 4.0f};
+        DrawRectangleLinesEx(rect, std::max(0.6f, 2.0f / zoom), kEvacuationColor);
+        const Vector2 door = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
+        const float ring = std::max(6.0f, 9.0f / zoom);
+        DrawRing(door, ring, ring + 2.0f / zoom, 0.0f, 360.0f, 32, kEvacuationColor);
     }
 
     // Радиус в метрах, но не меньше нескольких пикселей — чтобы существа

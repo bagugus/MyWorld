@@ -42,6 +42,7 @@ enum class RngStream : std::uint8_t {
     Scenario, // сценарий: первые заражённые в начале вспышки (этап 7.4)
     Families, // семьи при рождении мира: состав домов, возраст, родня, прошлое (этап 7.3)
     Outbreak, // заражение от больных и тел: кто заразился рядом с ними (этап 7.5)
+    Society,  // реакция общества: кто услышал передачу, солдаты (этап 7.6)
     Count
 };
 
@@ -87,7 +88,7 @@ public:
     void step();
 
     // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
-    static constexpr int kStepPhases = 18;
+    static constexpr int kStepPhases = 19;
     static const char* stepPhaseName(int phase);
     void setProfiling(bool enabled) { profiling_ = enabled; }
     // Накопленные секунды на каждый шаг тика с включения замера.

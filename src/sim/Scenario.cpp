@@ -19,9 +19,12 @@ constexpr std::uint32_t bit(Profession profession) {
     return 1u << static_cast<unsigned>(profession);
 }
 
+// Солдаты (этап 7.6) есть в мире только с паники до коллапса, но служат, пока
+// есть власть.
 constexpr std::uint32_t kEveryone = bit(Profession::Shopkeeper) | bit(Profession::Farmer) |
                                     bit(Profession::Doctor) | bit(Profession::PoliceOfficer) |
-                                    bit(Profession::Teacher) | bit(Profession::Pupil);
+                                    bit(Profession::Teacher) | bit(Profession::Pupil) |
+                                    bit(Profession::Soldier);
 
 // Правила по порядку WorldPhase. Числа и почему такие — docs/architecture.md,
 // «Сценарий и фазы мира».
@@ -167,6 +170,9 @@ float dutyOf(Profession profession, const Traits& t) {
     case Profession::Pupil:
         duty = 1.0f; // пока школа открыта, дети ходят на уроки
         break;
+    case Profession::Soldier:
+        duty = 0.3f + 0.4f * t.bravery + 0.3f * t.leadership; // дисциплина (этап 7.6)
+        break;
     default:
         break;
     }
@@ -212,8 +218,10 @@ bool policeOnDuty(const World& world, entt::entity person) {
     const auto* job = registry.try_get<Job>(person);
     const auto* mind = registry.try_get<Mind>(person);
     const auto* self = registry.try_get<Person>(person);
+    // Солдат на посту (этап 7.6) — тоже: заступается за любого.
     return job != nullptr && mind != nullptr && self != nullptr &&
-           job->profession == Profession::PoliceOfficer && !self->asleep &&
+           (job->profession == Profession::PoliceOfficer || job->profession == Profession::Soldier) &&
+           !self->asleep &&
            (mind->action == Action::Work || mind->action == Action::Fight) &&
            onShift(*job, calendarAt(world.tick())) && keepsWorking(world, person);
 }
@@ -239,6 +247,9 @@ ScenarioStats scenarioStats(const World& world) {
     ScenarioStats stats;
     for (const auto [entity, person] : registry.view<const Person>().each()) {
         ++stats.alive;
+        if (const auto* job = registry.try_get<Job>(entity); job != nullptr && job->profession == Profession::Soldier) {
+            ++stats.soldiers;
+        }
         if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
             ++stats.infected;
             stats.sick += isVisiblyIll(*wounds) ? 1 : 0;
@@ -251,8 +262,15 @@ ScenarioStats scenarioStats(const World& world) {
     const Scenario* scenario = scenarioOf(world);
     const bool started = scenario != nullptr &&
                          scenario->began[static_cast<std::size_t>(WorldPhase::Outbreak)] != Scenario::kNever;
-    stats.population = started ? scenario->population : stats.alive;
-    stats.lost = std::max(0, stats.population - stats.alive);
+    for (const auto [entity, evacuated] : registry.view<const Evacuated>().each()) {
+        const auto* job = registry.try_get<Job>(entity);
+        stats.evacuated += job != nullptr && job->profession == Profession::Soldier ? 0 : 1;
+    }
+    // Солдаты пришли извне, а эвакуированные живы (этап 7.6): ни те, ни другие
+    // не в счёт потерь.
+    const int residents = stats.alive - stats.soldiers;
+    stats.population = started ? scenario->population : residents;
+    stats.lost = std::max(0, stats.population - residents - stats.evacuated);
     return stats;
 }
 

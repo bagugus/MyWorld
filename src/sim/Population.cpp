@@ -441,6 +441,7 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Relations>(entity);
         registry.emplace<Memories>(entity);
         registry.emplace<Leads>(entity);
+        registry.emplace<Alarm>(entity); // о беде пока никто не знает (этап 7.6)
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
 

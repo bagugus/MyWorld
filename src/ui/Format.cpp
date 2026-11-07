@@ -36,7 +36,7 @@ const char* buildingName(BuildingKind kind) {
 
 const char* professionName(Profession profession) {
     constexpr const char* kNames[] = {"без работы", "продавец", "фермер", "врач", "полицейский",
-                                      "учитель", "школьник"};
+                                      "учитель", "школьник", "солдат"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Profession::Count));
     const auto index = static_cast<std::size_t>(profession);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -100,7 +100,8 @@ const char* actionName(Action action) {
                                       "гуляет",   "уходит домой", "убегает", "дерётся",
                                       "охотится", "перевязывается", "делится", "меняется",
                                       "крадёт",   "мстит",    "идёт к месту ивента",
-                                      "на работе", "за покупками", "у врача"};
+                                      "на работе", "за покупками", "у врача",
+                                      "идёт к пункту эвакуации", "спешит к своим"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
     const auto index = static_cast<std::size_t>(action);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -195,6 +196,31 @@ const char* phaseName(WorldPhase phase) {
     constexpr const char* kNames[] = {"мир", "вспышка", "паника", "коллапс", "выживание"};
     static_assert(std::size(kNames) == kWorldPhases);
     const auto index = static_cast<std::size_t>(phase);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* alarmStageText(AlarmStage stage) {
+    constexpr const char* kNames[] = {"ничего не знает", "ходит странная болезнь",
+                                      "больные нападают, это заразно", "мёртвые встают"};
+    const auto index = static_cast<std::size_t>(stage);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* alarmClueText(AlarmClue clue) {
+    constexpr const char* kNames[] = {"—", "сам слёг в жару", "видел больного в жару",
+                                      "видел тело умершего от заразы", "видел укус",
+                                      "видел зомби", "рассказали", "по радио и телевизору"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(AlarmClue::Count));
+    const auto index = static_cast<std::size_t>(clue);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* broadcastText(BroadcastKind kind) {
+    constexpr const char* kNames[] = {"—", "эпидемия неизвестной болезни: оставайтесь дома",
+                                      "больные нападают на людей: эвакуация из городов",
+                                      "последняя передача: армия уходит, спасайтесь сами"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(BroadcastKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 

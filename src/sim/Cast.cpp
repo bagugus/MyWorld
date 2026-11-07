@@ -134,6 +134,18 @@ Roles rolesOf(const ChronicleEvent& event) {
         return {2.5f}; // объект — сценарий, не человек (этап 7.5)
     case K::Infected:
         return {1.5f, 0.8f}; // заразился — и от кого: больной сам не знал
+    case K::Alarmed: // этап 7.6: узнал о беде — и от кого
+        return {event.a >= 2 ? 0.5f : 0.2f, 0.2f};
+    case K::BrokeQuarantine:
+        return {1.5f};
+    case K::Evacuated:
+        return {2.5f};
+    case K::EvacuationRefused:
+        return {2.0f, 0.0f, 1.0f};
+    case K::StayedBehind:
+        return {2.5f};
+    case K::Reunited:
+        return {2.0f, 1.5f};
     default:
         return {};
     }
@@ -279,6 +291,9 @@ void CastTracker::consume(const ChronicleEvent& event, std::uint32_t index) {
         leave(event.subject, HeroStatus::Dead, index, event.tick);
     } else if (event.kind == ChronicleKind::Turned) {
         leave(event.subject, HeroStatus::Turned, index, event.tick);
+    } else if (event.kind == ChronicleKind::Evacuated) {
+        // Уехал из края (этап 7.6) — ушёл со сцены.
+        leave(event.subject, HeroStatus::Retired, index, event.tick);
     }
 }
 

@@ -54,7 +54,7 @@ enum class ChronicleKind : std::uint8_t {
     GroupFormed,   // собрал группу object и возглавил её (этап 6.4)
     JoinedGroup,   // вступил в группу object (вожак — third); a = 1 — переехал на её базу
     LeftGroup,     // ушёл из группы object (вожак — third)
-    Expelled,      // изгнал object из группы third
+    Expelled,      // изгнал object из группы third; a = 1 — за то, что заражён (этап 7.6)
     LedGroup,      // возглавил группу object вместо third: a = 0 — тот погиб, 1 — сместил его
     GroupDisbanded, // группа распалась (subject — группа); object — кто остался
     Shared,        // поделился с object: a — что (ItemKind) и вернул ли долг (+256), b — сколько (этап 6.5)
@@ -78,6 +78,18 @@ enum class ChronicleKind : std::uint8_t {
     TookIn,        // взял к себе ребёнка object: a — кем он ему (kinCode), b = 1 — в дом группы
     PatientZero,   // заразился неизвестно где — нулевой пациент сценария object (a = 0) или новый завозной случай (a = 1) (этап 7.5)
     Infected,      // заразился от object (больного или тела): a — как (InfectionRoute)
+    Alarmed,       // встревожился до стадии a (AlarmStage): b — как узнал (AlarmClue); object — кто рассказал или кого видел (этап 7.6)
+    Broadcast,     // сценарий (subject) передал по радио и телевизору сообщение a (BroadcastKind); object — поселение, если о нём
+    QuarantineDeclared, // в поселении (subject) объявлен карантин: a — случаев; object — сценарий
+    QuarantineLifted,   // в поселении (subject) снят карантин: a = 0 — случаев нет сутки, 1 — власти не стало
+    BrokeQuarantine,    // прорвался через кордон карантина поселения object: вышел или зашёл
+    EvacuationOpened,   // в здании (subject) открыт пункт эвакуации поселения object: a — солдат прибыло
+    Evacuated,     // уехал с колонной из пункта object: a = 1 — солдат (армия уходит)
+    EvacuationRefused, // не пустили в колонну в пункте object: a — почему (0 — заметно болен); third — солдат
+    ConvoyLeft,    // из пункта (subject) ушла колонна: a — увезла людей, b — осталось ждать
+    EvacuationEnded, // пункт (subject) закрыт: a — всего увезли
+    StayedBehind,  // солдат остался, когда армия ушла из пункта object
+    Reunited,      // добрался до своих — object: a — кем он ему (kinCode), b = 1 — переехал к нему, 0 — забрал ребёнка
     Count
 };
 

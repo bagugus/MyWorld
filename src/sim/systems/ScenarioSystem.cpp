@@ -6,6 +6,7 @@
 #include "sim/Scenario.h"
 #include "sim/World.h"
 #include "sim/systems/InfectionSystem.h"
+#include "sim/systems/SocietySystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -32,8 +33,10 @@ void recordQuitters(World& world, WorldPhase before, WorldPhase after) {
          registry.view<const Id, const Person, const Job>().each()) {
         const auto* traits = registry.try_get<Traits>(entity);
         const Traits& t = traits != nullptr ? *traits : kAverage;
-        // Школа закрылась — дети не «бросают работу» (этап 7.3).
-        if (job.profession != Profession::Pupil && keepsWorking(before, job.profession, t) &&
+        // Школа закрылась — дети не «бросают работу» (этап 7.3); солдаты
+        // уходят с армией или остаются — это пишет SocietySystem (этап 7.6).
+        if (job.profession != Profession::Pupil && job.profession != Profession::Soldier &&
+            keepsWorking(before, job.profession, t) &&
             !keepsWorking(after, job.profession, t)) {
             quitters.emplace_back(id.value, job.workplace);
         }
@@ -67,6 +70,8 @@ void beginNextPhase(World& world, entt::entity entity) {
         const EntityId zero = infectPatientZero(world, id, world.rng(RngStream::Scenario));
         registry.get<Scenario>(entity).patientZero = zero;
     }
+    // Ответ власти и армии (этап 7.6): эвакуация, уход армии, последняя передача.
+    onPhaseBegan(world, after);
 }
 
 // Есть ли среди жителей зараза (этап 7.5): заражённый, тело, которое встанет,

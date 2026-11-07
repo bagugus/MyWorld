@@ -9,6 +9,7 @@
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Scenario.h"
+#include "sim/Society.h"
 #include "sim/Weapons.h"
 #include "sim/Work.h"
 #include "sim/World.h"
@@ -413,6 +414,90 @@ constexpr float kSickVisitCare = 0.5f;
 constexpr float kSickVisitRange = 4000.0f;
 constexpr std::uint64_t kSickVisitGap = 8 * kTicksPerGameHour;
 
+// --- Реакция общества (этап 7.6) -------------------------------------------------
+// Тревога (Alarm, sim/Society.h) меняет распорядок; worry — alarmWorry, 0..1.
+// Гулять — × (1 − kAlarmWander × worry); к людям по одиночеству — × (1 −
+// kAlarmCompany × worry): сидят по домам. Больного в жару (не родню)
+// сторонятся с «странной болезни»: к нему не идут, друзья не навещают; родня —
+// × (1 − kAlarmKinVisit × worry). С незнакомым (знакомство ниже
+// kDistrustFamiliarity) меняются × (1 − kAlarmDistrust × worry). Еды держать
+// дома — не меньше 1 + kAlarmStockpile × worry: скупают впрок ещё до паники.
+constexpr float kAlarmWander = 0.7f;
+constexpr float kAlarmCompany = 0.5f;
+constexpr float kAlarmKinVisit = 0.5f;
+constexpr float kAlarmDistrust = 0.6f;
+constexpr float kDistrustFamiliarity = 0.6f;
+constexpr float kAlarmStockpile = 1.5f;
+// Кордон карантина: выйти из поселения на карантине или зайти в него —
+// оценка × (kCordonRespect + kCordonDefiance × max(0, смелость + агрессия − 1)):
+// послушный почти не пытается, смелый и вспыльчивый — охотнее; к своим — не
+// меньше kCordonLove; полицейский на посту рядом (kCordonWatch) — ещё ×
+// kPoliceDeterrence; отчаявшемуся от голода — всё равно. Вышел — летопись
+// BrokeQuarantine, не чаще раза в kBreakEpisodeTicks.
+constexpr float kCordonRespect = 0.25f;
+constexpr float kCordonDefiance = 0.5f;
+constexpr float kCordonLove = 0.6f;
+constexpr float kCordonWatch = 150.0f;
+constexpr std::uint64_t kBreakEpisodeTicks = 6 * kTicksPerGameHour;
+// Полицейский на карантине стоит на выезде из поселения с таким шансом.
+constexpr float kCheckpointChance = 0.7f;
+// Солдат на посту — у двери пункта или обходит его не дальше kGuardRange.
+constexpr float kGuardRange = 60.0f;
+constexpr float kGuardDoorChance = 0.5f;
+// К пункту эвакуации — с тревоги kAlarmedLevel, пока пункты открыты (паника).
+// Оценка — (kEvacBase + kEvacUrgency × u) × воля × near(d, kEvacScale), u —
+// тревога сверх «нападают» (0..1), воля — kEvacWill + kEvacPrudence ×
+// (запасливость − 0,5) − kEvacBravery × (смелость − 0,5) − kEvacGreed ×
+// (жадность − 0,5) (+kEvacKids с детьми, +kEvacElder старикам), от kEvacWillMin
+// до kEvacWillMax: средний человек лучше пересидит дома, уезжают трусливые,
+// запасливые, семьи с детьми и старики. Работающий
+// (держится за работу) — × kEvacDuty, в группе — × kEvacGroup, дети не рядом
+// или супруг в другом доме — × kEvacFamily (сначала к своим). Ночью —
+// kNightPenalty. Дальше kEvacRange не идут. У пункта ждут колонну
+// (nextConvoyTick), не дольше kEvacWaitMax минут.
+constexpr float kEvacBase = 0.35f;
+constexpr float kEvacUrgency = 0.55f;
+constexpr float kEvacWill = 0.2f;
+constexpr float kEvacPrudence = 0.6f;
+constexpr float kEvacBravery = 0.8f;
+constexpr float kEvacGreed = 0.4f;
+constexpr float kEvacKids = 0.25f;
+constexpr float kEvacElder = 0.15f;
+constexpr float kEvacWillMin = 0.0f;
+constexpr float kEvacWillMax = 1.0f;
+constexpr float kEvacDuty = 0.25f;
+constexpr float kEvacGroup = 0.3f;
+constexpr float kEvacFamily = 0.25f;
+constexpr float kEvacScale = 2500.0f;
+constexpr float kEvacRange = 7000.0f;
+constexpr int kEvacWaitMax = 8 * 60;
+constexpr int kElderAge = 65;
+// Ребёнок идёт за опекуном к пункту с такой оценкой.
+constexpr float kFollowGuardian = 0.9f;
+// К своим (бегут к родне): с тревоги kAlarmedLevel. Забрать ребёнка (подопечного),
+// который дальше kFetchFar от опекуна, не дома и не со взрослой роднёй (ближе
+// kFetchCompany), — пока не наступило выживание (в первые дни беды, когда
+// дети могут быть в школе и у друзей) и если ещё не забирал его: kFetchWeight
+// × срочность × near(d, kFetchScale). Переехать к родне — с тревоги kMoveInAlarm, не в
+// группе: кто живёт меньшим домом, к тому, у кого больше (поровну — младший к
+// старшему); kMoveInWeight × срочность × родство × near(d, kMoveInScale), не
+// дальше kMoveInRange, к тому, с кем в разладе, — нет. Срочность —
+// kReuniteUrgency + (1 − kReuniteUrgency) × тревога сверх «нападают».
+constexpr float kReuniteUrgency = 0.5f;
+constexpr float kFetchWeight = 0.95f;
+constexpr float kFetchFar = 250.0f;
+constexpr float kFetchCompany = 30.0f;
+constexpr float kFetchHome = 40.0f;
+constexpr float kFetchScale = 3000.0f;
+constexpr float kMoveInAlarm = 0.6f;
+constexpr float kMoveInWeight = 0.7f;
+constexpr float kMoveInScale = 4000.0f;
+constexpr float kMoveInRange = 9000.0f;
+constexpr float kMoveInDuty = 0.3f;
+// Дошёл до ребёнка — ближе этого, метры.
+constexpr float kFetchReach = 12.0f;
+constexpr int kReuniteMinutes = 5;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -514,6 +599,13 @@ struct Context {
     // Лихорадка (этап 7.5): 0..1, и есть ли она вообще (на пороге — 0).
     bool feverish = false;
     float fever = 0.0f;
+    // Тревога о беде (этап 7.6) и насколько она тревожит (alarmWorry).
+    float alarm = 0.0f;
+    float worry = 0.0f;
+    std::uint64_t refusedAt = 0; // не пустили в колонну эвакуации
+    // Поселение на карантине, внутри кордона которого человек; kInvalidId — нет.
+    EntityId cordon = kInvalidId;
+    bool quarantines = false; // где-то в мире объявлен карантин
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -559,6 +651,15 @@ Context makeContext(const World& world, entt::entity entity) {
     ctx.rules = &rulesOf(world);
     ctx.policing = policeOnDuty(world, entity);
     ctx.age = ageOf(registry, entity);
+    if (const auto* alarm = registry.try_get<Alarm>(entity)) {
+        ctx.alarm = alarm->level;
+        ctx.worry = alarmWorry(alarm->level);
+        ctx.refusedAt = alarm->refusedAt;
+    }
+    ctx.quarantines = !registry.view<const Quarantine>().empty();
+    if (ctx.quarantines) {
+        ctx.cordon = quarantineAt(world, position.x, position.y);
+    }
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -849,7 +950,19 @@ float loyaltyTo(const Context& ctx, EntityId other) {
     return std::min(1.0f, close + (groupMate(ctx, other) ? kGroupLoyalty : 0.0f));
 }
 
+// Сторонится ли человека (этап 7.6): тот заметно болен (укушен или в жару), не
+// родня, а сам уже знает о странной болезни.
+bool shuns(const Context& ctx, entt::entity other, EntityId otherId) {
+    if (ctx.alarm < kUneasyLevel) {
+        return false;
+    }
+    const auto* wounds = ctx.world.registry().try_get<Wounds>(other);
+    return wounds != nullptr && isVisiblyIll(*wounds) &&
+           kinOf(ctx.world.registry(), ctx.entity, otherId) == KinKind::Count;
+}
+
 // Навестить близкого, который слёг в лихорадке (этап 7.5); score 0 — некого.
+// Кто знает о странной болезни (этап 7.6), — только родня, и реже.
 Option sickVisit(const Context& ctx) {
     Option best;
     if (ctx.relations == nullptr) {
@@ -877,7 +990,13 @@ Option sickVisit(const Context& ctx) {
         if (d > kSickVisitRange) {
             continue;
         }
-        const float closeness = kin ? 1.0f : kSickVisitFriend;
+        float closeness = kin ? 1.0f : kSickVisitFriend;
+        if (ctx.alarm >= kUneasyLevel) {
+            if (!kin) {
+                continue;
+            }
+            closeness *= 1.0f - kAlarmKinVisit * ctx.worry;
+        }
         best = better(best, {kSickVisitWeight * closeness * (kSickVisitCare + ctx.traits.altruism) *
                                  nearness(d, kNearScale),
                              Map::cellAt(at.x, at.y), bond.other});
@@ -894,8 +1013,9 @@ Option evalSocialize(const Context& ctx) {
     }
     const Option visit = sickVisit(ctx);
     const float lonely = ctx.needs.loneliness;
-    const float need =
-        kSocializeWeight * lonely * std::sqrt(lonely) * (0.5f + ctx.traits.sociability);
+    // Тревожно — сидят по домам (этап 7.6).
+    const float need = kSocializeWeight * lonely * std::sqrt(lonely) * (0.5f + ctx.traits.sociability) *
+                       (1.0f - kAlarmCompany * ctx.worry);
     if (need <= 0.0f) {
         return visit;
     }
@@ -910,7 +1030,8 @@ Option evalSocialize(const Context& ctx) {
         for (std::size_t i = 0; i < ctx.relations->count; ++i) {
             const Bond& bond = ctx.relations->bonds[i];
             const entt::entity other = world.find(bond.other);
-            if (bond.affinity < kVisitAffinity || other == entt::null || !awake(other)) {
+            if (bond.affinity < kVisitAffinity || other == entt::null || !awake(other) ||
+                shuns(ctx, other, bond.other)) {
                 continue;
             }
             const Position& at = registry.get<Position>(other);
@@ -923,7 +1044,8 @@ Option evalSocialize(const Context& ctx) {
     }
     const auto other = world.spatial().nearest(
         ctx.x, ctx.y, kCompanySearch, [&](const SpatialHit& hit) {
-            return hit.id != ctx.id && awake(hit.entity) && warmth(ctx, hit.id) > 0.0f;
+            return hit.id != ctx.id && awake(hit.entity) && warmth(ctx, hit.id) > 0.0f &&
+                   !shuns(ctx, hit.entity, hit.id);
         });
     if (other) {
         const float d = std::sqrt(other->distanceSq);
@@ -948,8 +1070,9 @@ Option evalWander(const Context& ctx) {
     if (ctx.night || ctx.world.places().settlement(ctx.settlement) == nullptr) {
         return {};
     }
-    // Цель выберется при выполнении.
-    return here(ctx, kWanderBase + kWanderCuriosity * ctx.traits.curiosity);
+    // Цель выберется при выполнении. Тревожно — не до прогулок (этап 7.6).
+    return here(ctx, (kWanderBase + kWanderCuriosity * ctx.traits.curiosity) *
+                         (1.0f - kAlarmWander * ctx.worry));
 }
 
 Option evalGoHome(const Context& ctx) {
@@ -1442,7 +1565,7 @@ Option evalTrade(const Context& ctx) {
             continue;
         }
         const entt::entity other = personAt(ctx.world, bond.other);
-        if (other == entt::null || registry.get<Person>(other).asleep) {
+        if (other == entt::null || registry.get<Person>(other).asleep || shuns(ctx, other, bond.other)) {
             continue;
         }
         const Position& at = registry.get<Position>(other);
@@ -1451,7 +1574,10 @@ Option evalTrade(const Context& ctx) {
             offerFor(ctx.world, ctx.entity, other, want.kind) == ItemKind::Count) {
             continue;
         }
-        best = better(best, {kTradeWeight * want.need * (0.6f + 0.4f * bond.trust) *
+        // С незнакомым в тревожное время меняются неохотно (этап 7.6).
+        const float distrust =
+            bond.familiarity < kDistrustFamiliarity ? 1.0f - kAlarmDistrust * ctx.worry : 1.0f;
+        best = better(best, {kTradeWeight * want.need * (0.6f + 0.4f * bond.trust) * distrust *
                                  nearness(d, kTradeScale),
                              Map::cellAt(at.x, at.y), bond.other});
     }
@@ -1658,7 +1784,9 @@ Option evalBuy(const Context& ctx) {
     const int homeFood = ctx.homeSupplies != nullptr ? ctx.homeSupplies->food() : 0;
     const int homeWater = ctx.homeSupplies != nullptr ? ctx.homeSupplies->count(ItemKind::Water) : 0;
     const int have = ctx.carry.food() + homeFood;
-    const int target = buyTarget(ctx.traits, ctx.rules->stockpile);
+    // Слухи о беде гонят в магазин раньше паники (этап 7.6).
+    const int target =
+        buyTarget(ctx.traits, std::max(ctx.rules->stockpile, 1.0f + kAlarmStockpile * ctx.worry));
     const float start = needStart(ctx);
     float need = 0.0f;
     if (have == 0) {
@@ -1741,6 +1869,227 @@ Option evalSeeDoctor(const Context& ctx) {
     return {kDoctorWeight * severity * nearness(bestDistance, kNearScale), best->door, best->id};
 }
 
+// --- Реакция общества (этап 7.6) -------------------------------------------------
+
+// К пункту эвакуации: тревожно, пункты открыты, а держаться здесь не за что —
+// ни работы, ни группы, а свои рядом. Ребёнок идёт за опекуном.
+Option evalEvacuate(const Context& ctx) {
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    if (ctx.refusedAt != 0 || !evacuationOpen(world) || isSoldier(registry, ctx.entity)) {
+        return {};
+    }
+    const auto* kin = registry.try_get<Kin>(ctx.entity);
+    if (ctx.age < kAdultAge) {
+        const entt::entity guardian = kin != nullptr ? personAt(world, kin->guardian) : entt::entity{entt::null};
+        if (guardian == entt::null) {
+            return {}; // сирота без опекуна один не поедет
+        }
+        const Mind* theirs = registry.try_get<Mind>(guardian);
+        if (theirs == nullptr || theirs->action != Action::Evacuate) {
+            return {};
+        }
+        return {kFollowGuardian, theirs->spot, theirs->target};
+    }
+    if (ctx.alarm < kAlarmedLevel) {
+        return {};
+    }
+    const auto site = nearestEvacuation(world, ctx.x, ctx.y, kEvacRange);
+    if (!site) {
+        return {};
+    }
+    bool kids = false;
+    bool family = false; // дети не рядом или супруг живёт в другом доме
+    for (std::size_t i = 0; kin != nullptr && i < kin->count; ++i) {
+        const Relative& relative = kin->relatives[i];
+        const entt::entity other = personAt(world, relative.id);
+        if (other == entt::null) {
+            continue;
+        }
+        if (relative.kind == KinKind::Child && isMinor(registry, other) &&
+            registry.get<Kin>(other).guardian == ctx.id) {
+            kids = true;
+            const Position& at = registry.get<Position>(other);
+            family = family || distance(ctx.x, ctx.y, at.x, at.y) > kFetchFar;
+        }
+        if (relative.kind == KinKind::Spouse && registry.get<Person>(other).home != ctx.person.home) {
+            family = true;
+        }
+    }
+    const float urgency = (ctx.alarm - kAlarmedLevel) / (1.0f - kAlarmedLevel);
+    const Traits& t = ctx.traits;
+    float will = kEvacWill + kEvacPrudence * (t.prudence - 0.5f) - kEvacBravery * (t.bravery - 0.5f) -
+                 kEvacGreed * (t.greed - 0.5f);
+    will += kids ? kEvacKids : 0.0f;
+    will += ctx.age >= kElderAge ? kEvacElder : 0.0f;
+    will = std::clamp(will, kEvacWillMin, kEvacWillMax);
+    if (will <= 0.0f) {
+        return {};
+    }
+    float score = (kEvacBase + kEvacUrgency * urgency) * will * nearness(site->distance, kEvacScale);
+    if (keepsWorking(world, ctx.entity)) {
+        score *= kEvacDuty;
+    }
+    if (ctx.group != kInvalidId) {
+        score *= kEvacGroup;
+    }
+    if (family) {
+        score *= kEvacFamily;
+    }
+    if (ctx.night) {
+        score *= kNightPenalty;
+    }
+    return {score, site->door, site->id};
+}
+
+// Сколько людей живёт в доме.
+int householdSize(const World& world, EntityId home) {
+    int size = 0;
+    for (const auto [entity, person] : world.registry().view<const Person>().each()) {
+        size += person.home == home ? 1 : 0;
+    }
+    return size;
+}
+
+// Ребёнок, о котором заботится человек (он опекун), — живой.
+bool isWardOf(const entt::registry& registry, entt::entity child, EntityId guardian) {
+    const auto* kin = registry.try_get<Kin>(child);
+    return kin != nullptr && kin->guardian == guardian && isMinor(registry, child) &&
+           registry.all_of<Person>(child);
+}
+
+// Ребёнок со взрослой роднёй, кроме guardian: она рядом — за ним не бегут.
+bool withFamily(const World& world, entt::entity child, EntityId guardian) {
+    const entt::registry& registry = world.registry();
+    const auto* kin = registry.try_get<Kin>(child);
+    const Position& at = registry.get<Position>(child);
+    for (std::size_t i = 0; kin != nullptr && i < kin->count; ++i) {
+        const EntityId id = kin->relatives[i].id;
+        const entt::entity other = personAt(world, id);
+        if (id == guardian || other == entt::null || isMinor(registry, other)) {
+            continue;
+        }
+        const Position& near = registry.get<Position>(other);
+        if (distance(at.x, at.y, near.x, near.y) <= kFetchCompany) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Забирал ли уже ребёнка child (по летописи).
+bool fetchedBefore(const Context& ctx, EntityId child) {
+    const Chronicle& chronicle = ctx.world.chronicle();
+    const auto& events = chronicle.events();
+    for (const std::uint32_t index : chronicle.eventsOf(ctx.id)) {
+        const ChronicleEvent& event = events[index];
+        if (event.kind == ChronicleKind::Reunited && event.subject == ctx.id && event.object == child) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// К своим: забрать ребёнка, который не дома и далеко, — или переехать к родне:
+// одному страшно, вместе — легче. Кто живёт меньшим домом, тот и едет.
+Option evalReunite(const Context& ctx) {
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    if (ctx.age < kAdultAge || ctx.alarm < kAlarmedLevel || isSoldier(registry, ctx.entity)) {
+        return {};
+    }
+    const auto* kin = registry.try_get<Kin>(ctx.entity);
+    if (kin == nullptr || kin->count == 0) {
+        return {};
+    }
+    const float urgency =
+        kReuniteUrgency + (1.0f - kReuniteUrgency) * std::clamp((ctx.alarm - kAlarmedLevel) /
+                                                                    (1.0f - kAlarmedLevel), 0.0f, 1.0f);
+    Option best;
+    // Дети — первыми: в первые дни беды (с выживанием все свои давно вместе).
+    const bool crisis = worldPhase(world) != WorldPhase::Survival;
+    for (std::size_t i = 0; crisis && i < kin->count; ++i) {
+        const Relative& relative = kin->relatives[i];
+        const entt::entity other = personAt(world, relative.id);
+        if (relative.kind != KinKind::Child || other == entt::null || !isWardOf(registry, other, ctx.id)) {
+            continue;
+        }
+        const Position& at = registry.get<Position>(other);
+        const float d = distance(ctx.x, ctx.y, at.x, at.y);
+        const bool home = ctx.homeId != kInvalidId &&
+                          distance(at.x, at.y, cellX(ctx.homeDoor), cellY(ctx.homeDoor)) <= kFetchHome;
+        if (d <= kFetchFar || home || withFamily(world, other, ctx.id) || fetchedBefore(ctx, relative.id)) {
+            continue;
+        }
+        best = better(best, {kFetchWeight * urgency * nearness(d, kFetchScale), Map::cellAt(at.x, at.y),
+                             relative.id});
+    }
+    // Переехать к родне.
+    if (ctx.alarm < kMoveInAlarm || ctx.group != kInvalidId || ctx.homeId == kInvalidId) {
+        return best;
+    }
+    int mine = -1;
+    for (std::size_t i = 0; i < kin->count; ++i) {
+        const Relative& relative = kin->relatives[i];
+        const entt::entity other = personAt(world, relative.id);
+        if (other == entt::null || isMinor(registry, other)) {
+            continue;
+        }
+        const Person& theirs = registry.get<Person>(other);
+        const entt::entity home = world.find(theirs.home);
+        if (theirs.group != kInvalidId || home == entt::null || theirs.home == ctx.homeId) {
+            continue;
+        }
+        if (const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(relative.id) : nullptr;
+            bond != nullptr && (bond->affinity < 0.0f || bond->hostile())) {
+            continue; // в разладе — не к нему
+        }
+        const Cell door = registry.get<Building>(home).door;
+        const float d = distance(ctx.x, ctx.y, cellX(door), cellY(door));
+        if (d > kMoveInRange) {
+            continue;
+        }
+        if (mine < 0) {
+            mine = householdSize(world, ctx.homeId);
+        }
+        const int theirSize = householdSize(world, theirs.home);
+        const int theirAge = ageOf(registry, other);
+        const bool moves = mine < theirSize ||
+                           (mine == theirSize && (ctx.age < theirAge || (ctx.age == theirAge && ctx.id > relative.id)));
+        if (!moves) {
+            continue;
+        }
+        const float kinship = relative.kind == KinKind::Spouse ? 1.0f
+                              : relative.kind == KinKind::Parent || relative.kind == KinKind::Child ? 0.9f
+                                                                                                    : 0.6f;
+        float score = kMoveInWeight * urgency * kinship * nearness(d, kMoveInScale);
+        if (keepsWorking(world, ctx.entity)) {
+            score *= kMoveInDuty;
+        }
+        if (ctx.night) {
+            score *= kNightPenalty;
+        }
+        best = better(best, {score, door, relative.id});
+    }
+    return best;
+}
+
+// Пересекает ли действие кордон карантина (этап 7.6): место — по другую
+// сторону кордона, чем человек сейчас. Домой пускают; бегство, бой, дело на
+// месте и служба (полиция, врачи, солдаты) — не в счёт.
+bool crossesCordon(const Context& ctx, Action action, Cell spot) {
+    if (!ctx.quarantines || spot == ctx.cell || action == Action::Flee || action == Action::Fight ||
+        (ctx.homeId != kInvalidId && spot == ctx.homeDoor)) {
+        return false;
+    }
+    if (action == Action::Work && ctx.job != nullptr &&
+        (ctx.job->profession == Profession::PoliceOfficer || ctx.job->profession == Profession::Doctor ||
+         ctx.job->profession == Profession::Soldier)) {
+        return false;
+    }
+    return quarantineAt(ctx.world, spot) != ctx.cordon;
+}
+
 // Бегом, а не шагом: угроза настоящая.
 bool mustRun(const Context& ctx) {
     return ctx.threat.level >= kFleeMinThreat;
@@ -1790,6 +2139,10 @@ Option evaluateRaw(const Context& ctx, Action action) {
         return evalBuy(ctx);
     case Action::SeeDoctor:
         return evalSeeDoctor(ctx);
+    case Action::Evacuate:
+        return evalEvacuate(ctx);
+    case Action::Reunite:
+        return evalReunite(ctx);
     case Action::Count:
         break;
     }
@@ -1807,6 +2160,7 @@ float childFactor(const Context& ctx, Action action) {
     case Action::Avenge:
     case Action::Trade:
     case Action::Salvage:
+    case Action::Reunite: // за ребёнком приходят взрослые
         return 0.0f;
     case Action::Fight:
         return ctx.age < kChildFightAge ? 0.0f : kTeenFight;
@@ -1857,6 +2211,19 @@ Option evaluate(const Context& ctx, Action action) {
     if (action != Action::Flee && action != Action::Fight && option.score > 0.0f &&
         risky(ctx, option.spot)) {
         option.score *= kDangerPenalty;
+    }
+    // Карантин (этап 7.6): за кордон не выходят и в него не заходят — разве что
+    // к своим или от отчаяния.
+    if (option.score > 0.0f && ctx.needs.hunger < kDesperate && crossesCordon(ctx, action, option.spot)) {
+        float obedience =
+            kCordonRespect + kCordonDefiance * std::max(0.0f, ctx.traits.bravery + ctx.traits.aggression - 1.0f);
+        if (action == Action::Reunite) {
+            obedience = std::max(obedience, kCordonLove);
+        }
+        if (policeNearby(ctx.world, ctx.x, ctx.y, kCordonWatch)) {
+            obedience *= kPoliceDeterrence;
+        }
+        option.score *= obedience;
     }
     return option;
 }
@@ -2056,6 +2423,11 @@ public:
             // К человеку (поделиться, обменяться): он может уйти — идти за ним.
             if ((mind_.action == Action::Share || mind_.action == Action::Trade) &&
                 (tick_ + id_) % kPerceptionIntervalTicks == 0 && follow()) {
+                return;
+            }
+            // За ребёнком (этап 7.6): он тоже ходит — догнать.
+            if (mind_.action == Action::Reunite && (tick_ + id_) % kPerceptionIntervalTicks == 0 &&
+                trackWard()) {
                 return;
             }
             if (!walker.moving()) {
@@ -2532,6 +2904,11 @@ private:
                 return false;
             }
             option.spot = *door;
+        }
+        // Гулять и искать припасы за кордон карантина не ходят (этап 7.6).
+        if ((action == Action::Scavenge || action == Action::Wander) && ctx.needs.hunger < kDesperate &&
+            crossesCordon(ctx, action, option.spot)) {
+            return false;
         } else if (action == Action::Work) {
             option.spot = pickWorkSpot(ctx, option.spot);
             packLunch(ctx);
@@ -2600,6 +2977,14 @@ private:
         if (here) {
             stopWalking();
         }
+        // Прорвался через кордон карантина (этап 7.6): вышел из поселения на
+        // карантине или зашёл в него.
+        if (!here && crossesCordon(ctx, action, option.spot)) {
+            const EntityId zone = ctx.cordon != kInvalidId ? ctx.cordon : quarantineAt(world_, option.spot);
+            if (zone != kInvalidId) {
+                recordBreak(zone);
+            }
+        }
         registry_.get<Walker>(entity_).pace = action == Action::Flee && mustRun(ctx) ? kRunPace
                                               : action == Action::Hunt              ? kStalkPace
                                               : action == Action::Avenge            ? kAvengePace
@@ -2655,6 +3040,10 @@ private:
     }
 
     void arrive() {
+        // К своим (этап 7.6): ребёнок мог уйти, а родня — принять к себе.
+        if (mind_.action == Action::Reunite && reuniteArrive()) {
+            return;
+        }
         const Cell cell = cellOf(registry_.get<Position>(entity_));
         // Дома — выложить найденное в запасы.
         if (const entt::entity home = world_.find(person_.home); home != entt::null) {
@@ -2771,6 +3160,14 @@ private:
         case Action::SeeDoctor:
             duration = kDoctorMinutes;
             break;
+        case Action::Evacuate:
+            // Ждать колонну у пункта (этап 7.6): посадка — в SocietySystem.
+            mind_.until = std::min(nextConvoyTick(tick_) + minutes(2), tick_ + minutes(kEvacWaitMax));
+            mind_.nextThink = std::min(mind_.until, tick_ + minutes(kThinkMinutes));
+            return;
+        case Action::Reunite:
+            duration = kReuniteMinutes;
+            break;
         case Action::Count:
             break;
         }
@@ -2865,6 +3262,126 @@ private:
         }
     }
 
+    // --- Реакция общества (этап 7.6) ---------------------------------------------
+
+    // Прорвался через кордон карантина поселения settlement — в летопись, не
+    // чаще раза в kBreakEpisodeTicks.
+    void recordBreak(EntityId settlement) {
+        const Chronicle& chronicle = world_.chronicle();
+        const auto& events = chronicle.events();
+        const std::span<const std::uint32_t> mine = chronicle.eventsOf(id_);
+        for (auto it = mine.rbegin(); it != mine.rend(); ++it) {
+            const ChronicleEvent& event = events[*it];
+            if (event.tick + kBreakEpisodeTicks < tick_) {
+                break;
+            }
+            if (event.kind == ChronicleKind::BrokeQuarantine && event.subject == id_) {
+                return;
+            }
+        }
+        world_.record(ChronicleKind::BrokeQuarantine, id_, settlement);
+    }
+
+    // Отправить ребёнка домой: опекун нашёл его и ведёт домой (этап 7.6).
+    void summonHome(entt::entity child) {
+        Person& person = registry_.get<Person>(child);
+        const entt::entity home = world_.find(person.home);
+        if (home == entt::null) {
+            return;
+        }
+        const Cell door = registry_.get<Building>(home).door;
+        if (!startWalk(world_, child, door)) {
+            return;
+        }
+        Mind& mind = registry_.get<Mind>(child);
+        person.asleep = false;
+        person.indoors = false;
+        mind.action = Action::GoHome;
+        mind.phase = ActionPhase::Travel;
+        mind.target = person.home;
+        mind.spot = door;
+        mind.score = kFollowGuardian;
+        mind.nextThink = tick_ + minutes(3 * kThinkMinutes);
+        registry_.get<Walker>(child).pace = 1.0f;
+        registry_.get<Combat>(child).target = kInvalidId;
+    }
+
+    // Нашёл ребёнка: в летопись, ребёнка — домой, сам — тоже домой. false —
+    // идти домой некуда: побыть с ним здесь.
+    bool metWard(entt::entity child) {
+        world_.record(ChronicleKind::Reunited, id_, mind_.target, kinCode(world_, entity_, mind_.target), 0);
+        summonHome(child);
+        const entt::entity home = world_.find(person_.home);
+        if (home == entt::null) {
+            return false;
+        }
+        const Cell door = registry_.get<Building>(home).door;
+        if (door == cellOf(registry_.get<Position>(entity_)) || !startWalk(world_, entity_, door)) {
+            return false;
+        }
+        mind_.action = Action::GoHome;
+        mind_.target = person_.home;
+        mind_.spot = door;
+        mind_.phase = ActionPhase::Travel;
+        mind_.nextThink = tick_ + minutes(kThinkMinutes);
+        return true;
+    }
+
+    // Идёт за ребёнком: догнал — домой вместе; ушёл от места — путь заново.
+    // true — решение сменилось. Не за ребёнком (к родне) — false.
+    bool trackWard() {
+        const entt::entity child = personAt(world_, mind_.target);
+        if (child == entt::null || !isWardOf(registry_, child, id_)) {
+            return false;
+        }
+        const Position& self = registry_.get<Position>(entity_);
+        const Position& at = registry_.get<Position>(child);
+        const float d = distance(self.x, self.y, at.x, at.y);
+        if (d <= kFetchReach) {
+            if (!metWard(child)) {
+                stopWalking();
+                mind_.spot = cellOf(self);
+                perform();
+            }
+            return true;
+        }
+        if (distance(cellX(mind_.spot), cellY(mind_.spot), at.x, at.y) > std::max(kFollowRegoal, 0.1f * d)) {
+            mind_.spot = Map::cellAt(at.x, at.y);
+            if (!startWalk(world_, entity_, mind_.spot)) {
+                fail();
+                return true;
+            }
+        }
+        return false;
+    }
+
+    // Дошёл до места «к своим». За ребёнком: догнал — домой вместе, нет —
+    // дальше за ним. К родне: у их двери — переезжает к ним (дом теперь их;
+    // дети пойдут за опекуном, FamilySystem). true — решение сменилось.
+    bool reuniteArrive() {
+        const entt::entity other = personAt(world_, mind_.target);
+        if (other == entt::null) {
+            return false;
+        }
+        if (isWardOf(registry_, other, id_)) {
+            if (trackWard()) {
+                return true;
+            }
+            // Ребёнок ушёл дальше — путь к нему уже проложен.
+            return registry_.get<Walker>(entity_).moving();
+        }
+        const Person& theirs = registry_.get<Person>(other);
+        const entt::entity home = world_.find(theirs.home);
+        const Cell cell = cellOf(registry_.get<Position>(entity_));
+        if (home == entt::null || cell != registry_.get<Building>(home).door || person_.group != kInvalidId ||
+            theirs.group != kInvalidId || theirs.home == person_.home) {
+            return false;
+        }
+        person_.home = theirs.home;
+        world_.record(ChronicleKind::Reunited, id_, mind_.target, kinCode(world_, entity_, mind_.target), 1);
+        return false;
+    }
+
     // --- Мирная жизнь (этап 7.2) ------------------------------------------------
 
     // Где работать: продавцу, врачу, учителю — у двери; фермеру — клетка поля у
@@ -2892,6 +3409,35 @@ private:
                 }
             }
             return door;
+        }
+        // Солдат (этап 7.6) — у двери пункта эвакуации или рядом с ним.
+        if (job->profession == Profession::Soldier) {
+            if (rng_.chance(kGuardDoorChance)) {
+                return door;
+            }
+            const int reach = static_cast<int>(kGuardRange / Map::kCellSize);
+            for (int attempt = 0; attempt < kPatrolAttempts; ++attempt) {
+                const Cell cell{door.x + rng_.rangeInt(-reach, reach), door.y + rng_.rangeInt(-reach, reach)};
+                if (map.contains(cell) && nav.passable(cell) && nav.connected(door, cell) && !risky(ctx, cell)) {
+                    return cell;
+                }
+            }
+            return door;
+        }
+        // Поселение на карантине (этап 7.6): полицейский стоит на выезде.
+        if (job->profession == Profession::PoliceOfficer && ctx.current == Action::Work) {
+            const EntityId own = registry_.get<Building>(workplace).settlement;
+            const entt::entity settlement = world_.find(own);
+            if (settlement != entt::null && registry_.all_of<Quarantine>(settlement) &&
+                rng_.chance(kCheckpointChance)) {
+                const std::vector<Cell> exits = cordonExits(world_, own);
+                if (!exits.empty()) {
+                    const Cell exit = exits[rng_.below(static_cast<std::uint32_t>(exits.size()))];
+                    if (!risky(ctx, exit) && nav.connected(door, exit)) {
+                        return exit;
+                    }
+                }
+            }
         }
         if (job->profession != Profession::PoliceOfficer || ctx.current != Action::Work ||
             rng_.chance(kStationChance)) {

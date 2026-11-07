@@ -82,6 +82,11 @@ Color creatureColor(const entt::registry& registry, entt::entity entity) {
     if (mind != nullptr && mind->action == Action::Avenge) {
         return kAvengingColor;
     }
+    // Солдат на посту (этап 7.6) — оливковый.
+    if (const auto* job = registry.try_get<Job>(entity);
+        job != nullptr && job->profession == Profession::Soldier && mind != nullptr && mind->action == Action::Work) {
+        return kSoldierColor;
+    }
     const auto* walker = registry.try_get<Walker>(entity);
     if (walker == nullptr || walker->moving()) {
         return kEntityColor;

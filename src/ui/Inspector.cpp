@@ -10,6 +10,7 @@
 #include "sim/Names.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
+#include "sim/Society.h"
 #include "sim/TimeScale.h"
 #include "sim/Items.h"
 #include "sim/Weapons.h"
@@ -522,6 +523,8 @@ void Inspector::drawPanel() {
                 drawFlock(entity);
             } else if (registry.all_of<Corpse>(entity)) {
                 drawCorpse(entity);
+            } else if (registry.all_of<Evacuated>(entity)) {
+                drawEvacuated(entity);
             } else if (registry.all_of<Horde>(entity)) {
                 drawHorde(entity);
             } else if (registry.all_of<Group>(entity)) {
@@ -828,7 +831,8 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
-    if (!drawFamily(entity) || !drawRelations(entity) || !drawMemories(entity) || !drawLeads(entity)) {
+    if (!drawAlarm(entity) || !drawFamily(entity) || !drawRelations(entity) || !drawMemories(entity) ||
+        !drawLeads(entity)) {
         return;
     }
 
@@ -1457,6 +1461,68 @@ void Inspector::drawCorpse(entt::entity entity) {
     }
 }
 
+bool Inspector::drawAlarm(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* alarm = registry.try_get<Alarm>(entity);
+    if (alarm == nullptr || scenarioOf(world_) == nullptr ||
+        !ImGui::CollapsingHeader("Тревога: что знает о беде", ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    const AlarmStage stage = alarmStage(alarm->level);
+    meter("Тревога", alarm->level);
+    ImGui::Text("Верит: %s", alarmStageText(stage));
+    if (alarm->clue != AlarmClue::None) {
+        ImGui::Text("Откуда: %s", alarmClueText(alarm->clue));
+        if (alarm->source != kInvalidId && alarm->clue != AlarmClue::Broadcast && alarm->clue != AlarmClue::Fever) {
+            ImGui::SameLine();
+            if (idLink(alarm->source)) {
+                select(alarm->source);
+                return false;
+            }
+        }
+    }
+    if (alarm->since != 0) {
+        char ago[32];
+        formatGameDuration(ago, sizeof(ago), world_.tick() - alarm->since);
+        ImGui::Text("Встревожен %s назад", ago);
+    }
+    if (alarm->refusedAt != 0) {
+        ImGui::TextColored({1.0f, 0.5f, 0.35f, 1.0f}, "Не пустили в колонну эвакуации");
+    }
+    const Position& at = registry.get<Position>(entity);
+    if (const EntityId zone = quarantineAt(world_, at.x, at.y); zone != kInvalidId) {
+        ImGui::TextUnformatted("За кордоном карантина:");
+        ImGui::SameLine();
+        if (idLink(zone)) {
+            select(zone);
+            return false;
+        }
+    }
+    return true;
+}
+
+void Inspector::drawEvacuated(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const Evacuated& evacuated = registry.get<Evacuated>(entity);
+    ImGui::Text("%s — эвакуирован", idLabel(selected_).c_str());
+    if (registry.all_of<Age>(entity)) {
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", ageText(ageOf(registry, entity)).c_str());
+    }
+    char ago[32];
+    formatGameDuration(ago, sizeof(ago), world_.tick() - evacuated.tick);
+    ImGui::Text("Уехал из края %s назад с колонной из пункта", ago);
+    ImGui::SameLine();
+    if (idLink(evacuated.point)) {
+        select(evacuated.point);
+        return;
+    }
+    if (const auto* job = registry.try_get<Job>(entity); job != nullptr && job->profession != Profession::None) {
+        ImGui::Text("Был: %s", professionName(job->profession));
+    }
+    drawFamily(entity);
+}
+
 bool Inspector::drawLeads(entt::entity entity) {
     const entt::registry& registry = world_.registry();
     const auto* leads = registry.try_get<Leads>(entity);
@@ -1653,6 +1719,55 @@ void Inspector::drawScenario(entt::entity entity) {
     ImGui::Text("Заражений от больных: %zu, укусов: %zu", world_.chronicle().countOf(ChronicleKind::Infected),
                 world_.chronicle().countOf(ChronicleKind::Bitten));
     ImGui::Text("Зомби: %d, из них бывших жителей: %d", stats.zombies, stats.residents);
+    // Реакция общества (этап 7.6).
+    {
+        int stages[4] = {};
+        for (const auto [other, person, alarm] : registry.view<const Person, const Alarm>().each()) {
+            ++stages[static_cast<int>(alarmStage(alarm.level))];
+        }
+        ImGui::SeparatorText("Реакция общества");
+        ImGui::TextWrapped("Ничего не знают: %d; странная болезнь: %d; нападают: %d; мёртвые встают: %d",
+                           stages[0], stages[1], stages[2], stages[3]);
+        if (scenario.broadcast != 0) {
+            ImGui::TextWrapped("Последняя передача: «%s»",
+                               broadcastText(static_cast<BroadcastKind>(scenario.broadcast)));
+        }
+        std::vector<EntityId> zones;
+        for (const auto [other, id, quarantine] : registry.view<const Id, const Quarantine>().each()) {
+            zones.push_back(id.value);
+        }
+        std::sort(zones.begin(), zones.end());
+        ImGui::Text("Карантин: %zu (объявлялся %zu раз)", zones.size(),
+                    world_.chronicle().countOf(ChronicleKind::QuarantineDeclared));
+        EntityId clicked = kInvalidId;
+        ImGui::PushID("quarantines");
+        for (const EntityId zone : zones) {
+            ImGui::SameLine();
+            if (idLink(zone)) {
+                clicked = zone;
+            }
+        }
+        ImGui::PopID();
+        std::vector<EntityId> points;
+        for (const auto [other, id, point] : registry.view<const Id, const EvacuationPoint>().each()) {
+            points.push_back(id.value);
+        }
+        std::sort(points.begin(), points.end());
+        ImGui::Text("Пунктов эвакуации: %zu; увезли: %d; солдат: %d", points.size(), stats.evacuated,
+                    stats.soldiers);
+        ImGui::PushID("points");
+        for (const EntityId point : points) {
+            ImGui::SameLine();
+            if (idLink(point)) {
+                clicked = point;
+            }
+        }
+        ImGui::PopID();
+        if (clicked != kInvalidId) {
+            select(clicked);
+            return;
+        }
+    }
     ImGui::Text("Приток издалека держит %d, орда %d раз в сутки", zombieTarget(world_),
                 arrivalsPerDay(world_));
     int onDuty = 0;
@@ -1717,6 +1832,19 @@ void Inspector::drawBuilding(entt::entity entity) {
                 static_cast<float>(building.height) * Map::kCellSize, building.door.x,
                 building.door.y);
     drawSupplies(registry, entity);
+
+    // Пункт эвакуации (этап 7.6): колонны, сколько ждёт, сколько увезли.
+    if (const auto* point = registry.try_get<EvacuationPoint>(entity)) {
+        ImGui::SeparatorText("Пункт эвакуации");
+        int waiting = 0;
+        for (const auto [other, mind] : registry.view<const Mind>().each()) {
+            waiting += mind.action == Action::Evacuate && mind.target == selected_ ? 1 : 0;
+        }
+        char next[32];
+        formatGameDuration(next, sizeof(next), nextConvoyTick(world_.tick()) - world_.tick());
+        ImGui::Text("Колонн ушло: %d, увезли: %d; ждут и идут: %d", point->convoys, point->evacuated, waiting);
+        ImGui::Text("Следующая колонна через %s, мест: %d", next, kConvoySeats);
+    }
 
     // Место работы (этап 7.2): открыто ли, касса, урожай, работники.
     std::vector<EntityId> workers;
@@ -1816,6 +1944,19 @@ void Inspector::drawSettlement(entt::entity entity) {
                 settlement.name.c_str(), static_cast<unsigned long long>(selected_));
     ImGui::Text("Центр: клетка %d, %d, радиус %.0f м", settlement.center.x, settlement.center.y,
                 static_cast<float>(settlement.radius) * Map::kCellSize);
+    // Карантин (этап 7.6).
+    if (const auto* quarantine = registry.try_get<Quarantine>(entity)) {
+        char ago[32];
+        formatGameDuration(ago, sizeof(ago), world_.tick() - quarantine->since);
+        ImGui::TextColored({1.0f, 0.45f, 0.35f, 1.0f}, "Карантин: объявлен %s назад, случаев: %d", ago,
+                           quarantine->cases);
+        if (quarantine->clearSince != Quarantine::kNever) {
+            formatGameDuration(ago, sizeof(ago), world_.tick() - quarantine->clearSince);
+            ImGui::Text("Новых случаев нет уже %s", ago);
+        }
+    } else if (scenarioOf(world_) != nullptr) {
+        ImGui::TextDisabled("Карантина нет; случаев сейчас: %d", quarantineCases(world_, selected_));
+    }
 
     int buildings = 0;
     int food = 0;

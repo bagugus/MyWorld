@@ -5,6 +5,7 @@
 #include "sim/Death.h"
 #include "sim/Infection.h"
 #include "sim/Perception.h"
+#include "sim/Society.h"
 #include "sim/World.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -44,6 +45,9 @@ constexpr float kWoundFear = 0.5f;
 // Страх от зомби рядом (Threat::level = 1) и как быстро он накатывает, часы.
 constexpr float kThreatFear = 0.8f;
 constexpr float kThreatResponseHours = 0.1f;
+
+// Тревога о беде (этап 7.6): к ужасу — столько к уровню страха (alarmWorry).
+constexpr float kAlarmFear = 0.2f;
 
 // Выстрел, услышанный недавно, пугает: столько к уровню страха.
 constexpr float kGunshotFear = 0.3f;
@@ -217,6 +221,9 @@ void updateNeeds(World& world, float minutes) {
         }
         if (body) {
             fearTarget += kBodyFear * timidity;
+        }
+        if (const auto* alarm = registry.try_get<Alarm>(entity)) {
+            fearTarget += kAlarmFear * alarmWorry(alarm->level) * timidity;
         }
         // Зомби рядом пугают сразу, а не за час.
         const Threat threat = threatOf(world, entity);

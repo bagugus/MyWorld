@@ -27,6 +27,7 @@
 #include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/Scenario.h"
+#include "sim/Society.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
 #include "sim/Story.h"
@@ -38,6 +39,7 @@
 #include "sim/nav/NavGrid.h"
 #include "sim/nav/Pathfinder.h"
 #include "sim/systems/AnimalSystem.h"
+#include "sim/systems/SocietySystem.h"
 #include "sim/systems/CombatSystem.h"
 #include "sim/systems/EventSystem.h"
 #include "sim/systems/FamilySystem.h"
@@ -7080,6 +7082,424 @@ void testFamilyInGroup() {
     CHECK(groupOf(field.world, wife) != nullptr);
 }
 
+// --- Реакция общества (этап 7.6) ---------------------------------------------
+
+// Взрослый житель с домом, не первый попавшийся: skip — сколько пропустить.
+entt::entity adultResident(const lw::World& world, int skip = 0) {
+    std::vector<std::pair<lw::EntityId, entt::entity>> adults;
+    for (const auto [entity, id, person] : world.registry().view<const lw::Id, const lw::Person>().each()) {
+        if (!lw::isMinor(world.registry(), entity) && person.home != lw::kInvalidId) {
+            adults.emplace_back(id.value, entity);
+        }
+    }
+    std::sort(adults.begin(), adults.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    return static_cast<std::size_t>(skip) < adults.size() ? adults[static_cast<std::size_t>(skip)].second
+                                                          : entt::entity{entt::null};
+}
+
+// Тревога: растёт, не убывает; новая стадия — запись в летописи. Рассказ
+// слабеет с пересказом: чужому верят меньше, чем родне и другу.
+void testAlarmRules() {
+    lw::World world(7, peaceConfig(40));
+    entt::registry& registry = world.registry();
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    const entt::entity a = adultResident(world, 0);
+    const entt::entity b = adultResident(world, 5);
+    CHECK(a != entt::null && b != entt::null && registry.all_of<lw::Alarm>(a));
+    if (a == entt::null || b == entt::null) {
+        return;
+    }
+    CHECK(lw::alarmStage(0.1f) == lw::AlarmStage::Calm && lw::alarmStage(0.3f) == lw::AlarmStage::Uneasy &&
+          lw::alarmStage(0.6f) == lw::AlarmStage::Alarmed && lw::alarmStage(0.9f) == lw::AlarmStage::Terrified);
+    CHECK(lw::alarmWorry(0.2f) == 0.0f && lw::alarmWorry(1.0f) == 1.0f);
+    const std::size_t before = world.chronicle().countOf(lw::ChronicleKind::Alarmed);
+    CHECK(lw::raiseAlarm(world, a, lw::clueLevel(lw::AlarmClue::Zombie), lw::AlarmClue::Zombie, lw::kInvalidId));
+    CHECK(!lw::raiseAlarm(world, a, 0.4f, lw::AlarmClue::Told, idOf(world, b))); // ниже — ничего
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Alarmed) == before + 1);
+    const lw::Alarm& alarm = registry.get<lw::Alarm>(a);
+    CHECK(alarm.level >= lw::kTerrifiedLevel && alarm.clue == lw::AlarmClue::Zombie && alarm.since == world.tick());
+
+    // Рассказ: чужому — kStrangerCredibility, другу — kCloseCredibility.
+    lw::Relations& theirs = registry.get<lw::Relations>(b);
+    if (lw::Bond* bond = theirs.find(idOf(world, a))) {
+        *bond = {};
+        bond->other = idOf(world, a);
+    }
+    lw::Bond* bond = theirs.find(idOf(world, a));
+    if (bond == nullptr && theirs.count < lw::Relations::kMaxBonds) {
+        theirs.bonds[theirs.count] = {};
+        theirs.bonds[theirs.count].other = idOf(world, a);
+        bond = &theirs.bonds[theirs.count++];
+    }
+    CHECK(bond != nullptr);
+    if (bond == nullptr) {
+        return;
+    }
+    bond->familiarity = 0.0f;
+    bond->flags = 0;
+    const float stranger = lw::alarmToShare(world, a, b);
+    CHECK(std::abs(stranger - alarm.level * lw::kStrangerCredibility) < 1e-4f);
+    bond->familiarity = 1.0f;
+    bond->affinity = 0.8f;
+    bond->flags = lw::Bond::kFriend;
+    const float friendly = lw::alarmToShare(world, a, b);
+    CHECK(std::abs(friendly - alarm.level * lw::kCloseCredibility) < 1e-4f && friendly > stranger);
+    // Кто знает не меньше, тому рассказывать нечего.
+    registry.get<lw::Alarm>(b).level = 0.95f;
+    CHECK(lw::alarmToShare(world, a, b) == 0.0f);
+    // В мирное время о беде не говорит никто: тревоги нет ни у кого.
+    lw::World calm(7, peaceConfig(40));
+    runMinutes(calm, 60);
+    float most = 0.0f;
+    for (const auto [entity, person, other] : calm.registry().view<const lw::Person, const lw::Alarm>().each()) {
+        most = std::max(most, other.level);
+    }
+    CHECK(most == 0.0f);
+}
+
+// Своими глазами: зомби рядом — «мёртвые встают»; потом рассказывают другим.
+void testAlarmFromEvidence() {
+    lw::World world(7, peaceConfig(40));
+    lw::World twin(7, peaceConfig(40));
+    entt::registry& registry = world.registry();
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    lw::enterPhase(twin, lw::WorldPhase::Outbreak);
+    // Скрытый нулевой пациент тревоги не поднимает: никто ничего не заметил.
+    runMinutes(world, 30);
+    runMinutes(twin, 30);
+    float most = 0.0f;
+    for (const auto [entity, person, alarm] : registry.view<const lw::Person, const lw::Alarm>().each()) {
+        most = std::max(most, alarm.level);
+    }
+    CHECK(most < lw::kUneasyLevel);
+    // Зомби у двери взрослого, который не спит и не дома.
+    const entt::entity witness = adultResident(world, 3);
+    CHECK(witness != entt::null);
+    if (witness == entt::null) {
+        return;
+    }
+    for (lw::World* w : {&world, &twin}) {
+        entt::registry& r = w->registry();
+        const entt::entity person = adultResident(*w, 3);
+        r.get<lw::Person>(person).asleep = false;
+        r.get<lw::Person>(person).indoors = false;
+        const lw::Position at = r.get<lw::Position>(person);
+        const auto near = w->nav().nearestPassable(lw::Map::cellAt(at.x + 8.0f, at.y), 4);
+        lw::Rng rng(99);
+        if (near) {
+            lw::createZombie(*w, *near, rng);
+        }
+        w->syncSpatial();
+    }
+    runMinutes(world, 3);
+    runMinutes(twin, 3);
+    const lw::Alarm& alarm = registry.get<lw::Alarm>(witness);
+    if (registry.all_of<lw::Person>(witness)) {
+        CHECK(alarm.level >= lw::kTerrifiedLevel && alarm.clue == lw::AlarmClue::Zombie);
+    }
+    bool recorded = false;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        recorded = recorded || (event.kind == lw::ChronicleKind::Alarmed && event.subject == idOf(world, witness) &&
+                                event.b == static_cast<std::int32_t>(lw::AlarmClue::Zombie));
+    }
+    CHECK(recorded);
+    CHECK(world.stateHash() == twin.stateHash());
+}
+
+// Тревога меняет решения: меньше гуляют, к больному чужому не идут, еды держат
+// больше; страх растёт.
+void testAlarmBehaviour() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    runUntil(world, 11, 0);
+    const entt::entity person = adultResident(world, 2);
+    CHECK(person != entt::null);
+    if (person == entt::null) {
+        return;
+    }
+    registry.get<lw::Needs>(person) = {};
+    registry.get<lw::Needs>(person).loneliness = 0.8f;
+    const float wander = scoreOf(world, person, lw::Action::Wander);
+    const float socialize = scoreOf(world, person, lw::Action::Socialize);
+    lw::raiseAlarm(world, person, 0.95f, lw::AlarmClue::Zombie, lw::kInvalidId);
+    CHECK(scoreOf(world, person, lw::Action::Wander) < 0.5f * wander + 1e-4f);
+    CHECK(scoreOf(world, person, lw::Action::Socialize) < socialize + 1e-4f);
+    // Страх тянется вверх и без зомби рядом.
+    const float fear = registry.get<lw::Needs>(person).fear;
+    runMinutes(world, 60);
+    if (registry.all_of<lw::Person>(person)) {
+        CHECK(registry.get<lw::Needs>(person).fear > fear);
+    }
+}
+
+// Карантин: в поселении больные — власть закрывает его, сообщает по радио;
+// жители не выходят за кордон, случаев нет сутки — снимают.
+void testQuarantine() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    CHECK(lw::authorityPresent(world));
+    // Двое заметно больных жителей одного поселения.
+    const entt::entity first = adultResident(world, 0);
+    CHECK(first != entt::null);
+    if (first == entt::null) {
+        return;
+    }
+    const lw::EntityId settlement =
+        registry.get<lw::Building>(world.find(registry.get<lw::Person>(first).home)).settlement;
+    std::vector<entt::entity> sick;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const entt::entity home = world.find(person.home);
+        if (home != entt::null && registry.get<lw::Building>(home).settlement == settlement && sick.size() < 2) {
+            sick.push_back(entity);
+        }
+    }
+    CHECK(sick.size() == 2);
+    // Нулевого пациента — вылечить: зараза только та, что поставил тест.
+    for (const auto [entity, person, wounds] : registry.view<const lw::Person, lw::Wounds>().each()) {
+        wounds = {};
+    }
+    for (const entt::entity entity : sick) {
+        lw::Wounds& wounds = registry.get<lw::Wounds>(entity);
+        wounds.infection = 0.05f;
+        wounds.bites = 1;
+        wounds.route = lw::InfectionRoute::Bite;
+    }
+    CHECK(lw::quarantineCases(world, settlement) == 2);
+    runUntil(world, (lw::calendarAt(world.tick()).hour + 1) % 24, 1);
+    const entt::entity place = world.find(settlement);
+    CHECK(registry.all_of<lw::Quarantine>(place));
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::QuarantineDeclared) == 1);
+    CHECK(lw::scenarioOf(world)->broadcast >= static_cast<std::uint8_t>(lw::BroadcastKind::Epidemic));
+    const lw::Settlement& info = registry.get<lw::Settlement>(place);
+    CHECK(lw::quarantineAt(world, info.center) == settlement);
+    CHECK(!lw::cordonExits(world, settlement).empty());
+    // Больных нет — через сутки кордон снят.
+    for (const entt::entity entity : sick) {
+        if (registry.all_of<lw::Wounds>(entity)) {
+            registry.get<lw::Wounds>(entity) = {};
+        }
+    }
+    for (const auto [entity, person, wounds] : registry.view<const lw::Person, lw::Wounds>().each()) {
+        wounds = {};
+    }
+    runMinutes(world, 26 * 60);
+    if (lw::worldPhase(world) == lw::WorldPhase::Outbreak && lw::quarantineCases(world, settlement) == 0) {
+        CHECK(!registry.all_of<lw::Quarantine>(place));
+        CHECK(world.chronicle().countOf(lw::ChronicleKind::QuarantineLifted) >= 1);
+    }
+}
+
+// Эвакуация: с паникой в городе пункт и солдаты; колонна увозит ждущих — семью
+// с детьми вместе, родитель без детей не уезжает; эвакуированные не потеряны.
+// С коллапсом армия уходит, кто-то из солдат может остаться.
+void testEvacuation() {
+    lw::World world(7, peaceConfig(60));
+    lw::World twin(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    clearZombies(twin);
+    lw::enterPhase(world, lw::WorldPhase::Panic);
+    lw::enterPhase(twin, lw::WorldPhase::Panic);
+    std::vector<lw::EntityId> points;
+    for (const auto [entity, id, point] : registry.view<const lw::Id, const lw::EvacuationPoint>().each()) {
+        points.push_back(id.value);
+    }
+    CHECK(!points.empty() && lw::evacuationOpen(world));
+    int soldiers = 0;
+    for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
+        soldiers += job.profession == lw::Profession::Soldier ? 1 : 0;
+    }
+    CHECK(soldiers == static_cast<int>(points.size()) * lw::kSoldiersPerPoint);
+    CHECK(lw::scenarioOf(world)->broadcast == static_cast<std::uint8_t>(lw::BroadcastKind::Evacuation));
+    if (points.empty()) {
+        return;
+    }
+    const lw::EntityId point = points.front();
+    const lw::Cell door = registry.get<lw::Building>(world.find(point)).door;
+    // Ребёнок и его опекун — у пункта; одинокий взрослый — тоже.
+    entt::entity child = entt::null;
+    for (const auto [entity, id, person, kin] : registry.view<const lw::Id, const lw::Person, const lw::Kin>().each()) {
+        if (lw::isMinor(registry, entity) && world.find(kin.guardian) != entt::null && child == entt::null) {
+            child = entity;
+        }
+    }
+    CHECK(child != entt::null);
+    if (child == entt::null) {
+        return;
+    }
+    const entt::entity guardian = world.find(registry.get<lw::Kin>(child).guardian);
+    entt::entity single = entt::null;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        if (lw::isMinor(registry, entity) || entity == guardian || lw::isSoldier(registry, entity)) {
+            continue;
+        }
+        bool wards = false;
+        for (const auto [other, kin] : registry.view<const lw::Kin>().each()) {
+            wards = wards || kin.guardian == id.value;
+        }
+        if (!wards && single == entt::null) {
+            single = entity;
+        }
+    }
+    CHECK(single != entt::null);
+    const auto wait = [&](entt::entity entity) {
+        registry.get<lw::Position>(entity) = {lw::Map::cellCenter(door.x), lw::Map::cellCenter(door.y)};
+        lw::Mind& mind = registry.get<lw::Mind>(entity);
+        mind.action = lw::Action::Evacuate;
+        mind.phase = lw::ActionPhase::Perform;
+        mind.target = point;
+        mind.spot = door;
+        registry.get<lw::Wounds>(entity) = {};
+    };
+    // Все прочие дети опекуна — тоже у пункта, кроме этого ребёнка.
+    wait(guardian);
+    wait(single);
+    for (const auto [entity, id, person, kin] : registry.view<const lw::Id, const lw::Person, const lw::Kin>().each()) {
+        if (kin.guardian == idOf(world, guardian) && entity != child) {
+            wait(entity);
+        }
+    }
+    world.syncSpatial();
+    const int population = lw::scenarioStats(world).population;
+    const int lostBefore = lw::scenarioStats(world).lost;
+    lw::departConvoy(world, point);
+    CHECK(registry.all_of<lw::Evacuated>(single) && !registry.all_of<lw::Person>(single));
+    CHECK(registry.all_of<lw::Person>(guardian)); // без ребёнка не уехал
+    // Ребёнок пришёл — семья уезжает вместе.
+    wait(child);
+    world.syncSpatial();
+    lw::departConvoy(world, point);
+    CHECK(registry.all_of<lw::Evacuated>(guardian) && registry.all_of<lw::Evacuated>(child));
+    CHECK(registry.all_of<lw::Name>(child) && registry.all_of<lw::Kin>(child)); // прошлое остаётся
+    const lw::ScenarioStats stats = lw::scenarioStats(world);
+    CHECK(stats.population == population && stats.lost == lostBefore && stats.evacuated >= 3);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Evacuated) >= 3);
+    // Мир живёт дальше без них.
+    runMinutes(world, 30);
+
+    // Коллапс: армия уходит, пункты закрыты, последняя передача.
+    lw::enterPhase(world, lw::WorldPhase::Collapse);
+    CHECK(!lw::evacuationOpen(world));
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::EvacuationEnded) == points.size());
+    int left = 0;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        left += event.kind == lw::ChronicleKind::Evacuated && event.a == 1 ? 1 : 0;
+    }
+    CHECK(left + static_cast<int>(world.chronicle().countOf(lw::ChronicleKind::StayedBehind)) <= soldiers);
+    CHECK(lw::scenarioStats(world).soldiers == static_cast<int>(world.chronicle().countOf(lw::ChronicleKind::StayedBehind)));
+    CHECK(lw::scenarioOf(world)->broadcast == static_cast<std::uint8_t>(lw::BroadcastKind::Farewell));
+    CHECK(registry.view<const lw::Quarantine>().empty());
+
+    // Двойник без вмешательства: тот же seed и те же шаги — тот же мир.
+    runMinutes(twin, 60);
+    lw::World third(7, peaceConfig(60));
+    clearZombies(third);
+    lw::enterPhase(third, lw::WorldPhase::Panic);
+    runMinutes(third, 60);
+    CHECK(twin.stateHash() == third.stateHash());
+}
+
+// К своим: встревоженный опекун идёт за ребёнком, который далеко от дома;
+// спокойный — нет. Ребёнок сам «к своим» не идёт.
+void testReunite() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    runUntil(world, 11, 0);
+    entt::entity child = entt::null;
+    for (const auto [entity, id, person, kin] : registry.view<const lw::Id, const lw::Person, const lw::Kin>().each()) {
+        if (lw::isMinor(registry, entity) && world.find(kin.guardian) != entt::null && child == entt::null &&
+            registry.all_of<lw::Person>(world.find(kin.guardian))) {
+            child = entity;
+        }
+    }
+    CHECK(child != entt::null);
+    if (child == entt::null) {
+        return;
+    }
+    const entt::entity guardian = world.find(registry.get<lw::Kin>(child).guardian);
+    // Ребёнок — за полкилометра от дома и от опекуна.
+    const lw::Position home = registry.get<lw::Position>(guardian);
+    const auto far = world.nav().nearestPassable(lw::Map::cellAt(home.x + 500.0f, home.y + 200.0f), 30);
+    CHECK(far.has_value());
+    if (!far) {
+        return;
+    }
+    registry.get<lw::Position>(child) = {lw::Map::cellCenter(far->x), lw::Map::cellCenter(far->y)};
+    world.syncSpatial();
+    CHECK(scoreOf(world, guardian, lw::Action::Reunite) == 0.0f);
+    lw::raiseAlarm(world, guardian, 0.9f, lw::AlarmClue::Broadcast, lw::kInvalidId);
+    lw::raiseAlarm(world, child, 0.9f, lw::AlarmClue::Broadcast, lw::kInvalidId);
+    CHECK(scoreOf(world, guardian, lw::Action::Reunite) > 0.3f);
+    CHECK(scoreOf(world, child, lw::Action::Reunite) == 0.0f);
+}
+
+// Кордон карантина (этап 7.6): житель деревни на карантине почти не идёт к
+// пункту эвакуации в городе; смелый и вспыльчивый — охотнее послушного.
+void testCordon() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    lw::enterPhase(world, lw::WorldPhase::Panic);
+    runUntil(world, 11, 0);
+    // Взрослый житель деревни (не солдат), до пункта — не дальше 7 км.
+    entt::entity villager = entt::null;
+    lw::EntityId village = lw::kInvalidId;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        const entt::entity home = world.find(person.home);
+        if (lw::isMinor(registry, entity) || lw::isSoldier(registry, entity) || home == entt::null ||
+            person.group != lw::kInvalidId) {
+            continue;
+        }
+        const lw::EntityId settlement = registry.get<lw::Building>(home).settlement;
+        if (registry.get<lw::Settlement>(world.find(settlement)).kind == lw::SettlementKind::Village &&
+            (villager == entt::null || id.value < idOf(world, villager))) {
+            villager = entity;
+            village = settlement;
+        }
+    }
+    CHECK(villager != entt::null);
+    if (villager == entt::null) {
+        return;
+    }
+    // Дома, без нужд, без детей поблизости, встревожен; трусоват — хочет уехать.
+    const lw::Building& home = registry.get<lw::Building>(world.find(registry.get<lw::Person>(villager).home));
+    registry.get<lw::Position>(villager) = {lw::Map::cellCenter(home.door.x), lw::Map::cellCenter(home.door.y)};
+    world.syncSpatial();
+    registry.get<lw::Needs>(villager) = {};
+    lw::Traits timid = traitsOf(0.5f);
+    timid.bravery = 0.1f;
+    timid.aggression = 0.2f;
+    timid.prudence = 0.9f;
+    registry.get<lw::Traits>(villager) = timid;
+    lw::raiseAlarm(world, villager, 0.95f, lw::AlarmClue::Zombie, lw::kInvalidId);
+    const float open = scoreOf(world, villager, lw::Action::Evacuate);
+    CHECK(open > 0.0f);
+    if (open <= 0.0f) {
+        return;
+    }
+    registry.emplace<lw::Quarantine>(world.find(village), lw::Quarantine{world.tick(), 2, lw::Quarantine::kNever});
+    CHECK(lw::quarantineAt(world, registry.get<lw::Position>(villager).x, registry.get<lw::Position>(villager).y) ==
+          village);
+    const float obedient = scoreOf(world, villager, lw::Action::Evacuate);
+    CHECK(obedient < 0.35f * open && obedient > 0.0f);
+    // Смелый и вспыльчивый рвёт кордон охотнее (воля к отъезду у него меньше —
+    // сравнить долю: оценку с кордоном и без).
+    lw::Traits bold = timid;
+    bold.aggression = 1.0f;
+    bold.bravery = 0.1f;
+    registry.get<lw::Traits>(villager) = bold;
+    const float boldWith = scoreOf(world, villager, lw::Action::Evacuate);
+    registry.remove<lw::Quarantine>(world.find(village));
+    const float boldOpen = scoreOf(world, villager, lw::Action::Evacuate);
+    CHECK(boldOpen > 0.0f && boldWith / boldOpen > obedient / open + 0.01f);
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -7218,6 +7638,13 @@ int main() {
     testChildBehaviour();
     testOrphanTakenIn();
     testFamilyInGroup();
+    testAlarmRules();
+    testAlarmFromEvidence();
+    testAlarmBehaviour();
+    testQuarantine();
+    testEvacuation();
+    testReunite();
+    testCordon();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

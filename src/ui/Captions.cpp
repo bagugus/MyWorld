@@ -271,6 +271,16 @@ std::string intentLine(const World& world, EntityId id) {
         return travel ? "идёт за покупками" : "покупает еду";
     case Action::SeeDoctor:
         return travel ? "идёт к врачу" : "у врача";
+    case Action::Evacuate: // этап 7.6
+        return travel ? "идёт к пункту эвакуации" : "ждёт колонну эвакуации";
+    case Action::Reunite:
+        if (isPerson(world, target)) {
+            const entt::entity other = entityOf(world, target);
+            const auto* kin = other != entt::null ? registry.try_get<Kin>(other) : nullptr;
+            const bool ward = kin != nullptr && kin->guardian == id;
+            return (ward ? "спешит за ребёнком — " : "спешит к своим — ") + idLabel(target);
+        }
+        return "спешит к своим";
     case Action::GoHome: {
         const auto* needs = registry.try_get<Needs>(entity);
         return needs != nullptr && needs->fear >= 0.5f ? "идёт домой — страшно" : "идёт домой";

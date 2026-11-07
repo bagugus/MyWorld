@@ -1,9 +1,11 @@
 #include "sim/systems/GroupSystem.h"
 
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Memory.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
+#include "sim/Society.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -32,6 +34,9 @@ constexpr float kCoupMargin = 0.2f;
 // невзлюбил или средняя симпатия остальных к нему не выше kExpelAffinity.
 constexpr float kLeaveAffinity = -0.1f;
 constexpr float kExpelAffinity = -0.2f;
+// Заражённого (укушен или в жару) встревоженный вожак изгоняет, если его
+// альтруизм ниже этого и это не его родня (этап 7.6).
+constexpr float kKeepInfectedAltruism = 0.75f;
 
 const Bond* bondOf(const entt::registry& registry, entt::entity self, EntityId other) {
     const auto* relations = self != entt::null ? registry.try_get<Relations>(self) : nullptr;
@@ -148,6 +153,21 @@ float groupAffinity(const World& world, const Group& group, EntityId member, int
     return others > 0 ? sum / static_cast<float>(others) : 0.0f;
 }
 
+// Изгнать ли заражённого (этап 7.6): участник заметно болен (укушен или в
+// жару), вожак знает, что это заразно и опасно, а жалости не хватает — и
+// это не его родня.
+bool shunsInfected(const World& world, EntityId leader, entt::entity member, EntityId memberId) {
+    const entt::registry& registry = world.registry();
+    const entt::entity chief = world.find(leader);
+    const auto* wounds = registry.try_get<Wounds>(member);
+    if (chief == entt::null || wounds == nullptr || !isVisiblyIll(*wounds) ||
+        alarmOf(registry, chief) < kAlarmedLevel || kinOf(registry, chief, memberId) != KinKind::Count) {
+        return false;
+    }
+    const auto* traits = registry.try_get<Traits>(chief);
+    return (traits != nullptr ? traits->altruism : 0.5f) < kKeepInfectedAltruism;
+}
+
 // Выбывшие, преемник, ушедшие и изгнанные, смена вожака. false — группа
 // распалась.
 bool reviewGroup(World& world, Group& group, EntityId groupId) {
@@ -186,10 +206,11 @@ bool reviewGroup(World& world, Group& group, EntityId groupId) {
         const Bond* fromLeader = bondOf(registry, world.find(group.leader), member);
         int others = 0;
         const float liked = groupAffinity(world, group, member, others);
+        const bool infected = shunsInfected(world, group.leader, entity, member);
         if ((fromLeader != nullptr && fromLeader->hostile()) ||
-            (others >= 2 && liked <= kExpelAffinity)) {
+            (others >= 2 && liked <= kExpelAffinity) || infected) {
             leave(world, group, entity, member);
-            world.record(ChronicleKind::Expelled, group.leader, member, 0, 0, groupId);
+            world.record(ChronicleKind::Expelled, group.leader, member, infected ? 1 : 0, 0, groupId);
             experience(world, entity, MemoryKind::Expelled, group.leader, groupId);
         }
     }
@@ -307,6 +328,9 @@ bool admits(const World& world, const Group& group, entt::entity candidate, Enti
     const entt::registry& registry = world.registry();
     if (isMinor(registry, candidate)) {
         return false; // ребёнок приходит с опекуном (followGuardians)
+    }
+    if (shunsInfected(world, group.leader, candidate, candidateId)) {
+        return false; // заражённого не берут (этап 7.6)
     }
     const Bond* toLeader = bondOf(registry, candidate, group.leader);
     if (toLeader != nullptr && (toLeader->hostile() || toLeader->trust < 0.0f)) {
