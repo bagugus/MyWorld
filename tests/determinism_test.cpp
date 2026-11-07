@@ -21,6 +21,8 @@
 #include "sim/Map.h"
 #include "sim/Memory.h"
 #include "sim/Names.h"
+#include "sim/Parallel.h"
+#include "sim/Profiler.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
 #include "sim/Relations.h"
@@ -822,6 +824,115 @@ void testWorldSpatialIndex() {
     const entt::entity victim = *readOnly.registry().view<const lw::Position>().begin();
     world.destroy(victim);
     CHECK(world.spatial().size() == 199);
+}
+
+// Индекс с тысячами сущностей (этап 2а.1): синхронизация идёт параллельно, а
+// результат — тот же, что в одном потоке и у полного перебора; порядок обхода —
+// ряды, столбцы, id.
+void testSpatialIndexParallelSync() {
+    constexpr float kSize = 2000.0f;
+    constexpr std::size_t kCount = 3000; // больше порога параллельной синхронизации
+    entt::registry registry;
+    lw::Rng rng(11);
+    std::vector<entt::entity> entities;
+    for (std::size_t i = 0; i < kCount; ++i) {
+        entities.push_back(spawnAt(registry, i + 1, rng.range(0.0f, kSize), rng.range(0.0f, kSize)));
+    }
+    const int threads = lw::parallelThreads();
+    lw::SpatialIndex serial(kSize, kSize);
+    lw::SpatialIndex parallel(kSize, kSize);
+    bool same = true;
+    bool matchesBrute = true;
+    std::vector<lw::SpatialHit> a;
+    std::vector<lw::SpatialHit> b;
+    for (int round = 0; round < 6; ++round) {
+        // Часть сущностей переходит в другие корзины, часть сдвигается внутри своей.
+        for (std::size_t i = 0; i < kCount; ++i) {
+            lw::Position& position = registry.get<lw::Position>(entities[i]);
+            const float step = (i + static_cast<std::size_t>(round)) % 3 == 0 ? 60.0f : 1.0f;
+            position.x = std::clamp(position.x + rng.range(-step, step), 0.0f, kSize);
+            position.y = std::clamp(position.y + rng.range(-step, step), 0.0f, kSize);
+        }
+        lw::setParallelThreads(1);
+        serial.sync(registry);
+        lw::setParallelThreads(4);
+        parallel.sync(registry);
+        for (int q = 0; q < 40; ++q) {
+            const float x = rng.range(0.0f, kSize);
+            const float y = rng.range(0.0f, kSize);
+            const float radius = rng.range(0.0f, 200.0f);
+            serial.queryRadius(x, y, radius, a);
+            parallel.queryRadius(x, y, radius, b);
+            bool sameOrder = a.size() == b.size();
+            for (std::size_t i = 0; sameOrder && i < a.size(); ++i) {
+                sameOrder = a[i].id == b[i].id && a[i].x == b[i].x && a[i].y == b[i].y;
+            }
+            same = same && sameOrder;
+            std::vector<lw::EntityId> found = hitIds(b);
+            std::sort(found.begin(), found.end());
+            matchesBrute = matchesBrute && found == bruteRadius(registry, x, y, radius);
+            const auto nearA = serial.nearest(x, y, 300.0f);
+            const auto nearB = parallel.nearest(x, y, 300.0f);
+            same = same && nearA.has_value() == nearB.has_value() && (!nearA || nearA->id == nearB->id);
+        }
+    }
+    lw::setParallelThreads(threads);
+    CHECK(same);
+    CHECK(matchesBrute);
+    CHECK(parallel.size() == kCount);
+}
+
+// Параллельные проходы (восприятие, движение, синхронизация индекса — этап 2а.1)
+// не меняют мир: хеш один и тот же при любом числе потоков. Мир — с тысячами
+// существ, чтобы все проходы и правда шли параллельно.
+void testParallelThreadsSameHash() {
+    lw::WorldConfig config;
+    config.mapWidth = 512;
+    config.mapHeight = 512;
+    config.people = 300;
+    config.zombies = 1900;
+    config.animals = 60;
+    config.flocks = 4;
+    config.peacetime = false;
+    const int threads = lw::parallelThreads();
+    std::vector<std::uint64_t> hashes;
+    for (const int count : {1, 3, 8}) {
+        lw::setParallelThreads(count);
+        lw::World world(7, config);
+        for (int i = 0; i < 1200; ++i) {
+            world.step();
+        }
+        hashes.push_back(world.stateHash());
+    }
+    lw::setParallelThreads(threads);
+    CHECK(hashes[0] == hashes[1]);
+    CHECK(hashes[0] == hashes[2]);
+}
+
+// Профайлер (этап 2а.1) только меряет: с ним и без него мир один и тот же, а
+// шаги старта и системы тика записаны.
+void testProfilerDoesNotChangeWorld() {
+    lw::World plain(5, smallConfig(80));
+    lw::World measured(5, smallConfig(80));
+    measured.setProfiling(true);
+    for (int i = 0; i < 400; ++i) {
+        plain.step();
+        measured.step();
+    }
+    CHECK(plain.stateHash() == measured.stateHash());
+    CHECK(measured.profiler().ticks() == 400);
+    CHECK(plain.profiler().ticks() == 0);
+    CHECK(measured.profiler().totals(lw::profileSection("perception")).calls == 400);
+    bool hasMap = false;
+    for (const lw::Profiler::StartupStep& step : plain.profiler().startup()) {
+        hasMap = hasMap || step.name == "world/map/elevation";
+    }
+    CHECK(hasMap);
+    std::size_t memory = 0;
+    for (const lw::MemoryItem& item : plain.memoryReport()) {
+        memory += item.bytes;
+    }
+    CHECK(memory > 0);
 }
 
 // --- Навигация ---------------------------------------------------------------
@@ -7642,6 +7753,9 @@ int main() {
     testSpatialIndex();
     testSpatialIndexOrderIndependent();
     testWorldSpatialIndex();
+    testSpatialIndexParallelSync();
+    testParallelThreadsSameHash();
+    testProfilerDoesNotChangeWorld();
     testSegmentWalk();
     testNavGrid();
     testPathfinderOnRandomMaps();

@@ -57,6 +57,10 @@ public:
     int itemsDrawn() const { return itemsDrawn_; }
     int meshesLoaded() const { return meshesLoaded_; }
     int pending() const { return pending_; }
+    // Построено сеток с начала, секунды на это и миллисекунды в последнем кадре (этап 2а.1).
+    int meshesBuilt() const { return meshesBuilt_; }
+    double buildSeconds() const { return buildSeconds_; }
+    double buildMsLastFrame() const { return 1000.0 * cpuTime_; }
 
 private:
     static constexpr int kChunkCells = 32;
@@ -106,6 +110,8 @@ private:
     int meshesLoaded_ = 0;
     int pending_ = 0;
     double cpuTime_ = 0.0;
+    int meshesBuilt_ = 0;
+    double buildSeconds_ = 0.0;
 };
 
 } // namespace lw

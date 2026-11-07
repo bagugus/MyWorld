@@ -853,11 +853,23 @@ void updateZombies(World& world) {
     ZombieBrain brain(world, rng);
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по
     // ходу не добавляются и не удаляются.
+    //
+    // Думает за тик двадцатая часть зомби, а view из шести компонентов
+    // проверял бы все хранилища у каждого (этап 2а.1). Поэтому обход — по
+    // ведущему хранилищу того же view (handle: порядок тот же, что у view), id —
+    // у всех, остальные компоненты — только у тех, чья очередь.
     auto view = world.registry()
                     .view<const Id, Zombie, Walker, const Position, const Awareness, Combat>();
-    for (const auto [entity, id, zombie, walker, position, awareness, combat] : view.each()) {
-        if ((tick + id.value) % kZombieThinkTicks == 0) {
-            brain.think(entity, id.value, zombie, walker, position, awareness, combat);
+    const auto& ids = world.registry().storage<Id>();
+    if (const auto* leading = view.handle(); leading != nullptr) {
+        for (const entt::entity entity : *leading) {
+            const EntityId id = ids.get(entity).value;
+            if ((tick + id) % kZombieThinkTicks != 0 || !view.contains(entity)) {
+                continue;
+            }
+            auto [zombie, walker, position, awareness, combat] =
+                view.get<Zombie, Walker, const Position, const Awareness, Combat>(entity);
+            brain.think(entity, id, zombie, walker, position, awareness, combat);
         }
     }
     if (tick % kHordeUpdateTicks == 0) {

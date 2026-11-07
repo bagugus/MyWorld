@@ -116,6 +116,16 @@ EntityId Places::nearestSettlement(float x, float y) const {
     return best;
 }
 
+std::size_t Places::memoryBytes() const {
+    std::size_t bytes = settlements_.capacity() * sizeof(SettlementPlace) + water_.memoryBytes() +
+                        forage_.memoryBytes();
+    for (const SettlementPlace& place : settlements_) {
+        bytes += place.buildings.capacity() * sizeof(BuildingPlace) +
+                 place.neighbours.capacity() * sizeof(EntityId);
+    }
+    return bytes;
+}
+
 std::optional<Cell> Places::nearestWater(const NavGrid& nav, Cell from, float maxDistance,
                                          const std::function<bool(Cell)>& accept) const {
     return nearestSpot(water_, nav, from, maxDistance, accept);

@@ -105,8 +105,36 @@ void updateCombat(World& world) {
 
     // Порядок — порядок хранения в реестре: он детерминирован. Погибшие
     // становятся телами после обхода: компоненты по ходу не снимаются.
+    //
+    // Бьёт за тик горстка существ, а view проверял бы Id и Position у каждого
+    // (этап 2а.1). Если ведущее хранилище view — Combat (так почти всегда),
+    // обход идёт по нему в том же порядке, и чужие хранилища смотрятся только
+    // у тех, у кого есть цель и готов удар. Кто готов, отбирается до ударов:
+    // Combat в этом цикле меняет только сам ударивший, так что список тот же,
+    // что получился бы по ходу.
     auto view = registry.view<const Id, Combat, const Position>();
-    for (const auto [entity, id, combat, position] : view.each()) {
+    auto& combats = registry.storage<Combat>();
+    const bool fast = view.handle() == &combats;
+    const auto& ids = registry.storage<Id>();
+    const auto& positions = registry.storage<Position>();
+    std::vector<std::pair<entt::entity, Combat*>> ready;
+    if (fast) {
+        for (const auto [entity, combat] : combats.each()) {
+            if (combat.target != kInvalidId && tick >= combat.ready && view.contains(entity)) {
+                ready.emplace_back(entity, &combat);
+            }
+        }
+    } else {
+        for (const auto [entity, id, combat, position] : view.each()) {
+            if (combat.target != kInvalidId && tick >= combat.ready) {
+                ready.emplace_back(entity, &combat);
+            }
+        }
+    }
+    for (const auto& [entity, combatPtr] : ready) {
+        Combat& combat = *combatPtr;
+        const Id& id = ids.get(entity);
+        const Position& position = positions.get(entity);
         if (combat.target == kInvalidId || tick < combat.ready) {
             continue;
         }

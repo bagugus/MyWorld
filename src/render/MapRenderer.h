@@ -2,6 +2,7 @@
 
 #include <raylib.h>
 
+#include <cstddef>
 #include <vector>
 
 namespace lw {
@@ -44,6 +45,8 @@ public:
 
     int chunkCount() const { return static_cast<int>(chunks_.size()); }
     int chunksDrawn() const { return chunksDrawn_; }
+    // Память текстур карты в видеокарте, байты (оценка с мип-уровнями; этап 2а.1).
+    std::size_t textureBytes() const;
 
 private:
     struct Chunk {

@@ -1,5 +1,6 @@
 // Природная часть карты: рельеф, вода, поверхность, растительность.
 
+#include "sim/Parallel.h"
 #include "sim/gen/GenContext.h"
 
 #include <FastNoiseLite.h>
@@ -497,29 +498,33 @@ void generateElevation(Context& ctx) {
     const FastNoiseLite coast = makeFbm(rng, kCoastWavelength, 3);
     const FastNoiseLite hills = makeFbm(rng, kHillWavelength, 5);
 
-    for (int y = 0; y < ctx.height; ++y) {
-        const float wy = Map::cellCenter(y);
-        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(ctx.height) - 0.5f;
-        for (int x = 0; x < ctx.width; ++x) {
-            const float wx = Map::cellCenter(x);
-            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(ctx.width) - 0.5f;
+    // Клетка зависит только от своих координат и шума (GetNoise ничего не
+    // меняет), поэтому ряды считаются параллельно (этап 2а.1): карта та же.
+    parallelFor(static_cast<std::size_t>(ctx.height), 16, 64, [&](std::size_t begin, std::size_t end, int) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y) {
+            const float wy = Map::cellCenter(y);
+            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(ctx.height) - 0.5f;
+            for (int x = 0; x < ctx.width; ++x) {
+                const float wx = Map::cellCenter(x);
+                const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(ctx.width) - 0.5f;
 
-            const float toSea = (u * seaX + v * seaY) / extent;
-            const float c = kCoastline - toSea + kCoastWarp * coast.GetNoise(wx, wy);
-            const float relief = hills.GetNoise(wx, wy);
+                const float toSea = (u * seaX + v * seaY) / extent;
+                const float c = kCoastline - toSea + kCoastWarp * coast.GetNoise(wx, wy);
+                const float relief = hills.GetNoise(wx, wy);
 
-            float meters = 0.0f;
-            if (c < 0.0f) {
-                meters = c * kSeaSlope + relief * kShoreRelief;
-            } else {
-                // У берега равнина, дальше нагорье с холмами.
-                meters = c * kPlainRise + kUplandHeight * smoothstep(c / kUplandAt) +
-                         relief * (kShoreRelief + kHillRelief * smoothstep(c / kHillsFullAt));
+                float meters = 0.0f;
+                if (c < 0.0f) {
+                    meters = c * kSeaSlope + relief * kShoreRelief;
+                } else {
+                    // У берега равнина, дальше нагорье с холмами.
+                    meters = c * kPlainRise + kUplandHeight * smoothstep(c / kUplandAt) +
+                             relief * (kShoreRelief + kHillRelief * smoothstep(c / kHillsFullAt));
+                }
+                const float units = std::round(meters / Map::kElevationStep);
+                map.elevation.at(x, y) = static_cast<std::int16_t>(std::clamp(units, -30000.0f, 30000.0f));
             }
-            const float units = std::round(meters / Map::kElevationStep);
-            map.elevation.at(x, y) = static_cast<std::int16_t>(std::clamp(units, -30000.0f, 30000.0f));
         }
-    }
+    });
 }
 
 void generateWater(Context& ctx) {
@@ -610,29 +615,32 @@ void generateVegetation(Context& ctx) {
     // Край вырубки вокруг поселения неровный: где-то лес подходит к домам,
     // где-то отступает дальше.
     const FastNoiseLite edge = makeFbm(ctx.rng, kClearingWavelength, 3);
-    for (int y = 0; y < ctx.height; ++y) {
-        for (int x = 0; x < ctx.width; ++x) {
-            if (map.water.at(x, y) != Water::None || map.ground.at(x, y) != Ground::Grass ||
-                ctx.slope.at(x, y) > kForestMaxSlope) {
-                continue;
-            }
-            const float wx = Map::cellCenter(x);
-            const float wy = Map::cellCenter(y);
-            if (proximity.at(x, y) != 255) {
-                const float cleared = static_cast<float>(kClearingEdge) +
-                                      static_cast<float>(kClearingRagged) * edge.GetNoise(wx, wy);
-                if (static_cast<float>(proximity.at(x, y)) < cleared) {
+    // Лес в клетке — только от её слоёв и шума: ряды параллельно (этап 2а.1).
+    parallelFor(static_cast<std::size_t>(ctx.height), 16, 64, [&](std::size_t begin, std::size_t end, int) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y) {
+            for (int x = 0; x < ctx.width; ++x) {
+                if (map.water.at(x, y) != Water::None || map.ground.at(x, y) != Ground::Grass ||
+                    ctx.slope.at(x, y) > kForestMaxSlope) {
                     continue;
                 }
-            }
-            const float upland =
-                std::clamp(map.elevationMeters({x, y}) / kForestUplandHeight, 0.0f, 1.0f);
-            const float density = forest.GetNoise(wx, wy) + kForestBias + kForestUplandBias * upland;
-            if (density > 0.0f) {
-                map.cover.at(x, y) = Cover::Forest;
+                const float wx = Map::cellCenter(x);
+                const float wy = Map::cellCenter(y);
+                if (proximity.at(x, y) != 255) {
+                    const float cleared = static_cast<float>(kClearingEdge) +
+                                          static_cast<float>(kClearingRagged) * edge.GetNoise(wx, wy);
+                    if (static_cast<float>(proximity.at(x, y)) < cleared) {
+                        continue;
+                    }
+                }
+                const float upland =
+                    std::clamp(map.elevationMeters({x, y}) / kForestUplandHeight, 0.0f, 1.0f);
+                const float density = forest.GetNoise(wx, wy) + kForestBias + kForestUplandBias * upland;
+                if (density > 0.0f) {
+                    map.cover.at(x, y) = Cover::Forest;
+                }
             }
         }
-    }
+    });
 }
 
 } // namespace lw::gen

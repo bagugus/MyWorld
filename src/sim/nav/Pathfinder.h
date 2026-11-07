@@ -81,6 +81,9 @@ public:
 
     const PathfinderSettings& settings() const { return settings_; }
 
+    // Память рабочих буферов поиска, байты (для замеров).
+    std::size_t memoryBytes() const;
+
 private:
     // Узел графа и оценка пути между ним и началом (или целью).
     struct Access {

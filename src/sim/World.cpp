@@ -4,6 +4,7 @@
 #include "sim/Death.h"
 #include "sim/Hash.h"
 #include "sim/Names.h"
+#include "sim/Profiler.h"
 #include "sim/Population.h"
 #include "sim/Work.h"
 #include "sim/gen/MapGenerator.h"
@@ -28,6 +29,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <type_traits>
 #include <utility>
 
 namespace lw {
@@ -46,137 +48,190 @@ World::World(std::uint64_t seed, const WorldConfig& config)
         streams_.push_back(root.fork(i + 1));
     }
 
+    const StartupScope total(profiler_, "world");
     generate();
-    initWeather(*this);
-    spawnLoot(*this);
-    spawnPeople(*this, config_.people);
-    // Профессии и сбережения (этап 7.2) — свой поток рандома: остальное не сдвигается.
-    if (config_.peacetime) {
-        assignJobs(*this);
+    {
+        const StartupScope step(profiler_, "world/weather");
+        initWeather(*this);
     }
-    // Зомби селятся подальше от людей: индекс должен их уже видеть.
-    spatial_.sync(registry_);
-    spawnZombies(*this, config_.zombies);
-    spatial_.sync(registry_);
-    // Животные и птицы — вдали от людей.
-    spawnAnimals(*this, config_.animals, config_.flocks);
-    spatial_.sync(registry_);
+    {
+        const StartupScope step(profiler_, "world/loot");
+        spawnLoot(*this);
+    }
+    {
+        const StartupScope step(profiler_, "world/people");
+        spawnPeople(*this, config_.people);
+        // Профессии и сбережения (этап 7.2) — свой поток рандома: остальное не сдвигается.
+        if (config_.peacetime) {
+            assignJobs(*this);
+        }
+    }
+    {
+        const StartupScope step(profiler_, "world/zombies");
+        // Зомби селятся подальше от людей: индекс должен их уже видеть.
+        spatial_.sync(registry_);
+        spawnZombies(*this, config_.zombies);
+        spatial_.sync(registry_);
+    }
+    {
+        const StartupScope step(profiler_, "world/animals");
+        // Животные и птицы — вдали от людей.
+        spawnAnimals(*this, config_.animals, config_.flocks);
+        spatial_.sync(registry_);
+    }
     // Сценарий (этап 7.4) — последним: id остальных сущностей не сдвигаются.
     if (config_.peacetime) {
+        const StartupScope step(profiler_, "world/scenario");
         createScenario(*this);
     }
 }
 
 void World::generate() {
-    const GeneratedMap generated = generateMap(map_, rng(RngStream::MapGen));
-    mapHash_ = map_.hash();
-
-    // Порядок создания задаёт id: сначала поселения, затем здания.
-    std::vector<EntityId> settlementIds;
-    settlementIds.reserve(generated.settlements.size());
-    for (const SettlementSite& site : generated.settlements) {
-        const entt::entity entity = create();
-        registry_.emplace<Settlement>(entity, site.kind, site.name, site.center, site.radius);
-        settlementIds.push_back(registry_.get<Id>(entity).value);
+    GeneratedMap generated;
+    {
+        const StartupScope step(profiler_, "world/map");
+        generated = generateMap(map_, rng(RngStream::MapGen), &profiler_);
+        mapHash_ = map_.hash();
     }
-    for (const BuildingSite& site : generated.buildings) {
-        const entt::entity entity = create();
-        registry_.emplace<Building>(entity, site.kind, site.origin, site.width, site.height,
-                                    site.door,
-                                    settlementIds[static_cast<std::size_t>(site.settlement)]);
+    {
+        const StartupScope step(profiler_, "world/sites");
+
+        // Порядок создания задаёт id: сначала поселения, затем здания.
+        std::vector<EntityId> settlementIds;
+        settlementIds.reserve(generated.settlements.size());
+        for (const SettlementSite& site : generated.settlements) {
+            const entt::entity entity = create();
+            registry_.emplace<Settlement>(entity, site.kind, site.name, site.center, site.radius);
+            settlementIds.push_back(registry_.get<Id>(entity).value);
+        }
+        for (const BuildingSite& site : generated.buildings) {
+            const entt::entity entity = create();
+            registry_.emplace<Building>(entity, site.kind, site.origin, site.width, site.height,
+                                        site.door,
+                                        settlementIds[static_cast<std::size_t>(site.settlement)]);
+        }
     }
-
-    nav_.build(map_, registry_);
-    graph_.build(nav_);
-    places_.build(map_, nav_, registry_);
-    resources_.build(places_);
-}
-
-namespace {
-
-constexpr const char* kPhaseNames[World::kStepPhases] = {
-    "weather",    "resources", "scenario", "events",  "work",       "needs",
-    "infection",  "society",   "relations", "memories", "groups",   "bodies",
-    "perception", "zombies",   "animals",   "utility ai", "combat", "movement",
-    "spatial sync"};
-
-} // namespace
-
-const char* World::stepPhaseName(int phase) {
-    return kPhaseNames[phase];
+    {
+        const StartupScope step(profiler_, "world/nav grid");
+        nav_.build(map_, registry_);
+    }
+    {
+        const StartupScope step(profiler_, "world/nav graph");
+        graph_.build(nav_);
+    }
+    {
+        const StartupScope step(profiler_, "world/places");
+        places_.build(map_, nav_, registry_);
+        resources_.build(places_);
+    }
 }
 
 void World::step() {
-    using Clock = std::chrono::steady_clock;
-    int phase = 0;
-    Clock::time_point mark = profiling_ ? Clock::now() : Clock::time_point{};
-    // Засекает конец очередного шага тика (только при включённом замере).
-    const auto lap = [&] {
-        if (profiling_) {
-            const Clock::time_point now = Clock::now();
-            phaseSeconds_[phase] += std::chrono::duration<double>(now - mark).count();
-            mark = now;
-        }
-        ++phase;
-    };
-
-    updateWeather(*this);
-    lap();
-    updateResources(*this);
-    lap();
-    // Сценарий — до ивентов, работы и решений: фаза задаёт правила этой минуты.
-    updateScenario(*this);
-    lap();
-    // Ивенты — до восприятия: шум начавшегося ивента слышат в этом же тике.
-    updateEvents(*this);
-    lap();
-    // Работа — до решений: кто на месте (открыт ли магазин), плата, завоз.
-    updateWork(*this);
-    lap();
-    tickNeeds(*this);
-    lap();
-    // Заражение от больных (этап 7.5) — после нужд: заражение уже подросло за
-    // эту минуту, кто стал заразен — заразен сразу.
-    tickInfection(*this);
-    lap();
-    // Реакция общества (этап 7.6): передачи, увиденное, карантин, колонны
-    // эвакуации — до отношений и решений: кто уехал, того в мире уже нет.
-    updateSociety(*this);
-    lap();
-    // Отношения — по тому, кто был рядом и чем занят на начало тика.
-    tickRelations(*this);
-    lap();
-    // Память — угасание и находки (тела близких, близкие среди зомби).
-    tickMemories(*this);
-    lap();
-    // Семьи — раз в час: у каждого ребёнка опекун (этап 7.3); до групп —
-    // ребёнок идёт в группу за опекуном.
-    tickFamilies(*this);
-    // Группы — раз в час, по отношениям: кто вступил, ушёл, кто вожак.
-    tickGroups(*this);
-    lap();
-    // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
-    updateBodies(*this);
-    lap();
-    // До решений и движения: восприятие видит мир на начало тика.
-    updatePerception(*this);
-    lap();
-    // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
-    updateZombies(*this);
-    lap();
-    updateAnimals(*this);
-    lap();
-    updateUtilityAi(*this);
-    lap();
-    // Удары и выстрелы — по целям, которые выставили решения; погибшие
-    // становятся телами до движения.
-    updateCombat(*this);
-    lap();
-    updateMovement(*this, kTickDt);
-    lap();
-    // Последним: между тиками индекс совпадает с позициями всех сущностей.
-    spatial_.sync(registry_);
-    lap();
+    Profiler& p = profiler_;
+    const bool profiling = p.enabled();
+    const Profiler::Clock::time_point tickStart =
+        profiling ? Profiler::Clock::now() : Profiler::Clock::time_point{};
+    {
+        LW_PROFILE(p, "weather");
+        updateWeather(*this);
+    }
+    {
+        LW_PROFILE(p, "resources");
+        updateResources(*this);
+    }
+    {
+        // Сценарий — до ивентов, работы и решений: фаза задаёт правила этой минуты.
+        LW_PROFILE(p, "scenario");
+        updateScenario(*this);
+    }
+    {
+        // Ивенты — до восприятия: шум начавшегося ивента слышат в этом же тике.
+        LW_PROFILE(p, "events");
+        updateEvents(*this);
+    }
+    {
+        // Работа — до решений: кто на месте (открыт ли магазин), плата, завоз.
+        LW_PROFILE(p, "work");
+        updateWork(*this);
+    }
+    {
+        LW_PROFILE(p, "needs");
+        tickNeeds(*this);
+    }
+    {
+        // Заражение от больных (этап 7.5) — после нужд: заражение уже подросло за
+        // эту минуту, кто стал заразен — заразен сразу.
+        LW_PROFILE(p, "infection");
+        tickInfection(*this);
+    }
+    {
+        // Реакция общества (этап 7.6): передачи, увиденное, карантин, колонны
+        // эвакуации — до отношений и решений: кто уехал, того в мире уже нет.
+        LW_PROFILE(p, "society");
+        updateSociety(*this);
+    }
+    {
+        // Отношения — по тому, кто был рядом и чем занят на начало тика.
+        LW_PROFILE(p, "relations");
+        tickRelations(*this);
+    }
+    {
+        // Память — угасание и находки (тела близких, близкие среди зомби).
+        LW_PROFILE(p, "memories");
+        tickMemories(*this);
+    }
+    {
+        // Семьи — раз в час: у каждого ребёнка опекун (этап 7.3); до групп —
+        // ребёнок идёт в группу за опекуном.
+        LW_PROFILE(p, "families");
+        tickFamilies(*this);
+    }
+    {
+        // Группы — раз в час, по отношениям: кто вступил, ушёл, кто вожак.
+        LW_PROFILE(p, "groups");
+        tickGroups(*this);
+    }
+    {
+        // Укушенные встают, тела разлагаются — до восприятия: вставший виден сразу.
+        LW_PROFILE(p, "bodies");
+        updateBodies(*this);
+    }
+    {
+        // До решений и движения: восприятие видит мир на начало тика.
+        LW_PROFILE(p, "perception");
+        updatePerception(*this);
+    }
+    {
+        // Зомби и люди решают по тому, что заметили; сами шаги — в движении.
+        LW_PROFILE(p, "zombies");
+        updateZombies(*this);
+    }
+    {
+        LW_PROFILE(p, "animals");
+        updateAnimals(*this);
+    }
+    {
+        LW_PROFILE(p, "utility ai");
+        updateUtilityAi(*this);
+    }
+    {
+        // Удары и выстрелы — по целям, которые выставили решения; погибшие
+        // становятся телами до движения.
+        LW_PROFILE(p, "combat");
+        updateCombat(*this);
+    }
+    {
+        LW_PROFILE(p, "movement");
+        updateMovement(*this, kTickDt);
+    }
+    {
+        // Последним: между тиками индекс совпадает с позициями всех сущностей.
+        LW_PROFILE(p, "spatial sync");
+        spatial_.sync(registry_);
+    }
+    if (profiling) {
+        p.countTick(std::chrono::duration<double>(Profiler::Clock::now() - tickStart).count());
+    }
     ++tick_;
 }
 
@@ -208,6 +263,67 @@ entt::entity World::find(EntityId id) const {
         return entt::null;
     }
     return it->second;
+}
+
+namespace {
+
+// Память хранилища компонента T: плотный массив значений и сущностей, страницы
+// разреженного массива. Куча внутри компонентов — только путь Walker и состав
+// групп и орд (их считает memoryReport отдельно).
+template <typename T>
+std::size_t storageBytes(const entt::registry& registry) {
+    const auto* storage = registry.storage<T>();
+    if (storage == nullptr) {
+        return 0;
+    }
+    constexpr std::size_t kSparsePage = 4096; // ENTT_SPARSE_PAGE
+    const std::size_t payload = std::is_empty_v<T> ? 0 : sizeof(T);
+    return storage->capacity() * (payload + sizeof(entt::entity)) +
+           storage->extent() / kSparsePage * kSparsePage * sizeof(entt::entity);
+}
+
+template <typename... T>
+std::size_t storagesBytes(const entt::registry& registry) {
+    return (storageBytes<T>(registry) + ...);
+}
+
+} // namespace
+
+std::vector<MemoryItem> World::memoryReport() const {
+    std::vector<MemoryItem> report;
+    report.push_back({"map layers", map_.memoryBytes()});
+    report.push_back({"nav grid", nav_.memoryBytes()});
+    report.push_back({"nav graph", graph_.memoryBytes()});
+    report.push_back({"pathfinder buffers", pathfinder_.memoryBytes()});
+    report.push_back({"places", places_.memoryBytes()});
+    report.push_back({"resources", resources_.memoryBytes()});
+    report.push_back({"spatial index", spatial_.memoryBytes()});
+    report.push_back({"chronicle", chronicle_.memoryBytes()});
+
+    std::size_t components =
+        storagesBytes<Id, Name, Position, Velocity, Settlement, Building, Person, Needs, Traits, Age,
+                      Kin, Inventory, Mind, Relations, Memories, Group, Job, Wallet, Workplace,
+                      WorldEvent, Cache, Leads, Scenario, Alarm, Quarantine, EvacuationPoint,
+                      Evacuated, Senses, Awareness, Walker, Zombie, Horde, Animal, Flock, Weapon,
+                      Combat, Wounds, Corpse>(registry_);
+    for (const auto [entity, walker] : registry_.view<const Walker>().each()) {
+        components += walker.waypoints.capacity() * sizeof(Cell);
+    }
+    for (const auto [entity, group] : registry_.view<const Group>().each()) {
+        components += group.members.capacity() * sizeof(EntityId);
+    }
+    for (const auto [entity, horde] : registry_.view<const Horde>().each()) {
+        components += horde.members.capacity() * sizeof(EntityId);
+    }
+    for (const auto [entity, name] : registry_.view<const Name>().each()) {
+        components += name.first.capacity() > 15 ? name.first.capacity() + 1 : 0;
+        components += name.last.capacity() > 15 ? name.last.capacity() + 1 : 0;
+    }
+    report.push_back({"components", components});
+    report.push_back({"id lookup", idToEntity_.bucket_count() * sizeof(void*) +
+                                       idToEntity_.size() * (sizeof(EntityId) + sizeof(entt::entity) +
+                                                             2 * sizeof(void*))});
+    return report;
 }
 
 std::uint64_t World::stateHash() const {

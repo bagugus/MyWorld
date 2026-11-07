@@ -70,6 +70,12 @@ public:
         return page == kNoPage ? kNoDirection : direction_[slot(page, x, y)];
     }
 
+    // Память пула страниц, байты (для замеров).
+    std::size_t memoryBytes() const {
+        return (table_.capacity() + used_.capacity() + g_.capacity()) * sizeof(std::uint32_t) +
+               direction_.capacity();
+    }
+
     void set(int x, int y, std::uint32_t g, std::uint8_t direction) {
         const std::size_t tableIndex = pageOf(x, y);
         std::uint32_t page = table_[tableIndex];
@@ -126,6 +132,7 @@ class OpenList {
 public:
     void clear() { heap_.clear(); }
     bool empty() const { return heap_.empty(); }
+    std::size_t memoryBytes() const { return heap_.capacity() * sizeof(OpenEntry); }
     void push(const OpenEntry& entry) {
         heap_.push_back(entry);
         std::push_heap(heap_.begin(), heap_.end(), std::greater<>{});

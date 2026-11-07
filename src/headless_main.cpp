@@ -20,6 +20,10 @@
 //   lw_headless --seed 42 --phase panic --cast           главные герои: кто, когда и через кого (этап 12а.3)
 //   lw_headless --seed 42 --ticks 0 --families           семьи: дома, родня, сироты, прошлое (этап 7.3)
 //   lw_headless --seed 42 --outbreak 1 --ticks 1440000 --infections   вспышка: кто от кого заразился (этап 7.5)
+//   lw_headless --seed 1 --ticks 144000 --profile        время систем тика, шаги старта, память (этап 2а.1)
+//   lw_headless --seed 1 --ticks 144000 --sample         горячие функции (сэмплирующий профайлер, Windows)
+//   lw_headless --seed 1 --map-size 4096 --people 1200   карта 16 × 16 км (клетки по 4 м)
+//   lw_headless --seed 1 --threads 1                     без параллельных проходов (хеш тот же)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -29,6 +33,7 @@
 #include "sim/Infection.h"
 #include "sim/Foresight.h"
 #include "sim/Names.h"
+#include "sim/Parallel.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
@@ -42,6 +47,8 @@
 #include "sim/nav/NavGraph.h"
 #include "sim/systems/EventSystem.h"
 #include "sim/systems/ScenarioSystem.h"
+#include "util/ProcessMemory.h"
+#include "util/SamplingProfiler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -1728,6 +1735,60 @@ void benchmarkPaths(const lw::World& world, int count, bool compare) {
 
 } // namespace
 
+// Шаги старта мира по профайлеру (этап 2а.1).
+void printStartup(const lw::World& world) {
+    std::printf("startup (%.2f s):\n", world.profiler().startupSeconds());
+    for (const lw::Profiler::StartupStep& step : world.profiler().startup()) {
+        if (step.depth == 0) {
+            continue;
+        }
+        // «world/map/roads» → «  map/roads»: верхний уровень — весь мир.
+        const std::size_t slash = step.name.rfind('/');
+        const std::string name = slash == std::string::npos ? step.name : step.name.substr(slash + 1);
+        std::printf("  %*s%-*s %7.3f s\n", 2 * (step.depth - 1), "", 22 - 2 * (step.depth - 1),
+                    name.c_str(), step.seconds);
+    }
+}
+
+// Время систем тика по профайлеру: всего, мкс на тик, доля тика.
+void printProfile(const lw::World& world) {
+    const lw::Profiler& profiler = world.profiler();
+    if (profiler.ticks() == 0) {
+        return;
+    }
+    const double ticks = static_cast<double>(profiler.ticks());
+    const double total = profiler.tickSeconds();
+    std::printf("profile: %llu ticks, %.1f us per tick (%.0f ticks/s of pure simulation)\n",
+                static_cast<unsigned long long>(profiler.ticks()), 1e6 * total / ticks,
+                total > 0.0 ? ticks / total : 0.0);
+    for (const int section : lw::profileSectionsInTreeOrder()) {
+        const lw::Profiler::Totals totals = profiler.totals(section);
+        if (totals.calls == 0) {
+            continue;
+        }
+        const int depth = lw::profileSectionDepth(section);
+        const std::string& name = lw::profileSectionName(section);
+        const std::size_t slash = name.rfind('/');
+        const std::string leaf = slash == std::string::npos ? name : name.substr(slash + 1);
+        std::printf("  %*s%-*s %8.3f s %8.2f us %5.1f %%  (%.2f calls/tick)\n", 2 * depth, "",
+                    20 - 2 * depth, leaf.c_str(), totals.seconds, 1e6 * totals.seconds / ticks,
+                    total > 0.0 ? 100.0 * totals.seconds / total : 0.0,
+                    static_cast<double>(totals.calls) / ticks);
+    }
+}
+
+// Память крупных структур мира (оценка по ёмкости контейнеров).
+void printMemoryReport(const lw::World& world) {
+    std::size_t sum = 0;
+    std::printf("memory by structure:\n");
+    for (const lw::MemoryItem& item : world.memoryReport()) {
+        sum += item.bytes;
+        std::printf("  %-20s %8.1f MB\n", item.name.c_str(),
+                    static_cast<double>(item.bytes) / (1024.0 * 1024.0));
+    }
+    std::printf("  %-20s %8.1f MB\n", "total", static_cast<double>(sum) / (1024.0 * 1024.0));
+}
+
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
     std::uint64_t ticks = 1000;
@@ -1737,6 +1798,7 @@ int main(int argc, char** argv) {
     bool daily = false;
     bool social = false;
     bool profile = false;
+    bool sample = false; // --sample: сэмплирующий профайлер (горячие функции)
     bool eventLog = false;
     bool storyLog = false;
     bool foresightLog = false;
@@ -1769,6 +1831,10 @@ int main(int argc, char** argv) {
             social = true;
         } else if (std::strcmp(argv[i], "--profile") == 0) {
             profile = true;
+        } else if (std::strcmp(argv[i], "--sample") == 0) {
+            sample = true;
+        } else if (std::strcmp(argv[i], "--threads") == 0 && hasValue) {
+            lw::setParallelThreads(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--events") == 0) {
             eventLog = true;
         } else if (std::strcmp(argv[i], "--stories") == 0) {
@@ -1797,6 +1863,8 @@ int main(int argc, char** argv) {
                    lw::eventKindByName(argv[i + 1])) {
             manualEvent = lw::eventKindByName(argv[++i]);
             manualHour = std::strtod(argv[++i], nullptr);
+        } else if (std::strcmp(argv[i], "--map-size") == 0 && hasValue) {
+            config.mapWidth = config.mapHeight = std::max(64, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
@@ -1806,13 +1874,13 @@ int main(int argc, char** argv) {
         } else if (std::strcmp(argv[i], "--flocks") == 0 && hasValue) {
             config.flocks = std::atoi(argv[++i]);
         } else {
-            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
+            std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--map-size CELLS] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--no-events] "
                         "[--event drop|crash|convoy HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
                         "[--stories] [--foresight] [--cast] [--families] [--infections] [--society] "
-                        "[--profile]\n");
+                        "[--profile] [--sample] [--threads N]\n");
             return 2;
         }
     }
@@ -1829,11 +1897,24 @@ int main(int argc, char** argv) {
     }
     const std::chrono::duration<double> genElapsed = std::chrono::steady_clock::now() - genStart;
     printMapSummary(world, genElapsed.count());
+    std::printf("threads %d\n", lw::parallelThreads());
+    if (profile) {
+        printStartup(world);
+    }
+    const lw::ProcessMemory startMemory = lw::processMemory();
+    std::printf("memory after start: %.0f MB (peak %.0f MB, private %.0f MB)\n",
+                static_cast<double>(startMemory.workingSet) / (1024.0 * 1024.0),
+                static_cast<double>(startMemory.peakWorkingSet) / (1024.0 * 1024.0),
+                static_cast<double>(startMemory.privateBytes) / (1024.0 * 1024.0));
     if (paths > 0) {
         benchmarkPaths(world, paths, compare);
     }
 
     world.setProfiling(profile);
+    lw::SamplingProfiler sampler;
+    if (sample) {
+        sampler.start();
+    }
     const auto start = std::chrono::steady_clock::now();
     if (daily) {
         printDailyHeader();
@@ -1856,6 +1937,7 @@ int main(int argc, char** argv) {
         }
     }
     const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
+    sampler.stop();
 
     std::printf("seed=%llu ticks=%llu map=%dx%d entities=%zu hash=%016llx\n",
                 static_cast<unsigned long long>(world.seed()),
@@ -1901,13 +1983,17 @@ int main(int argc, char** argv) {
         std::printf("%.3f s, %.0f ticks/s\n", elapsed.count(),
                     static_cast<double>(ticks) / elapsed.count());
     }
-    if (profile && elapsed.count() > 0.0) {
-        std::printf("profile (share of tick time):\n");
-        for (int phase = 0; phase < lw::World::kStepPhases; ++phase) {
-            const double seconds = world.stepPhaseSeconds(phase);
-            std::printf("  %-13s %7.3f s  %5.1f %%\n", lw::World::stepPhaseName(phase), seconds,
-                        100.0 * seconds / elapsed.count());
-        }
+    const lw::ProcessMemory endMemory = lw::processMemory();
+    std::printf("memory at end: %.0f MB (peak %.0f MB, private %.0f MB)\n",
+                static_cast<double>(endMemory.workingSet) / (1024.0 * 1024.0),
+                static_cast<double>(endMemory.peakWorkingSet) / (1024.0 * 1024.0),
+                static_cast<double>(endMemory.privateBytes) / (1024.0 * 1024.0));
+    if (profile) {
+        printProfile(world);
+        printMemoryReport(world);
+    }
+    if (sample) {
+        sampler.report(stdout);
     }
     return 0;
 }

@@ -101,6 +101,9 @@ public:
     int tilesDrawn() const { return tilesDrawn_; }
     int trianglesDrawn() const { return trianglesDrawn_; }
     int meshesLoaded() const { return meshesLoaded_; }
+    // Сколько сеток рельефа построено с начала и сколько секунд на это ушло (этап 2а.1).
+    int meshesBuilt() const { return meshesBuilt_; }
+    double buildSeconds() const { return buildSeconds_; }
 
 private:
     static constexpr int kTileCells = 128;
@@ -178,6 +181,8 @@ private:
     int tilesDrawn_ = 0;
     int trianglesDrawn_ = 0;
     int meshesLoaded_ = 0;
+    int meshesBuilt_ = 0;
+    double buildSeconds_ = 0.0;
 };
 
 } // namespace lw

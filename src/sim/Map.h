@@ -67,6 +67,11 @@ public:
 
     // Хеш всех слоёв. Считается долго (вся карта), результат стоит запомнить.
     std::uint64_t hash() const;
+    // Память всех слоёв, байты (для замеров).
+    std::size_t memoryBytes() const {
+        return elevation.memoryBytes() + ground.memoryBytes() + water.memoryBytes() +
+               depth.memoryBytes() + cover.memoryBytes() + road.memoryBytes();
+    }
 
     // Высота твёрдой поверхности над уровнем моря в единицах kElevationStep;
     // под водой — высота дна, у моря она отрицательная.

@@ -289,6 +289,22 @@ MapRenderer::GroundChunk MapRenderer::groundChunk(int x, int y) const {
     return result;
 }
 
+std::size_t MapRenderer::textureBytes() const {
+    const auto bytes = [](const Texture2D& texture) -> std::size_t {
+        if (texture.id == 0) {
+            return 0;
+        }
+        const auto base = static_cast<std::size_t>(GetPixelDataSize(texture.width, texture.height, texture.format));
+        // Мип-уровни добавляют треть.
+        return texture.mipmaps > 1 ? base + base / 3 : base;
+    };
+    std::size_t total = 0;
+    for (const Chunk& chunk : chunks_) {
+        total += bytes(chunk.texture) + bytes(chunk.plain) + bytes(chunk.snow) + bytes(chunk.forest);
+    }
+    return total;
+}
+
 void MapRenderer::useGroundFilter() {
     setFilter(kGroundFilter);
 }

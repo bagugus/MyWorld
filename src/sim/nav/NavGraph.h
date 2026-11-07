@@ -69,6 +69,12 @@ public:
     int sectorsX() const { return sectorsX_; }
     int sectorsY() const { return sectorsY_; }
 
+    // Память графа, байты (для замеров).
+    std::size_t memoryBytes() const {
+        return nodes_.capacity() * sizeof(Node) + edges_.capacity() * sizeof(Edge) +
+               sectorFirst_.capacity() * sizeof(std::uint32_t);
+    }
+
 private:
     std::vector<Node> nodes_;
     std::vector<Edge> edges_;

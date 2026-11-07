@@ -25,6 +25,17 @@ std::uint64_t mix(std::uint64_t accumulated, const ChronicleEvent& event) {
 
 } // namespace
 
+std::size_t Chronicle::memoryBytes() const {
+    // Узел unordered_map — пара, указатель на следующий и хеш; плюс корзины.
+    std::size_t bytes = events_.capacity() * sizeof(ChronicleEvent) +
+                        byId_.bucket_count() * sizeof(void*) +
+                        byId_.size() * (sizeof(EntityId) + sizeof(std::vector<std::uint32_t>) + 2 * sizeof(void*));
+    for (const auto& [id, list] : byId_) {
+        bytes += list.capacity() * sizeof(std::uint32_t);
+    }
+    return bytes;
+}
+
 void Chronicle::add(const ChronicleEvent& event) {
     const auto index = static_cast<std::uint32_t>(events_.size());
     events_.push_back(event);
