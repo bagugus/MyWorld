@@ -50,6 +50,13 @@ std::string_view randomFirstName(Rng& rng) {
     return kFirstNames[rng.below(static_cast<std::uint32_t>(kFirstNames.size()))];
 }
 
+std::string_view randomFirstName(Rng& rng, bool female) {
+    // Первые kMaleNames имён списка — мужские, остальные — женские.
+    constexpr std::uint32_t kMaleNames = 64;
+    constexpr auto kFemaleNames = static_cast<std::uint32_t>(kFirstNames.size()) - kMaleNames;
+    return female ? kFirstNames[kMaleNames + rng.below(kFemaleNames)] : kFirstNames[rng.below(kMaleNames)];
+}
+
 std::string_view randomLastName(Rng& rng) {
     return kLastNames[rng.below(static_cast<std::uint32_t>(kLastNames.size()))];
 }

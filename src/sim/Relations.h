@@ -2,6 +2,8 @@
 
 #include "sim/Components.h"
 
+#include <entt/entt.hpp>
+
 #include <cstdint>
 
 namespace lw {
@@ -65,9 +67,18 @@ void addGrudge(Bond& bond, float amount);
 
 // Связь с other: найти или завести новую (знакомство и симпатия — ноль).
 // Мест нет — вытесняется самая слабая, если она слабее kForgettable; иначе
-// nullptr. created — заведена ли новая.
+// nullptr. Родня (BondOrigin::Kin) не вытесняется. created — заведена ли новая.
 Bond* acquireBond(Relations& relations, EntityId other, float chemistry, std::uint64_t tick,
                   bool* created = nullptr);
+
+// Знакомы с начала мира (этапы 6.2, 7.3): self заводит связь с other —
+// знакомство familiarity, симпатия — доля affinityShare от совместимости
+// (с надбавкой chemistryBonus), доверие — по симпатии, отметки — без летописи,
+// откуда знакомы — origin. Уже знакомых не трогает; nullptr — связь не
+// заведена (уже была или нет места).
+Bond* meetAtStart(World& world, entt::entity self, EntityId selfId, entt::entity other,
+                  EntityId otherId, float familiarity, float affinityShare, float chemistryBonus,
+                  BondOrigin origin);
 
 // Поставить или снять отметки «друг» и «недруг» по порогам. Возвращает
 // отметку, которая только что поставлена (Bond::kFriend, Bond::kFoe), или 0.
@@ -90,7 +101,7 @@ Reputation reputationOf(const World& world, EntityId id);
 
 // Знакомства с начала мира у всех людей с Relations: соседи по дому знают
 // друг друга хорошо, а ещё каждый знает нескольких ближайших соседей по
-// поселению. Существующие связи не меняются, поэтому можно звать повторно,
+// поселению. Родню (этап 7.3) знакомит introduceFamilies — раньше. Существующие связи не меняются, поэтому можно звать повторно,
 // когда в мире появляются новые люди. Рандома нет.
 void introduceNeighbours(World& world);
 

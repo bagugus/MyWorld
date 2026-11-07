@@ -19,6 +19,8 @@ struct Name {
 
 // Случайные имя и фамилия из списков.
 std::string_view randomFirstName(Rng& rng);
+// Мужское или женское имя (этап 7.3: пол задаёт состав семьи).
+std::string_view randomFirstName(Rng& rng, bool female);
 std::string_view randomLastName(Rng& rng);
 // Женское ли имя (по списку имён): для окончаний в подписях («погиб» —
 // «погибла»). Неизвестное имя — мужское.

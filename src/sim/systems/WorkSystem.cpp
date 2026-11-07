@@ -1,5 +1,6 @@
 #include "sim/systems/WorkSystem.h"
 
+#include "sim/Family.h"
 #include "sim/Scenario.h"
 #include "sim/Work.h"
 #include "sim/World.h"
@@ -124,7 +125,8 @@ void updateWork(World& world) {
         workplace.onDuty = 0;
     }
     for (const auto [entity, person, job] : registry.view<const Person, const Job>().each()) {
-        if (!isOnDuty(world, entity)) {
+        // Школьники на уроках школу не «открывают» (этап 7.3).
+        if (job.profession == Profession::Pupil || !isOnDuty(world, entity)) {
             continue;
         }
         if (auto* workplace = registry.try_get<Workplace>(world.find(job.workplace))) {
@@ -166,8 +168,8 @@ void updateWork(World& world) {
     }
     if (rules.economy) {
         for (const auto [entity, person, wallet] : registry.view<const Person, Wallet>().each()) {
-            const auto* job = registry.try_get<Job>(entity);
-            if (job == nullptr || job->profession == Profession::None) {
+            // Пособие — взрослым без работы; детей кормит семья (этап 7.3).
+            if (!isEmployed(registry.try_get<Job>(entity)) && !isMinor(registry, entity)) {
                 wallet.money += kAllowance;
             }
         }

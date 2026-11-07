@@ -2,6 +2,7 @@
 
 #include "sim/Calendar.h"
 #include "sim/Events.h"
+#include "sim/Family.h"
 #include "sim/World.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
@@ -9,6 +10,8 @@
 #include <imgui.h>
 
 #include <cstdio>
+#include <string>
+#include <unordered_map>
 
 namespace lw::ui {
 
@@ -25,6 +28,22 @@ struct Phrase {
     const char* thirdSelf = "его";
     char tail[96] = "";
 };
+
+// Склеенная строка с постоянным адресом: глагол события с родством («нашёл
+// тело сына») — Phrase хранит только указатели.
+const char* joined(const char* head, const char* word) {
+    static std::unordered_map<std::string, std::string> cache; // узлы не переезжают
+    std::string key = std::string(head) + word;
+    const auto [it, inserted] = cache.try_emplace(key, key);
+    return it->second.c_str();
+}
+
+// Кем приходится по коду родства (sim/Family.h), в падеже; nullptr — не родня.
+const char* kinOfCode(std::int32_t code, Case grammaticalCase) {
+    KinKind kind = KinKind::Count;
+    bool female = false;
+    return decodeKin(code, kind, female) ? kinWord(kind, female, grammaticalCase) : nullptr;
+}
 
 // Поступок для «видел, как X …» и «узнал, что X …» (MemoryKind).
 const char* deedVerb(std::int32_t kind) {
@@ -236,7 +255,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— заступился в схватке с зомби");
         break;
     case ChronicleKind::AbandonedBy:
-        phrase.verb = "не простит";
+        if (const char* kin = kinOfCode(event.b, Case::Accusative)) {
+            phrase.verb = joined("не простит ", kin);
+        } else {
+            phrase.verb = "не простит";
+        }
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— убежал, бросив его зомби");
         break;
@@ -246,7 +269,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— взято вещей: %d", event.a);
         break;
     case ChronicleKind::Mourned:
-        phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
+        if (const char* kin = kinOfCode(event.b, Case::Genitive)) {
+            phrase.verb = joined(event.a == 1 ? "нашёл тело " : "узнал о гибели ", kin);
+        } else {
+            phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
+        }
         phrase.withObject = true;
         if (event.third != kInvalidId) {
             phrase.middle = "— рассказал";
@@ -255,7 +282,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         }
         break;
     case ChronicleKind::SawTurned:
-        phrase.verb = "узнал в зомби близкого";
+        if (const char* kin = kinOfCode(event.b, Case::Accusative)) {
+            phrase.verb = joined("узнал в зомби ", kin);
+        } else {
+            phrase.verb = "узнал в зомби близкого";
+        }
         phrase.withObject = true;
         break;
     case ChronicleKind::Witnessed:
@@ -444,6 +475,21 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
                       phaseName(static_cast<WorldPhase>(event.a)));
+        break;
+    case ChronicleKind::Orphaned:
+        phrase.verb = "остался сиротой: не стало";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::TookIn:
+        if (const char* kin = kinOfCode(event.a, Case::Accusative)) {
+            phrase.verb = joined("взял к себе ", kin);
+        } else {
+            phrase.verb = "взял к себе ребёнка";
+        }
+        phrase.withObject = true;
+        if (event.b == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— в дом своей группы");
+        }
         break;
     case ChronicleKind::Count:
         break;

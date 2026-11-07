@@ -5,6 +5,7 @@
 #include "sim/Cast.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Family.h"
 #include "sim/Map.h"
 #include "sim/Memory.h"
 #include "sim/Names.h"
@@ -2054,12 +2055,11 @@ bool Showrunner::reaction(const ShowInput& in, StoryPick& pick, std::string& tex
             continue;
         }
         const EntityId key = loss->dead | (loss->turned ? (1ULL << 63) : 0);
-        const entt::entity deadEntity = world.find(loss->dead);
-        const auto* deadName = deadEntity != entt::null ? registry.try_get<Name>(deadEntity) : nullptr;
         // Самый близкий из живых: друг, семья, товарищ по группе.
         EntityId chosen = kInvalidId;
         float closest = kReactionConcern;
         bool family = false;
+        KinKind kinship = KinKind::Count;
         bool friends = false;
         for (const auto [entity, person, name, id] : registry.view<const Person, const Name, const Id>().each()) {
             if (id.value == loss->dead ||
@@ -2071,12 +2071,15 @@ bool Showrunner::reaction(const ShowInput& in, StoryPick& pick, std::string& tex
             if (bond == nullptr || bond->hostile()) {
                 continue;
             }
-            const bool kin = deadName != nullptr && deadName->last == name.last;
+            // Родня (этап 7.3) горюет первой.
+            const KinKind relation = kinOf(registry, entity, loss->dead);
+            const bool kin = relation != KinKind::Count;
             const float concern = concernFor(world, entity, loss->dead) + (kin ? 0.3f : 0.0f);
             if (concern > closest || (concern == closest && chosen != kInvalidId && id.value < chosen)) {
                 closest = concern;
                 chosen = id.value;
                 family = kin;
+                kinship = relation;
                 friends = bond->friendly();
             }
         }
@@ -2122,7 +2125,8 @@ bool Showrunner::reaction(const ShowInput& in, StoryPick& pick, std::string& tex
             text = who + " ещё не знает, что " + dead + (deadShe ? " погибла." : " погиб.");
         }
         if (family) {
-            text += " Они из одной семьи.";
+            text += std::string(" Это ") + (deadShe ? "была " : "был ") + (she ? "её " : "его ") +
+                    kinWord(kinship, deadShe) + ".";
         } else if (friends) {
             text += " Они были друзьями.";
         }
@@ -2182,19 +2186,15 @@ bool Showrunner::familyMeal(const ShowInput& in, StoryPick& pick, std::string& t
     if (best == nullptr) {
         return false;
     }
-    // Одна фамилия — «семья», иначе — по именам.
+    // Все за столом — родня знакомого (этап 7.3) — «семья», иначе — по именам.
     std::string family;
     bool same = true;
+    const entt::entity knownEntity = world.find(best->known);
+    if (const auto* name = knownEntity != entt::null ? registry.try_get<Name>(knownEntity) : nullptr) {
+        family = name->last;
+    }
     for (const EntityId id : best->people) {
-        const entt::entity entity = world.find(id);
-        const auto* name = entity != entt::null ? registry.try_get<Name>(entity) : nullptr;
-        if (name == nullptr) {
-            same = false;
-        } else if (family.empty()) {
-            family = name->last;
-        } else {
-            same = same && name->last == family;
-        }
+        same = same && (id == best->known || kinOf(registry, knownEntity, id) != KinKind::Count);
     }
     const int hour = calendarAt(now).hour;
     const char* meal = hour >= 5 && hour < 11 ? (same ? "завтракает" : "завтракают")

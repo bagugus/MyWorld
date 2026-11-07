@@ -1,5 +1,6 @@
 #include "sim/systems/GroupSystem.h"
 
+#include "sim/Family.h"
 #include "sim/Memory.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
@@ -106,6 +107,29 @@ void leave(World& world, Group& group, entt::entity entity, EntityId id) {
                         group.members.end());
 }
 
+// Супруг вступившего (этап 7.3), если жили вместе, сам ни в какой группе и
+// вожаку не враг, переезжает с ним: семью не разлучают.
+void bringSpouse(World& world, Group& group, EntityId groupId, entt::entity entity) {
+    entt::registry& registry = world.registry();
+    const auto* kin = registry.try_get<Kin>(entity);
+    const Person& person = registry.get<Person>(entity);
+    const EntityId home = person.formerHome != kInvalidId ? person.formerHome : person.home;
+    for (std::size_t i = 0; kin != nullptr && i < kin->count; ++i) {
+        const Relative& relative = kin->relatives[i];
+        const entt::entity spouse = personOf(world, relative.id);
+        if (relative.kind != KinKind::Spouse || spouse == entt::null || group.members.size() >= kMaxGroupSize) {
+            continue;
+        }
+        const Person& theirs = registry.get<Person>(spouse);
+        const Bond* toLeader = bondOf(registry, spouse, group.leader);
+        if (theirs.group != kInvalidId || theirs.home != home || home == kInvalidId ||
+            (toLeader != nullptr && toLeader->hostile())) {
+            continue;
+        }
+        join(world, group, groupId, spouse, relative.id);
+    }
+}
+
 // Средняя симпатия участников (кроме вожака и его самого) к member; others —
 // сколько их.
 float groupAffinity(const World& world, const Group& group, EntityId member, int& others) {
@@ -147,7 +171,9 @@ bool reviewGroup(World& world, Group& group, EntityId groupId) {
     // Уходят и изгоняются по возрастанию id; вожак не уходит.
     const std::vector<EntityId> members = group.members;
     for (const EntityId member : members) {
-        if (member == group.leader || group.members.size() < 2) {
+        // Ребёнок уходит и остаётся вместе с опекуном (followGuardians).
+        if (member == group.leader || group.members.size() < 2 ||
+            isMinor(registry, world.find(member))) {
             continue;
         }
         const entt::entity entity = world.find(member);
@@ -203,7 +229,10 @@ EntityId pickPartner(const World& world, entt::entity founder, EntityId founderI
             continue;
         }
         const entt::entity other = personOf(world, bond.other);
-        if (other == entt::null || registry.get<Person>(other).group != kInvalidId) {
+        // Группа — это союз за пределами семьи: родня и так держится вместе
+        // (супруг и дети переезжают с ним), поэтому с роднёй её не основывают.
+        if (other == entt::null || registry.get<Person>(other).group != kInvalidId ||
+            isMinor(registry, other) || kinOf(registry, founder, bond.other) != KinKind::Count) {
             continue;
         }
         const Bond* back = bondOf(registry, other, founderId);
@@ -233,7 +262,7 @@ void foundGroups(World& world) {
     std::sort(loners.begin(), loners.end(),
               [](const auto& a, const auto& b) { return a.first < b.first; });
     for (const auto& [founderId, founder] : loners) {
-        if (registry.get<Person>(founder).group != kInvalidId ||
+        if (registry.get<Person>(founder).group != kInvalidId || isMinor(registry, founder) ||
             leadershipOf(registry, founder) < kFoundLeadership) {
             continue;
         }
@@ -265,6 +294,8 @@ void foundGroups(World& world) {
         world.record(ChronicleKind::GroupFormed, leaderId, groupId);
         join(world, group, groupId, leader, leaderId);
         join(world, group, groupId, follower, followerId);
+        bringSpouse(world, group, groupId, leader);
+        bringSpouse(world, group, groupId, follower);
     }
 }
 
@@ -274,6 +305,9 @@ void foundGroups(World& world) {
 bool admits(const World& world, const Group& group, entt::entity candidate, EntityId candidateId,
             std::pair<float, float> base) {
     const entt::registry& registry = world.registry();
+    if (isMinor(registry, candidate)) {
+        return false; // ребёнок приходит с опекуном (followGuardians)
+    }
     const Bond* toLeader = bondOf(registry, candidate, group.leader);
     if (toLeader != nullptr && (toLeader->hostile() || toLeader->trust < 0.0f)) {
         return false;
@@ -343,7 +377,40 @@ void admitFriends(World& world) {
             }
             if (admits(world, group, candidate, candidateId, base)) {
                 join(world, group, groupId, candidate, candidateId);
+                bringSpouse(world, group, groupId, candidate);
             }
+        }
+    }
+}
+
+// Дети — за опекуном (этап 7.3): опекун в группе — ребёнок в ней же, вышел —
+// ребёнок с ним. Опекуна нет — ребёнок остаётся, где был.
+void followGuardians(World& world) {
+    entt::registry& registry = world.registry();
+    std::vector<std::pair<EntityId, entt::entity>> wards;
+    for (const auto [entity, id, person, kin] : registry.view<const Id, const Person, const Kin>().each()) {
+        if (kin.guardian != kInvalidId && isMinor(registry, entity)) {
+            wards.emplace_back(id.value, entity);
+        }
+    }
+    std::sort(wards.begin(), wards.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    for (const auto& [id, entity] : wards) {
+        const entt::entity guardian = personOf(world, registry.get<Kin>(entity).guardian);
+        if (guardian == entt::null) {
+            continue;
+        }
+        const EntityId wanted = registry.get<Person>(guardian).group;
+        const EntityId current = registry.get<Person>(entity).group;
+        if (wanted == current) {
+            continue;
+        }
+        if (const entt::entity old = world.find(current); old != entt::null && registry.all_of<Group>(old)) {
+            leave(world, registry.get<Group>(old), entity, id);
+        } else {
+            registry.get<Person>(entity).group = kInvalidId;
+        }
+        if (const entt::entity next = world.find(wanted); next != entt::null && registry.all_of<Group>(next)) {
+            join(world, registry.get<Group>(next), wanted, entity, id);
         }
     }
 }
@@ -360,8 +427,8 @@ bool sameGroup(const entt::registry& registry, entt::entity a, entt::entity b) {
 float authorityOf(const World& world, const Group& group, EntityId member) {
     const entt::registry& registry = world.registry();
     const entt::entity entity = world.find(member);
-    if (entity == entt::null) {
-        return 0.0f;
+    if (entity == entt::null || isMinor(registry, entity)) {
+        return 0.0f; // за ребёнком не идут (этап 7.3)
     }
     float trust = 0.0f;
     int others = 0;
@@ -426,6 +493,7 @@ void updateGroups(World& world) {
         foundGroups(world);
         admitFriends(world);
     }
+    followGuardians(world);
 }
 
 void tickGroups(World& world) {

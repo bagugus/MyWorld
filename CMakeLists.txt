@@ -43,6 +43,8 @@ add_library(lw_sim STATIC
     src/sim/Death.h
     src/sim/Events.cpp
     src/sim/Events.h
+    src/sim/Family.cpp
+    src/sim/Family.h
     src/sim/Foresight.cpp
     src/sim/Foresight.h
     src/sim/Components.h
@@ -109,6 +111,8 @@ add_library(lw_sim STATIC
     src/sim/systems/CombatSystem.h
     src/sim/systems/EventSystem.cpp
     src/sim/systems/EventSystem.h
+    src/sim/systems/FamilySystem.cpp
+    src/sim/systems/FamilySystem.h
     src/sim/systems/GroupSystem.cpp
     src/sim/systems/GroupSystem.h
     src/sim/systems/MemorySystem.cpp

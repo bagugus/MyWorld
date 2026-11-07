@@ -5,6 +5,8 @@
 #include "sim/Events.h"
 #include "sim/Map.h"
 #include "sim/Perception.h"
+#include "sim/Family.h"
+#include "sim/Names.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
 #include "sim/TimeScale.h"
@@ -70,6 +72,7 @@ constexpr Color kFriendColor = {255, 150, 220, 170};
 constexpr Color kFoeColor = {200, 50, 50, 170};
 // Группа (этап 6.4): участники, вожак и база.
 constexpr Color kGroupColor = {110, 230, 220, 200};
+constexpr Color kKinColor = {255, 205, 110, 200}; // родня (этап 7.3)
 constexpr Color kGroupLeaderColor = {190, 255, 250, 255};
 // Ивенты (этап 7.1): место, грузы, кто туда идёт; у человека — вести.
 constexpr Color kEventColor = {255, 120, 100, 230};
@@ -362,13 +365,23 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             }
         }
     }
+    // Родня, которая жива, — тёплыми линиями (этап 7.3).
+    if (const auto* kin = registry.try_get<Kin>(entity)) {
+        for (std::size_t i = 0; i < kin->count; ++i) {
+            const entt::entity other = world_.find(kin->relatives[i].id);
+            if (other != entt::null && registry.all_of<Person>(other)) {
+                DrawLineEx(at, drawnPosition(registry, other, alpha), line, kKinColor);
+            }
+        }
+    }
     // Друзья и недруги, которые живы, — линиями.
     if (const auto* relations = registry.try_get<Relations>(entity)) {
         for (std::size_t i = 0; i < relations->count; ++i) {
             const Bond& bond = relations->bonds[i];
             const entt::entity other = world_.find(bond.other);
+            // Родня — своим цветом выше.
             if ((bond.friendly() || bond.hostile()) && other != entt::null &&
-                registry.all_of<Person>(other)) {
+                registry.all_of<Person>(other) && kinOf(registry, entity, bond.other) == KinKind::Count) {
                 DrawLineEx(at, drawnPosition(registry, other, alpha), line,
                            bond.hostile() ? kFoeColor : kFriendColor);
             }
@@ -527,8 +540,15 @@ void Inspector::drawPerson(entt::entity entity) {
     char duration[32];
 
     ImGui::Text("Человек %s", idLabel(selected_).c_str());
+    if (registry.all_of<Age>(entity)) {
+        const int years = ageOf(registry, entity);
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s%s", ageText(years).c_str(), years < kAdultAge ? ", ребёнок" : "");
+    }
     if (const auto* mind = registry.try_get<Mind>(entity)) {
-        ImGui::Text("Сейчас: %s%s%s", actionName(mind->action),
+        const auto* job = registry.try_get<Job>(entity);
+        const bool lesson = mind->action == Action::Work && job != nullptr && job->profession == Profession::Pupil;
+        ImGui::Text("Сейчас: %s%s%s", lesson ? "в школе" : actionName(mind->action),
                     mind->phase == ActionPhase::Travel ? " (в пути)" : "",
                     registry.get<Person>(entity).indoors ? " (дома, в укрытии)" : "");
         if (mind->target != kInvalidId) {
@@ -624,10 +644,14 @@ void Inspector::drawPerson(entt::entity entity) {
             }
         }
     }
-    // Работа и деньги (этап 7.2).
+    // Работа и деньги (этап 7.2); школьник — учёба (этап 7.3).
     if (const auto* job = registry.try_get<Job>(entity);
         job != nullptr && job->profession != Profession::None) {
-        ImGui::Text("Работа: %s,", professionName(job->profession));
+        if (job->profession == Profession::Pupil) {
+            ImGui::TextUnformatted("Учится в школе");
+        } else {
+            ImGui::Text("Работа: %s,", professionName(job->profession));
+        }
         ImGui::SameLine();
         if (idLink(job->workplace)) {
             select(job->workplace);
@@ -723,7 +747,7 @@ void Inspector::drawPerson(entt::entity entity) {
         }
     }
 
-    if (!drawRelations(entity) || !drawMemories(entity) || !drawLeads(entity)) {
+    if (!drawFamily(entity) || !drawRelations(entity) || !drawMemories(entity) || !drawLeads(entity)) {
         return;
     }
 
@@ -851,6 +875,68 @@ bool Inspector::drawPerception(entt::entity entity) {
     return true;
 }
 
+bool Inspector::drawFamily(entt::entity entity) {
+    const entt::registry& registry = world_.registry();
+    const auto* kin = registry.try_get<Kin>(entity);
+    if (kin == nullptr) {
+        return true;
+    }
+    char header[64];
+    std::snprintf(header, sizeof(header), "Семья: %d###family", kin->count);
+    if (!ImGui::CollapsingHeader(header, ImGuiTreeNodeFlags_DefaultOpen)) {
+        return true;
+    }
+    if (kin->count == 0) {
+        ImGui::TextDisabled("родни нет");
+    }
+    const auto* person = registry.try_get<Person>(entity);
+    EntityId clicked = kInvalidId;
+    if (kin->count > 0 && ImGui::BeginTable("family", 4, ImGuiTableFlags_SizingFixedFit)) {
+        for (std::size_t i = 0; i < kin->count; ++i) {
+            const Relative& relative = kin->relatives[i];
+            const entt::entity other = world_.find(relative.id);
+            const auto* name = other != entt::null ? registry.try_get<Name>(other) : nullptr;
+            const bool female = name != nullptr && isFemaleName(name->first);
+            ImGui::TableNextColumn();
+            ImGui::TextUnformatted(kinWord(relative.kind, female));
+            ImGui::TableNextColumn();
+            if (idLink(relative.id)) {
+                clicked = relative.id;
+            }
+            ImGui::TableNextColumn();
+            ImGui::TextDisabled("%s", ageText(ageOf(registry, other)).c_str());
+            ImGui::TableNextColumn();
+            if (other == entt::null || registry.all_of<Corpse>(other)) {
+                ImGui::TextDisabled("погиб");
+            } else if (registry.all_of<Zombie>(other)) {
+                ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "стал зомби");
+            } else if (const auto* theirs = registry.try_get<Person>(other);
+                       theirs != nullptr && person != nullptr && theirs->home != person->home) {
+                ImGui::TextDisabled("живёт отдельно");
+            } else {
+                ImGui::TextUnformatted("дома вместе");
+            }
+        }
+        ImGui::EndTable();
+    }
+    if (registry.all_of<Person>(entity) && isMinor(registry, entity)) {
+        if (kin->guardian != kInvalidId) {
+            ImGui::TextUnformatted("Опекун:");
+            ImGui::SameLine();
+            if (idLink(kin->guardian)) {
+                clicked = kin->guardian;
+            }
+        } else {
+            ImGui::TextColored({1.0f, 0.6f, 0.4f, 1.0f}, "Опекуна нет — сам по себе");
+        }
+    }
+    if (clicked != kInvalidId) {
+        select(clicked);
+        return false;
+    }
+    return true;
+}
+
 bool Inspector::drawRelations(entt::entity entity) {
     const entt::registry& registry = world_.registry();
     const auto* relations = registry.try_get<Relations>(entity);
@@ -918,6 +1004,17 @@ bool Inspector::drawRelations(entt::entity entity) {
             ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "недруг");
         } else {
             ImGui::TextDisabled("знакомый");
+        }
+        // Откуда знакомы (этап 7.3): родня — кем приходится.
+        {
+            const auto* name = other != entt::null ? registry.try_get<Name>(other) : nullptr;
+            const bool female = name != nullptr && isFemaleName(name->first);
+            const KinKind kind = kinOf(registry, entity, bond->other);
+            const char* origin = kind != KinKind::Count ? kinWord(kind, female) : bondOriginName(bond->origin, female);
+            if (origin[0] != '\0') {
+                ImGui::SameLine();
+                ImGui::TextDisabled("· %s", origin);
+            }
         }
         ImGui::TableNextColumn();
         if (tick - bond->seen <= kTicksPerGameMinute) { // вместе в последнюю минуту

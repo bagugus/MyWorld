@@ -39,6 +39,11 @@ inline constexpr int kFoodPrice = 4;
 // Пособие без работы — в сутки: на еду его не хватает, сбережения тают.
 inline constexpr int kAllowance = 2;
 
+// Работает за плату (этап 7.3): есть профессия, и это не школа.
+inline bool isEmployed(const Job* job) {
+    return job != nullptr && job->profession != Profession::None && job->profession != Profession::Pupil;
+}
+
 // Рабочий ли день недели.
 bool isWorkday(const Job& job, int dayOfWeek);
 // На смене ли сейчас: рабочий день и минута суток внутри смены.
@@ -59,8 +64,10 @@ bool policeNearby(const World& world, float x, float y, float radius);
 
 // Раздать профессии жителям поселений и всем — сбережения (поток RngStream::Jobs).
 // Места — по числу жителей: в городе врачи, полиция, учителя и продавцы, в
-// деревне продавец и фермеры; кому — по чертам характера, с разбросом.
-// Остальные без работы. Каждое занятое здание получает Workplace.
+// деревне продавец и фермеры; кому — по чертам характера, с разбросом, только
+// взрослым до пенсии (этап 7.3). Остальные без работы. Каждое занятое здание
+// получает Workplace. Дети школьного возраста в городе — школьники; у детей —
+// карманные деньги. Коллеги и одноклассники знакомы (introduceColleagues).
 void assignJobs(World& world);
 
 } // namespace lw

@@ -74,6 +74,8 @@ enum class ChronicleKind : std::uint8_t {
     SawDoctor,     // лечился в больнице object: здоровья +a %, b = 1 — остановили кровь; third — врач
     PhaseBegan,    // сценарий (subject) перешёл в фазу a (WorldPhase); b — пострадавших к этому часу (этап 7.4)
     LeftWork,      // бросил работу в object: в фазе a (WorldPhase) на работу больше не выходит
+    Orphaned,      // ребёнок остался без родителей: object — кто погиб последним (этап 7.3)
+    TookIn,        // взял к себе ребёнка object: a — кем он ему (kinCode), b = 1 — в дом группы
     Count
 };
 

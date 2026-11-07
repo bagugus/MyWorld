@@ -2,6 +2,7 @@
 
 #include "sim/Calendar.h"
 #include "sim/Events.h"
+#include "sim/Family.h"
 #include "sim/Items.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
@@ -369,6 +370,21 @@ constexpr float kLawRestraint = 0.5f;
 // пострадавшему — kDutyLoyalty, как к своему.
 constexpr float kDutyLoyalty = 1.0f;
 
+// Дети (этап 7.3). Не охотятся, не воруют, не мстят, не торгуют и не идут к
+// грузам; младше kChildFightAge не дерутся, подростки — вполсилы; младше
+// kChildShopAge не ходят за покупками и редко лезут в чужие дома, гуляют
+// меньше; бегут от угрозы охотнее взрослых.
+constexpr int kChildFightAge = 14;
+constexpr float kTeenFight = 0.5f;
+constexpr int kChildShopAge = 10;
+constexpr float kChildScavenge = 0.3f;
+constexpr float kChildWander = 0.5f;
+constexpr float kChildFlee = 1.3f;
+// Опекун защищает своего ребёнка: к заступничеству — ещё × (1 + kGuardianBonus),
+// и бежит, бросив его, вдвое неохотнее.
+constexpr float kGuardianBonus = 1.5f;
+constexpr float kGuardianStays = 0.5f;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -465,6 +481,8 @@ struct Context {
     const PhaseRules* rules = nullptr;
     // Полицейский на службе: заступается за любого.
     bool policing = false;
+    // Возраст (этап 7.3): дети делают не всё.
+    std::uint8_t age = 30;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -507,6 +525,7 @@ Context makeContext(const World& world, entt::entity entity) {
     ctx.wallet = registry.try_get<Wallet>(entity);
     ctx.rules = &rulesOf(world);
     ctx.policing = policeOnDuty(world, entity);
+    ctx.age = ageOf(registry, entity);
     if (mind != nullptr) {
         for (const Danger& danger : mind->dangers) {
             if (world.tick() < danger.until) {
@@ -784,6 +803,9 @@ float loyaltyTo(const Context& ctx, EntityId other) {
     if (ctx.policing) {
         return kDutyLoyalty; // на службе свои — все (этап 7.4)
     }
+    if (caresFor(ctx.world, ctx.entity, other)) {
+        return 1.0f; // свой ребёнок (этап 7.3)
+    }
     const Bond* bond = ctx.relations != nullptr ? ctx.relations->find(other) : nullptr;
     const float close = bond != nullptr && !bond->hostile() ? closeness(*bond) : 0.0f;
     return std::min(1.0f, close + (groupMate(ctx, other) ? kGroupLoyalty : 0.0f));
@@ -865,13 +887,36 @@ Option evalGoHome(const Context& ctx) {
     return {score, ctx.homeDoor, ctx.homeId};
 }
 
+// На кого нападает ближайшая угроза: зомби гонится или человек бьёт;
+// kInvalidId — ни на кого.
+EntityId threatVictim(const Context& ctx) {
+    const entt::registry& registry = ctx.world.registry();
+    const entt::entity foe = ctx.world.find(ctx.threat.nearest);
+    if (foe == entt::null) {
+        return kInvalidId;
+    }
+    if (const auto* zombie = registry.try_get<Zombie>(foe); zombie != nullptr &&
+        zombie->state == ZombieState::Chase) {
+        return zombie->target;
+    }
+    if (const auto* combat = registry.try_get<Combat>(foe)) {
+        return combat->target;
+    }
+    return kInvalidId;
+}
+
 // Куда бежать, выберется при выполнении. Дома не бегут, а прячутся — разве
 // что бьёт человек: от него за дверью не укрыться (этап 6.5).
 Option evalFlee(const Context& ctx) {
     if (ctx.person.indoors && ctx.threat.assailant == kInvalidId) {
         return {};
     }
-    const float timidity = kFleeBase - kFleeBravery * ctx.traits.bravery;
+    float timidity = kFleeBase - kFleeBravery * ctx.traits.bravery;
+    // На его ребёнка напали — бросить его не так легко (этап 7.3).
+    if (const EntityId victim = threatVictim(ctx);
+        victim != kInvalidId && victim != ctx.id && caresFor(ctx.world, ctx.entity, victim)) {
+        timidity *= kGuardianStays;
+    }
     if (ctx.threat.level >= kFleeMinThreat) {
         return here(ctx, ctx.threat.level * timidity);
     }
@@ -898,20 +943,12 @@ Option evalFight(const Context& ctx) {
     const float crowd = 1.0f + kCrowdPenalty * static_cast<float>(ctx.threat.count - 1);
     float score = ctx.threat.level * (kFightBase + weaponPower(ctx.weapon)) * resolve *
                   healthy / crowd;
-    // Зомби напал на своего — заступиться (этап 6.4).
-    const entt::registry& registry = ctx.world.registry();
-    if (const entt::entity foe = ctx.world.find(ctx.threat.nearest); foe != entt::null) {
-        EntityId victim = kInvalidId;
-        if (const auto* zombie = registry.try_get<Zombie>(foe); zombie != nullptr &&
-            zombie->state == ZombieState::Chase) {
-            victim = zombie->target;
-        }
-        if (const auto* combat = registry.try_get<Combat>(foe);
-            victim == kInvalidId && combat != nullptr) {
-            victim = combat->target;
-        }
-        if (victim != kInvalidId && victim != ctx.id) {
-            score *= 1.0f + kDefendBonus * loyaltyTo(ctx, victim);
+    // Зомби напал на своего — заступиться (этап 6.4), за своего ребёнка —
+    // изо всех сил (этап 7.3).
+    if (const EntityId victim = threatVictim(ctx); victim != kInvalidId && victim != ctx.id) {
+        score *= 1.0f + kDefendBonus * loyaltyTo(ctx, victim);
+        if (caresFor(ctx.world, ctx.entity, victim)) {
+            score *= 1.0f + kGuardianBonus;
         }
     }
     return {score, ctx.cell, ctx.threat.nearest};
@@ -1656,11 +1693,42 @@ Option evaluateRaw(const Context& ctx, Action action) {
     return {};
 }
 
+// Что из действий делает ребёнок (этап 7.3): множитель оценки, 0 — не делает.
+float childFactor(const Context& ctx, Action action) {
+    if (ctx.age >= kAdultAge) {
+        return 1.0f;
+    }
+    switch (action) {
+    case Action::Hunt:
+    case Action::Steal:
+    case Action::Avenge:
+    case Action::Trade:
+    case Action::Salvage:
+        return 0.0f;
+    case Action::Fight:
+        return ctx.age < kChildFightAge ? 0.0f : kTeenFight;
+    case Action::Buy:
+        return ctx.age < kChildShopAge ? 0.0f : 1.0f;
+    case Action::Scavenge:
+        return ctx.age < kChildShopAge ? kChildScavenge : 1.0f;
+    case Action::Wander:
+        return ctx.age < kChildShopAge ? kChildWander : 1.0f;
+    case Action::Flee:
+        return kChildFlee;
+    default:
+        return 1.0f;
+    }
+}
+
 // Не идти туда, где недавно видел зомби, и не оставаться там. Без этого
 // жажда раз за разом вела к реке мимо зомби, человек убегал, через минуту шёл
 // снова и так и не напивался.
 Option evaluate(const Context& ctx, Action action) {
+    if (childFactor(ctx, action) == 0.0f) {
+        return {};
+    }
     Option option = evaluateRaw(ctx, action);
+    option.score *= childFactor(ctx, action);
     if (action != Action::Flee && action != Action::Fight && option.score > 0.0f &&
         risky(ctx, option.spot)) {
         option.score *= kDangerPenalty;
