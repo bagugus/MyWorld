@@ -42,6 +42,13 @@ void Pathfinder::prepare() {
     corridorUsed_.clear();
 }
 
+std::size_t Pathfinder::memoryBytes() const {
+    const auto bytes = [](const auto& v) { return v.capacity() * sizeof(v[0]); };
+    return space_.memoryBytes() + open_.memoryBytes() + bytes(starts_) + bytes(exits_) +
+           bytes(graphCost_) + bytes(graphParent_) + bytes(route_) + bytes(corridor_) +
+           bytes(corridorUsed_) + bytes(piece_) + bytes(prefixCost_);
+}
+
 Path Pathfinder::find(Cell start, Cell goal) {
     Path path;
     if (!nav_.passable(start) || !nav_.passable(goal)) {

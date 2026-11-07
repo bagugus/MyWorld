@@ -5,12 +5,15 @@
 #include "render/WorldRenderer3D.h"
 #include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Parallel.h"
+#include "sim/Profiler.h"
 #include "sim/Scenario.h"
 #include "sim/SimDriver.h"
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
+#include "util/ProcessMemory.h"
 
 #include <imgui.h>
 #include <raylib.h>
@@ -551,9 +554,105 @@ void drawSettlementLabels(const World& world, const CameraController& camera) {
     }
 }
 
+namespace {
+
+double megabytes(std::size_t bytes) {
+    return static_cast<double>(bytes) / (1024.0 * 1024.0);
+}
+
+// Замер (этап 2а.1): мс на тик по системам, старт, память, сборка чанков 3D.
+void drawMeasurements(const World& world, const WorldRenderer& renderer, const WorldRenderer3D& renderer3d,
+                      const AppStats& stats) {
+    // Окно копит всегда, даже свёрнутое: развернул — сразу свежие числа.
+    static ProfileWindow window;
+    window.sample(world.profiler(), ImGui::GetIO().DeltaTime);
+    if (!ImGui::CollapsingHeader("Замер: системы, старт, память")) {
+        return;
+    }
+    ImGui::Text("Кадр на процессоре: %.1f мс в среднем, худший за секунду %.1f мс; симуляция %.1f мс; %d кадров/с",
+                stats.frameMsAverage, stats.frameMsWorst, stats.simMs, stats.fps);
+    ImGui::Text("Тик: %.0f мкс (%.0f тиков/с чистой симуляции), потоков: %d", 1000.0 * window.msPerTick(),
+                window.msPerTick() > 0.0 ? 1000.0 / window.msPerTick() : 0.0, parallelThreads());
+    if (!world.profiler().enabled()) {
+        ImGui::TextDisabled("Замер систем выключен");
+    } else if (ImGui::BeginTable("##profile", 3, ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_RowBg)) {
+        ImGui::TableSetupColumn("система");
+        ImGui::TableSetupColumn("мкс/тик");
+        ImGui::TableSetupColumn("доля");
+        ImGui::TableHeadersRow();
+        std::vector<double> perTick(static_cast<std::size_t>(profileSectionCount()), -1.0);
+        std::vector<double> share(perTick.size(), 0.0);
+        for (const ProfileWindow::Row& row : window.rows()) {
+            perTick[static_cast<std::size_t>(row.section)] = row.msPerTick;
+            share[static_cast<std::size_t>(row.section)] = row.share;
+        }
+        for (const int section : profileSectionsInTreeOrder()) {
+            const auto i = static_cast<std::size_t>(section);
+            if (i >= perTick.size() || perTick[i] < 0.0005) {
+                continue; // меньше полмикросекунды — не показывать
+            }
+            const std::string& name = profileSectionName(section);
+            const std::size_t slash = name.rfind('/');
+            ImGui::TableNextRow();
+            ImGui::TableNextColumn();
+            ImGui::Indent(12.0f * static_cast<float>(profileSectionDepth(section)) + 0.001f);
+            ImGui::TextUnformatted(slash == std::string::npos ? name.c_str() : name.c_str() + slash + 1);
+            ImGui::Unindent(12.0f * static_cast<float>(profileSectionDepth(section)) + 0.001f);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.1f", 1000.0 * perTick[i]);
+            ImGui::TableNextColumn();
+            ImGui::Text("%.0f %%", 100.0 * share[i]);
+        }
+        ImGui::EndTable();
+    }
+
+    if (ImGui::TreeNode("Старт")) {
+        ImGui::Text("Мир %.2f с, текстуры карты %.2f с, 3D %.2f с", stats.worldSeconds, stats.map2dSeconds,
+                    stats.renderer3dSeconds);
+        ImGui::Text("Память процесса после них: %.0f, %.0f, %.0f МБ", megabytes(stats.worldMemory),
+                    megabytes(stats.map2dMemory), megabytes(stats.renderer3dMemory));
+        for (const Profiler::StartupStep& step : world.profiler().startup()) {
+            if (step.depth == 0) {
+                continue;
+            }
+            const std::size_t slash = step.name.rfind('/');
+            ImGui::Text("%*s%s — %.3f с", 2 * (step.depth - 1), "",
+                        slash == std::string::npos ? step.name.c_str() : step.name.c_str() + slash + 1,
+                        step.seconds);
+        }
+        ImGui::TreePop();
+    }
+
+    const ProcessMemory memory = processMemory();
+    std::size_t structures = 0;
+    const std::vector<MemoryItem> report = world.memoryReport();
+    for (const MemoryItem& item : report) {
+        structures += item.bytes;
+    }
+    if (ImGui::TreeNode("##memory", "Память: процесс %.0f МБ (пик %.0f), мир %.0f МБ, текстуры карты %.0f МБ",
+                        megabytes(memory.workingSet), megabytes(memory.peakWorkingSet), megabytes(structures),
+                        megabytes(renderer.map().textureBytes()))) {
+        for (const MemoryItem& item : report) {
+            ImGui::Text("%s — %.1f МБ", item.name.c_str(), megabytes(item.bytes));
+        }
+        ImGui::TreePop();
+    }
+
+    const Terrain3D& terrain = renderer3d.terrain();
+    const Trees3D& trees = renderer3d.trees();
+    const Props3D& props = renderer3d.props();
+    ImGui::Text("3D, построено сеток: рельеф %d (%.2f с), деревья %d (%.2f с), мелочи %d (%.2f с)",
+                terrain.meshesBuilt(), terrain.buildSeconds(), trees.meshesBuilt(), trees.buildSeconds(),
+                props.meshesBuilt(), props.buildSeconds());
+    ImGui::Text("В этом кадре: деревья %.1f мс, мелочи %.1f мс; в очереди %d", trees.buildMsLastFrame(),
+                props.buildMsLastFrame(), renderer3d.pending());
+}
+
+} // namespace
+
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
                     CameraController& camera, const WorldRenderer& renderer,
-                    WorldRenderer3D& renderer3d) {
+                    WorldRenderer3D& renderer3d, const AppStats& stats) {
     // Справа: слева под временем места нет.
     const ImVec2 display = ImGui::GetIO().DisplaySize;
     ImGui::SetNextWindowPos({display.x - 12.0f, 12.0f}, ImGuiCond_FirstUseEver, {1.0f, 0.0f});
@@ -656,6 +755,7 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
         }
         ImGui::Text("Работают: %zu (с профессией: %zu); за покупками: %zu; магазинов открыто: %zu из %zu",
                     working, employed, shopping, open, shops);
+        drawMeasurements(world, renderer, renderer3d, stats);
 
         ImGui::Separator();
         drawCameraControls(camera);

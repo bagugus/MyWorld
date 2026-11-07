@@ -695,6 +695,8 @@ void Trees3D::buildFar(Chunk& chunk) {
     chunk.far.built = true;
     chunk.far.trees = count;
     cpuTime_ += GetTime() - start;
+    buildSeconds_ += GetTime() - start;
+    ++meshesBuilt_;
     if (!builder.empty()) {
         chunk.far.mesh = builder.upload();
     }
@@ -725,6 +727,8 @@ void Trees3D::buildNear(Chunk& chunk, int block) {
     part.built = true;
     part.trees = count;
     cpuTime_ += GetTime() - start;
+    buildSeconds_ += GetTime() - start;
+    ++meshesBuilt_;
     if (!builder.empty()) {
         part.mesh = builder.upload();
     }

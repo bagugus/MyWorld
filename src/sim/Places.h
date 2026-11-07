@@ -67,6 +67,9 @@ public:
     // Места для сбора по блокам: по ним Resources заводит запас леса.
     const SpotGrid& forageSpots() const { return forage_; }
 
+    // Память справочника, байты (для замеров).
+    std::size_t memoryBytes() const;
+
     std::size_t waterSpotCount() const { return waterCount_; }
     std::size_t forageSpotCount() const { return forageCount_; }
 

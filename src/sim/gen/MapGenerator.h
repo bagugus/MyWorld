@@ -8,6 +8,7 @@
 
 namespace lw {
 
+class Profiler;
 class Rng;
 
 // Поселения и здания — сущности, а не клетки карты. Генератор о реестре
@@ -36,7 +37,8 @@ struct GeneratedMap {
 
 // Заполняет все слои карты и размещает поселения, дороги и дома.
 // Результат зависит только от размера карты и состояния rng.
-// Шаги и их порядок описаны в docs/architecture.md.
-GeneratedMap generateMap(Map& map, Rng& rng);
+// Шаги и их порядок описаны в docs/architecture.md. profiler — куда записать
+// время шагов (этап 2а.1), на результат не влияет.
+GeneratedMap generateMap(Map& map, Rng& rng, Profiler* profiler = nullptr);
 
 } // namespace lw

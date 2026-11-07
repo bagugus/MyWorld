@@ -125,6 +125,8 @@ public:
     }
     // Накопленный хеш всех записей: считать заново при каждом stateHash дорого.
     std::uint64_t hash() const { return hash_; }
+    // Память журнала и индекса по id, байты (оценка; для замеров).
+    std::size_t memoryBytes() const;
 
 private:
     std::vector<ChronicleEvent> events_;

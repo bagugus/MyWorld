@@ -64,6 +64,10 @@ public:
     int treesDrawn() const { return treesDrawn_; }
     int meshesDrawn() const { return meshesDrawn_; }
     int meshesLoaded() const { return meshesLoaded_; }
+    // Построено сеток с начала, секунды на это и миллисекунды в последнем кадре (этап 2а.1).
+    int meshesBuilt() const { return meshesBuilt_; }
+    double buildSeconds() const { return buildSeconds_; }
+    double buildMsLastFrame() const { return 1000.0 * cpuTime_; }
     // Сколько нужных сеток ещё не построено.
     int pending() const { return pending_; }
 
@@ -125,6 +129,8 @@ private:
     int meshesLoaded_ = 0;
     int pending_ = 0;
     double cpuTime_ = 0.0; // секунды на постройку сеток в этом кадре
+    int meshesBuilt_ = 0;
+    double buildSeconds_ = 0.0;
 };
 
 } // namespace lw

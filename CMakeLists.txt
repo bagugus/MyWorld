@@ -66,7 +66,11 @@ add_library(lw_sim STATIC
     src/sim/Names.cpp
     src/sim/Names.h
     src/sim/Population.cpp
+    src/sim/Parallel.cpp
+    src/sim/Parallel.h
     src/sim/Population.h
+    src/sim/Profiler.cpp
+    src/sim/Profiler.h
     src/sim/Relations.cpp
     src/sim/Relations.h
     src/sim/Resources.cpp
@@ -149,8 +153,22 @@ add_library(lw_sim STATIC
 target_include_directories(lw_sim PUBLIC src)
 target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite)
 
+# Память процесса по данным ОС — для замеров в обоих приложениях (этап 2а.1).
+# Там же — сэмплирующий профайлер для поиска горячих функций (lw_headless --sample).
+add_library(lw_util STATIC
+    src/util/ProcessMemory.cpp
+    src/util/ProcessMemory.h
+    src/util/SamplingProfiler.cpp
+    src/util/SamplingProfiler.h
+)
+target_include_directories(lw_util PUBLIC src)
+target_link_libraries(lw_util PRIVATE lw_options)
+if(WIN32)
+    target_link_libraries(lw_util PRIVATE dbghelp winmm)
+endif()
+
 add_executable(lw_headless src/headless_main.cpp)
-target_link_libraries(lw_headless PRIVATE lw_sim lw_options)
+target_link_libraries(lw_headless PRIVATE lw_sim lw_util lw_options)
 
 # --- Приложение с окном ----------------------------------------------------
 if(LW_BUILD_APP)
@@ -223,7 +241,7 @@ if(LW_BUILD_APP)
         src/ui/Ui.cpp
         src/ui/Ui.h
     )
-    target_link_libraries(living_world PRIVATE lw_sim lw_imgui raylib lw_options)
+    target_link_libraries(living_world PRIVATE lw_sim lw_util lw_imgui raylib lw_options)
     set_property(DIRECTORY PROPERTY VS_STARTUP_PROJECT living_world)
 endif()
 

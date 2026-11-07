@@ -2380,16 +2380,19 @@ std::optional<Cell> pickWanderTarget(const Context& ctx, Rng& rng) {
 
 class Brain {
 public:
-    Brain(World& world, entt::entity entity, Rng& rng)
+    // Компоненты — из обхода view: искать хранилище по типу для каждого
+    // человека каждый тик заметно дорого (этап 2а.1).
+    Brain(World& world, entt::entity entity, Rng& rng, EntityId id, Mind& mind, Person& person,
+          Needs& needs)
         : world_(world),
           registry_(world.registry()),
           entity_(entity),
           rng_(rng),
           tick_(world.tick()),
-          id_(registry_.get<Id>(entity).value),
-          mind_(registry_.get<Mind>(entity)),
-          person_(registry_.get<Person>(entity)),
-          needs_(registry_.get<Needs>(entity)) {}
+          id_(id),
+          mind_(mind),
+          person_(person),
+          needs_(needs) {}
 
     void update() {
         // Восприятие обновилось — не появился ли рядом зомби. Ждать пересмотра
@@ -3953,9 +3956,11 @@ void updateUtilityAi(World& world) {
     Rng& rng = world.rng(RngStream::Behavior);
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по ходу
     // не добавляются и не удаляются, поэтому обход не ломается.
-    auto view = world.registry().view<Person, Mind, Needs, const Walker, const Position>();
-    for (const entt::entity entity : view) {
-        Brain(world, entity, rng).update();
+    entt::registry& registry = world.registry();
+    auto view = registry.view<Person, Mind, Needs, const Walker, const Position>();
+    const auto& ids = registry.storage<Id>();
+    for (const auto [entity, person, mind, needs, walker, position] : view.each()) {
+        Brain(world, entity, rng, ids.get(entity).value, mind, person, needs).update();
     }
 }
 

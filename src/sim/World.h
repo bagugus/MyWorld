@@ -4,6 +4,7 @@
 #include "sim/Id.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
+#include "sim/Profiler.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/Sound.h"
@@ -91,12 +92,15 @@ public:
     // Продвигает мир ровно на один тик.
     void step();
 
-    // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
-    static constexpr int kStepPhases = 19;
-    static const char* stepPhaseName(int phase);
-    void setProfiling(bool enabled) { profiling_ = enabled; }
-    // Накопленные секунды на каждый шаг тика с включения замера.
-    double stepPhaseSeconds(int phase) const { return phaseSeconds_[phase]; }
+    // Замер времени по системам тика и шагам старта (этап 2а.1; на мир не
+    // влияет): sim/Profiler.h. Шаги старта пишутся всегда, тик — после
+    // setProfiling(true).
+    void setProfiling(bool enabled) { profiler_.setEnabled(enabled); }
+    Profiler& profiler() { return profiler_; }
+    const Profiler& profiler() const { return profiler_; }
+    // Сколько памяти занимают крупные структуры мира (оценка по ёмкости
+    // контейнеров; для замеров, этап 2а.1).
+    std::vector<MemoryItem> memoryReport() const;
 
     // Сущности создавать и удалять только здесь — так у каждой есть стабильный Id.
     entt::entity create();
@@ -161,8 +165,8 @@ public:
     std::uint64_t stateHash() const;
 
 private:
-    bool profiling_ = false;
-    std::array<double, kStepPhases> phaseSeconds_{};
+    // Первым: старт мира (генерация в конструкторе) пишется уже в него.
+    Profiler profiler_;
     // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 

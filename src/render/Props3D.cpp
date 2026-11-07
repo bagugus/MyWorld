@@ -1293,6 +1293,8 @@ void Props3D::buildSmall(Chunk& chunk) {
     }
     chunk.small.items = builder.items;
     cpuTime_ += GetTime() - start;
+    buildSeconds_ += GetTime() - start;
+    ++meshesBuilt_;
     chunk.small.meshes = builder.finish();
     chunk.small.built = true;
     ++meshesLoaded_;
@@ -1373,6 +1375,8 @@ void Props3D::buildLarge(Chunk& chunk) {
     }
     chunk.large.items = builder.items;
     cpuTime_ += GetTime() - start;
+    buildSeconds_ += GetTime() - start;
+    ++meshesBuilt_;
     chunk.large.meshes = builder.finish();
     chunk.large.built = true;
     ++meshesLoaded_;

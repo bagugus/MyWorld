@@ -5,6 +5,7 @@
 #include <entt/entt.hpp>
 
 #include <algorithm>
+#include <array>
 #include <bit>
 #include <cstddef>
 #include <cstdint>
@@ -37,6 +38,13 @@ struct SpatialHit {
 // вызовом sync, а в хеш мира не входит: это производные данные.
 //
 // Точки за краем мира относятся к крайним корзинам — их тоже можно искать.
+//
+// Хранение (этап 2а.1). Записи одного ряда корзин лежат в одном векторе,
+// отсортированном по столбцу корзины, затем по id: запрос в радиусе проходит
+// ряд одним непрерывным куском, а не по отдельному вектору на каждую корзину.
+// У восприятия в радиусе зрения десяток рядов и в непустой корзине в среднем
+// две записи — раньше почти всё время уходило на промахи кэша по заголовкам
+// и данным корзин. Порядок обхода тот же: ряды, столбцы, id.
 class SpatialIndex {
 public:
     // Сторона корзины, метры. Запросы в основном — в радиусе зрения и слуха
@@ -54,6 +62,8 @@ public:
     void onPositionDestroyed(entt::registry& registry, entt::entity entity);
 
     std::size_t size() const { return size_; }
+    // Память индекса, байты (для замеров).
+    std::size_t memoryBytes() const;
     int columns() const { return columns_; }
     int rows() const { return rows_; }
 
@@ -76,12 +86,17 @@ public:
     }
 
 private:
-    // Запись корзины. Позиция — в slots_: при движении внутри корзины
-    // меняется только она, а корзина не трогается.
+    // Запись ряда корзин. Позиция — в slots_: при движении внутри корзины
+    // меняется только она, а ряд не трогается.
     struct Entry {
-        EntityId id;
+        std::uint32_t column; // столбец корзины в ряду
         entt::entity entity;
+        EntityId id;
     };
+    // Порядок записей в ряду: по столбцу, затем по id.
+    static bool before(const Entry& entry, std::uint32_t column, EntityId id) {
+        return entry.column != column ? entry.column < column : entry.id < id;
+    }
 
     // Снимок сущности; индекс массива — номер сущности в реестре (entt::to_entity).
     struct Slot {
@@ -99,10 +114,33 @@ private:
         return static_cast<std::size_t>(by) * static_cast<std::size_t>(columns_) +
                static_cast<std::size_t>(bx);
     }
-    const std::vector<Entry>& bucket(int bx, int by) const { return buckets_[bucketIndex(bx, by)]; }
+    // Первая запись ряда by со столбцом не меньше bx.
+    std::vector<Entry>::const_iterator firstInRow(const std::vector<Entry>& row, int bx) const {
+        const auto column = static_cast<std::uint32_t>(bx);
+        return std::lower_bound(row.begin(), row.end(), column,
+                                [](const Entry& e, std::uint32_t c) { return e.column < c; });
+    }
+    // Есть ли кто-то в корзинах x0..x1 ряда by — по словам битовой карты.
+    bool anyOccupied(int x0, int x1, int by) const {
+        std::size_t index = bucketIndex(x0, by);
+        const std::size_t end = bucketIndex(x1, by) + 1;
+        while (index < end) {
+            const std::size_t shift = index & 63;
+            const std::size_t take = std::min<std::size_t>(64 - shift, end - index);
+            std::uint64_t bits = occupied_[index >> 6] >> shift;
+            if (take < 64) {
+                bits &= (std::uint64_t{1} << take) - 1;
+            }
+            if (bits != 0) {
+                return true;
+            }
+            index += take;
+        }
+        return false;
+    }
     // Есть ли кто-то в корзине. Битовая карта занимает 8 КБ на карту по
-    // умолчанию и не вылетает из кэша, а заголовки корзин — 1,5 МБ: при обходе
-    // круга в сотню корзин, почти все пустые, проверка бита экономит промахи.
+    // умолчанию и не вылетает из кэша: по ней пропускаются пустые куски рядов
+    // (forEachInRadius) и пустые корзины кольца (nearest) без поиска в ряду.
     bool occupied(int bx, int by) const {
         const std::size_t index = bucketIndex(bx, by);
         return (occupied_[index >> 6] >> (index & 63)) & 1u;
@@ -124,10 +162,19 @@ private:
     void scanNearest(int bx, int by, float x, float y, float maxRadiusSq, Accept& accept,
                      std::optional<SpatialHit>& best) const;
 
+    // Сущность, которую sync ставит по одному (сменила корзину или новая).
+    struct Moved {
+        entt::entity entity;
+        float x;
+        float y;
+    };
+    static constexpr std::size_t kSyncWorkers = 8; // = kMaxParallelThreads (sim/Parallel.h)
+
     int columns_;
     int rows_;
     std::size_t size_ = 0;
-    std::vector<std::vector<Entry>> buckets_;
+    std::array<std::vector<Moved>, kSyncWorkers> moved_; // рабочие буферы sync по потокам
+    std::vector<std::vector<Entry>> rowEntries_; // по ряду корзин
     std::vector<std::uint64_t> occupied_; // бит на корзину: она не пуста
     std::vector<Slot> slots_;
 };
@@ -142,32 +189,21 @@ void SpatialIndex::forEachInRadius(float x, float y, float radius, Fn&& fn) cons
     const int x1 = axisBucket(x + radius, columns_);
     const int y0 = axisBucket(y - radius, rows_);
     const int y1 = axisBucket(y + radius, rows_);
+    const auto last = static_cast<std::uint32_t>(x1);
     for (int by = y0; by <= y1; ++by) {
-        // Непустые корзины строки — по битам карты занятости, словами по 64.
-        std::size_t index = bucketIndex(x0, by);
-        const std::size_t end = bucketIndex(x1, by) + 1;
-        while (index < end) {
-            const std::size_t shift = index & 63;
-            const std::size_t take = std::min<std::size_t>(64 - shift, end - index);
-            std::uint64_t bits = occupied_[index >> 6] >> shift;
-            if (take < 64) {
-                bits &= (std::uint64_t{1} << take) - 1;
+        // Корзины x0..x1 ряда — один непрерывный кусок его записей.
+        if (!anyOccupied(x0, x1, by)) {
+            continue;
+        }
+        const std::vector<Entry>& row = rowEntries_[static_cast<std::size_t>(by)];
+        for (auto it = firstInRow(row, x0); it != row.end() && it->column <= last; ++it) {
+            const Slot& slot = slotOf(*it);
+            const float dx = slot.x - x;
+            const float dy = slot.y - y;
+            const float distanceSq = dx * dx + dy * dy;
+            if (distanceSq <= radiusSq) {
+                fn(SpatialHit{it->id, it->entity, slot.x, slot.y, distanceSq});
             }
-            while (bits != 0) {
-                const std::size_t occupiedIndex =
-                    index + static_cast<std::size_t>(std::countr_zero(bits));
-                for (const Entry& entry : buckets_[occupiedIndex]) {
-                    const Slot& slot = slotOf(entry);
-                    const float dx = slot.x - x;
-                    const float dy = slot.y - y;
-                    const float distanceSq = dx * dx + dy * dy;
-                    if (distanceSq <= radiusSq) {
-                        fn(SpatialHit{entry.id, entry.entity, slot.x, slot.y, distanceSq});
-                    }
-                }
-                bits &= bits - 1;
-            }
-            index += take;
         }
     }
 }
@@ -178,7 +214,10 @@ void SpatialIndex::scanNearest(int bx, int by, float x, float y, float maxRadius
     if (bx < 0 || by < 0 || bx >= columns_ || by >= rows_ || !occupied(bx, by)) {
         return;
     }
-    for (const Entry& entry : bucket(bx, by)) {
+    const std::vector<Entry>& row = rowEntries_[static_cast<std::size_t>(by)];
+    const auto column = static_cast<std::uint32_t>(bx);
+    for (auto it = firstInRow(row, bx); it != row.end() && it->column == column; ++it) {
+        const Entry& entry = *it;
         const Slot& slot = slotOf(entry);
         const float dx = slot.x - x;
         const float dy = slot.y - y;

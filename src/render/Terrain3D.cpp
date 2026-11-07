@@ -877,10 +877,13 @@ int Terrain3D::levelFor(const Tile& tile, const Camera3D& camera) const {
 }
 
 void Terrain3D::build(Tile& tile, int level) {
+    const double start = GetTime();
     buildGround(tile, level);
     buildWater(tile, level);
     tile.built[level] = true;
     ++meshesLoaded_;
+    ++meshesBuilt_;
+    buildSeconds_ += GetTime() - start;
 }
 
 void Terrain3D::buildGround(Tile& tile, int level) {

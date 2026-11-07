@@ -4,6 +4,7 @@
 //                [--camera fly|shoulder] [--outbreak DAYS] [--phase NAME] [--zombies N]
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
 //                [--pose-gallery [ROW]] [--interior ID [YAW]] [--compose SENSE [ID [OTHER]]]
+//                [--map-size CELLS] [--people N] [--animals N] [--flocks N] [--threads N]
 //
 // --event       начать ивент на старте (drop — сброс груза, crash — крушение вертолёта,
 //               convoy — застрявший конвой) и открыть его в инспекторе;
@@ -26,7 +27,8 @@
 //               --hours прокручивает мир уже после этого
 // --director    режим «Сериал» (этап 12а.7): кино в 3D во весь экран — камеру ведёт режиссёр
 //               по самой интересной сюжетной линии, окна спрятаны; Esc — выход, F11 — снова
-// --zombies, --no-peace — как у lw_headless
+// --zombies, --no-peace, --map-size, --people, --animals, --flocks, --threads — как у
+//               lw_headless (--map-size 4096 — карта 16 × 16 км, этап 2а.1)
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
 // --screenshot-delay  снять не сразу, а через S реальных секунд работы окна (режиссёр)
@@ -48,6 +50,8 @@
 #include "render/WorldRenderer.h"
 #include "render/WorldRenderer3D.h"
 #include "sim/Climate.h"
+#include "sim/Parallel.h"
+#include "sim/Profiler.h"
 #include "sim/SimDriver.h"
 #include "sim/Events.h"
 #include "sim/Scenario.h"
@@ -63,12 +67,16 @@
 #include "ui/PathTool.h"
 #include "ui/Showrunner.h"
 #include "ui/Ui.h"
+#include "util/ProcessMemory.h"
 
 #include <raylib.h>
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
+#include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -264,6 +272,36 @@ void showCompose(const lw::World& world, const ComposeRequest& request, lw::ui::
     cinema.update(camera, plan, heading, false, false, dt);
 }
 
+// Замер для журнала при снимке (этап 2а.1): старт, кадр, память, сборка 3D —
+// чтобы сравнивать размеры карты, не глядя в окно.
+void logStats(const lw::World& world, const lw::WorldRenderer& renderer, const lw::WorldRenderer3D& renderer3d,
+              const lw::ui::AppStats& stats) {
+    const auto mb = [](std::size_t bytes) { return static_cast<double>(bytes) / (1024.0 * 1024.0); };
+    std::size_t structures = 0;
+    for (const lw::MemoryItem& item : world.memoryReport()) {
+        structures += item.bytes;
+    }
+    const lw::ProcessMemory memory = lw::processMemory();
+    const lw::Terrain3D& terrain = renderer3d.terrain();
+    const lw::Trees3D& trees = renderer3d.trees();
+    const lw::Props3D& props = renderer3d.props();
+    std::printf("STATS: map %dx%d, start: world %.2f s, map textures %.2f s, 3d %.2f s\n", world.map().width(),
+                world.map().height(), stats.worldSeconds, stats.map2dSeconds, stats.renderer3dSeconds);
+    std::printf("STATS: process memory after start steps: world %.0f MB, map textures %.0f MB, 3d %.0f MB\n",
+                mb(stats.worldMemory), mb(stats.map2dMemory), mb(stats.renderer3dMemory));
+    std::printf("STATS: frame on CPU %.1f ms average, %.1f ms worst in a second (simulation %.1f ms), "
+                "%d FPS, threads %d\n",
+                stats.frameMsAverage, stats.frameMsWorst, stats.simMs, stats.fps, lw::parallelThreads());
+    std::printf("STATS: memory: process %.0f MB (peak %.0f), world structures %.0f MB, map textures %.0f MB\n",
+                mb(memory.workingSet), mb(memory.peakWorkingSet), mb(structures), mb(renderer.map().textureBytes()));
+    std::printf("STATS: 3d meshes built: terrain %d (%.2f s, loaded %d), trees %d (%.2f s, loaded %d), "
+                "props %d (%.2f s, loaded %d), pending %d\n",
+                terrain.meshesBuilt(), terrain.buildSeconds(), terrain.meshesLoaded(), trees.meshesBuilt(),
+                trees.buildSeconds(), trees.meshesLoaded(), props.meshesBuilt(), props.buildSeconds(),
+                props.meshesLoaded(), renderer3d.pending());
+    std::fflush(stdout);
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -363,6 +401,16 @@ int main(int argc, char** argv) {
             navGraph = true;
         } else if (std::strcmp(argv[i], "--zombies") == 0 && i + 1 < argc) {
             config.zombies = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--map-size") == 0 && i + 1 < argc) {
+            config.mapWidth = config.mapHeight = std::max(64, std::atoi(argv[++i]));
+        } else if (std::strcmp(argv[i], "--people") == 0 && i + 1 < argc) {
+            config.people = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--animals") == 0 && i + 1 < argc) {
+            config.animals = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--flocks") == 0 && i + 1 < argc) {
+            config.flocks = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
+            lw::setParallelThreads(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
             config.peacetime = false;
         } else if (std::strcmp(argv[i], "--outbreak") == 0 && i + 1 < argc) {
@@ -374,7 +422,17 @@ int main(int argc, char** argv) {
 
     // Мир создаётся до окна: генерация карты занимает пару секунд, и пустое
     // окно в это время выглядело бы зависшим.
+    lw::ui::AppStats stats;
+    using Clock = std::chrono::steady_clock;
+    const auto seconds = [](Clock::time_point from) {
+        return std::chrono::duration<double>(Clock::now() - from).count();
+    };
+    Clock::time_point mark = Clock::now();
     lw::World world(seed, config);
+    stats.worldSeconds = seconds(mark);
+    stats.worldMemory = lw::processMemory().workingSet;
+    // Замер систем тика (этап 2а.1) — всегда: два десятка засечек часов на тик.
+    world.setProfiling(true);
     if (phase) {
         lw::enterPhase(world, *phase);
     }
@@ -396,8 +454,17 @@ int main(int argc, char** argv) {
 
     {
         // Текстуры карты должны быть освобождены до CloseWindow.
+        mark = Clock::now();
         lw::WorldRenderer renderer(world);
+        stats.map2dSeconds = seconds(mark);
+        stats.map2dMemory = lw::processMemory().workingSet;
+        mark = Clock::now();
         lw::WorldRenderer3D renderer3d(renderer.map(), world.map());
+        stats.renderer3dSeconds = seconds(mark);
+        stats.renderer3dMemory = lw::processMemory().workingSet;
+        double worstWindow = 0.0; // худший кадр текущей секунды
+        double worstSince = 0.0;
+        int framesWindow = 0;
         lw::WeatherRenderer weatherRenderer;
         lw::CameraController camera(world.width(), world.height());
         camera.setTerrain(&renderer3d.terrain());
@@ -440,6 +507,7 @@ int main(int argc, char** argv) {
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
         for (int frame = 0; !WindowShouldClose(); ++frame) {
             const float dt = GetFrameTime();
+            const Clock::time_point frameStart = Clock::now();
 
             lw::ui::handleHotkeys(driver);
             storyDirector.handleHotkeys(!lw::ui::wantsKeyboard()); // F11 — сериал, Esc — выход
@@ -449,7 +517,9 @@ int main(int argc, char** argv) {
                 pathTool.handleInput(camera, !lw::ui::wantsMouse());
                 inspector.handleInput(camera, !lw::ui::wantsMouse());
             }
+            const Clock::time_point simStart = Clock::now();
             driver.advance(dt);
+            stats.simMs = 1000.0 * seconds(simStart);
             const float alpha = driver.interpolationAlpha();
             storyDirector.update(inspector, driver, dt);
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
@@ -525,7 +595,7 @@ int main(int argc, char** argv) {
             if (!series && !noUi) {
                 lw::ui::drawSettlementLabels(world, camera);
                 lw::ui::drawTimePanel(world, environment, driver);
-                lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d);
+                lw::ui::drawStatsPanel(world, environment, driver, camera, renderer, renderer3d, stats);
                 pathTool.drawPanel();
                 inspector.drawPanel();
                 lw::ui::drawKeyHelp(camera);
@@ -535,6 +605,22 @@ int main(int argc, char** argv) {
             }
             storyDirector.drawCaption(inspector); // в сериале — широкий кадр и титры
             lw::ui::endFrame();
+            // До EndDrawing: там ожидание вертикальной синхронизации.
+            stats.frameMs = 1000.0 * seconds(frameStart);
+            stats.frameMsAverage = stats.frameMsAverage == 0.0
+                                       ? stats.frameMs
+                                       : stats.frameMsAverage + (stats.frameMs - stats.frameMsAverage) *
+                                                                    std::min(1.0, static_cast<double>(dt));
+            worstWindow = std::max(worstWindow, stats.frameMs);
+            worstSince += dt;
+            ++framesWindow;
+            if (worstSince >= 1.0) {
+                stats.frameMsWorst = worstWindow;
+                stats.fps = static_cast<int>(std::lround(framesWindow / worstSince));
+                worstWindow = 0.0;
+                worstSince = 0.0;
+                framesWindow = 0;
+            }
 
             EndDrawing();
 
@@ -542,6 +628,7 @@ int main(int argc, char** argv) {
             if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait) &&
                 GetTime() >= screenshotDelay) {
                 TraceLog(LOG_INFO, "SCREENSHOT: frame %d, %d FPS", frame, GetFPS());
+                logStats(world, renderer, renderer3d, stats);
                 const Image image = LoadImageFromScreen();
                 ExportImage(image, screenshot);
                 UnloadImage(image);

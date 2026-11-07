@@ -1,9 +1,12 @@
 #include "sim/SpatialIndex.h"
 
 #include "sim/Components.h"
+#include "sim/Parallel.h"
 
+#include <algorithm>
 #include <cassert>
 #include <cmath>
+#include <iterator>
 
 namespace lw {
 
@@ -18,8 +21,8 @@ int bucketCount(float worldSize) {
 SpatialIndex::SpatialIndex(float worldWidth, float worldHeight)
     : columns_(bucketCount(worldWidth)),
       rows_(bucketCount(worldHeight)),
-      buckets_(static_cast<std::size_t>(columns_) * static_cast<std::size_t>(rows_)),
-      occupied_((buckets_.size() + 63) / 64, 0) {}
+      rowEntries_(static_cast<std::size_t>(rows_)),
+      occupied_((static_cast<std::size_t>(columns_) * static_cast<std::size_t>(rows_) + 63) / 64, 0) {}
 
 int SpatialIndex::axisBucket(float coordinate, int count) {
     // Сравнения до приведения к int: так NaN, бесконечность и далёкие точки
@@ -35,10 +38,52 @@ int SpatialIndex::axisBucket(float coordinate, int count) {
 }
 
 void SpatialIndex::sync(const entt::registry& registry) {
-    // Порядок обхода реестра на результат не влияет: каждая сущность
-    // ставится на своё место в отсортированной корзине.
-    for (const auto [entity, position] : registry.view<const Position>().each()) {
-        place(registry, entity, position.x, position.y);
+    const auto* positions = registry.storage<Position>();
+    if (positions == nullptr || positions->empty()) {
+        return;
+    }
+    // Номер сущности меньше размера разреженного массива хранилища: слоты —
+    // заранее, чтобы параллельный проход не менял вектор.
+    if (slots_.size() < positions->extent()) {
+        slots_.resize(positions->extent());
+    }
+    // Сначала параллельно (этап 2а.1): кто остался в своей корзине, тому
+    // достаточно новой позиции в своём слоте — слоты разных сущностей не
+    // пересекаются. Остальные (сменили корзину, новые, слот занят прежней
+    // сущностью) откладываются и ставятся по одному.
+    static_assert(kSyncWorkers >= static_cast<std::size_t>(kMaxParallelThreads));
+    for (std::vector<Moved>& list : moved_) {
+        list.clear();
+    }
+    const entt::entity* entities = positions->data();
+    constexpr std::size_t kChunk = 512;
+    constexpr std::size_t kMinParallel = 2048;
+    parallelFor(positions->size(), kChunk, kMinParallel, [&](std::size_t begin, std::size_t end, int worker) {
+        std::vector<Moved>& list = moved_[static_cast<std::size_t>(worker)];
+        for (std::size_t i = begin; i < end; ++i) {
+            const entt::entity entity = entities[i];
+            const Position& position = positions->get(entity);
+            Slot& slot = slots_[static_cast<std::size_t>(entt::to_entity(entity))];
+            if (slot.entity == entity && bucketAt(position.x, position.y) == slot.bucket) {
+                slot.x = position.x;
+                slot.y = position.y;
+                continue;
+            }
+            list.push_back({entity, position.x, position.y});
+        }
+    });
+    // Порядок вставок на результат не влияет — ряд всегда отсортирован по
+    // столбцу и id, — но идёт по номеру сущности, чтобы не зависеть от того,
+    // какой поток какой кусок взял.
+    std::vector<Moved>& all = moved_[0];
+    for (std::size_t worker = 1; worker < moved_.size(); ++worker) {
+        all.insert(all.end(), moved_[worker].begin(), moved_[worker].end());
+    }
+    std::sort(all.begin(), all.end(), [](const Moved& a, const Moved& b) {
+        return entt::to_integral(a.entity) < entt::to_integral(b.entity);
+    });
+    for (const Moved& moved : all) {
+        place(registry, moved.entity, moved.x, moved.y);
     }
 }
 
@@ -56,7 +101,7 @@ void SpatialIndex::place(const entt::registry& registry, entt::entity entity, fl
     const std::uint32_t bucket = bucketAt(x, y);
     if (slot.entity == entt::null) {
         const EntityId id = registry.get<Id>(entity).value;
-        insertEntry(bucket, Entry{id, entity});
+        insertEntry(bucket, Entry{0, entity, id});
         slot = Slot{entity, id, bucket, x, y};
         ++size_;
         return;
@@ -65,7 +110,7 @@ void SpatialIndex::place(const entt::registry& registry, entt::entity entity, fl
     slot.y = y;
     if (bucket != slot.bucket) {
         eraseEntry(slot.bucket, slot.id);
-        insertEntry(bucket, Entry{slot.id, entity});
+        insertEntry(bucket, Entry{0, entity, slot.id});
         slot.bucket = bucket;
     }
 }
@@ -91,21 +136,40 @@ void SpatialIndex::queryRadius(float x, float y, float radius,
     forEachInRadius(x, y, radius, [&out](const SpatialHit& hit) { out.push_back(hit); });
 }
 
+std::size_t SpatialIndex::memoryBytes() const {
+    std::size_t bytes = rowEntries_.capacity() * sizeof(std::vector<Entry>) +
+                        occupied_.capacity() * sizeof(std::uint64_t) + slots_.capacity() * sizeof(Slot);
+    for (const std::vector<Entry>& row : rowEntries_) {
+        bytes += row.capacity() * sizeof(Entry);
+    }
+    return bytes;
+}
+
 void SpatialIndex::insertEntry(std::uint32_t bucket, const Entry& entry) {
-    std::vector<Entry>& entries = buckets_[bucket];
-    const auto it = std::lower_bound(entries.begin(), entries.end(), entry.id,
-                                     [](const Entry& e, EntityId id) { return e.id < id; });
-    entries.insert(it, entry);
+    const auto columns = static_cast<std::uint32_t>(columns_);
+    std::vector<Entry>& row = rowEntries_[bucket / columns];
+    Entry placed = entry;
+    placed.column = bucket % columns;
+    const auto it = std::lower_bound(row.begin(), row.end(), placed, [](const Entry& e, const Entry& value) {
+        return before(e, value.column, value.id);
+    });
+    row.insert(it, placed);
     occupied_[bucket >> 6] |= std::uint64_t{1} << (bucket & 63);
 }
 
 void SpatialIndex::eraseEntry(std::uint32_t bucket, EntityId id) {
-    std::vector<Entry>& entries = buckets_[bucket];
-    const auto it = std::lower_bound(entries.begin(), entries.end(), id,
-                                     [](const Entry& e, EntityId value) { return e.id < value; });
-    assert(it != entries.end() && it->id == id);
-    entries.erase(it);
-    if (entries.empty()) {
+    const auto columns = static_cast<std::uint32_t>(columns_);
+    std::vector<Entry>& row = rowEntries_[bucket / columns];
+    const std::uint32_t column = bucket % columns;
+    auto it = std::lower_bound(row.begin(), row.end(), id, [column](const Entry& e, EntityId value) {
+        return before(e, column, value);
+    });
+    assert(it != row.end() && it->column == column && it->id == id);
+    it = row.erase(it);
+    // Корзина опустела, если соседи по ряду — из других столбцов.
+    const bool left = it != row.begin() && std::prev(it)->column == column;
+    const bool right = it != row.end() && it->column == column;
+    if (!left && !right) {
         occupied_[bucket >> 6] &= ~(std::uint64_t{1} << (bucket & 63));
     }
 }
