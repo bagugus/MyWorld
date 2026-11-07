@@ -50,6 +50,7 @@ constexpr PhaseRules kRules[] = {
      .eveningHome = 0.35f,
      .stockpile = 2.5f,
      .groups = true,
+     .eventsPerDay = {0.5f, 0.1f, 0.3f},
      .minHours = 24,
      .maxHours = 96,
      .trigger = 0.1f,
@@ -68,6 +69,7 @@ constexpr PhaseRules kRules[] = {
      .groups = true,
      .zombieShare = 0.15f,
      .arrivals = 1,
+     .eventsPerDay = {0.3f, 0.35f, 0.35f},
      .minHours = 72,
      .maxHours = 72},
     // Выживание: на работу не ходит никто, каждый сам за себя или со своими.
@@ -78,7 +80,8 @@ constexpr PhaseRules kRules[] = {
      .lawful = false,
      .groups = true,
      .zombieShare = 0.4f,
-     .arrivals = 2},
+     .arrivals = 2,
+     .eventsPerDay = {0.2f, 0.15f, 0.1f}},
 };
 static_assert(std::size(kRules) == kWorldPhases);
 

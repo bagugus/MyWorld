@@ -146,6 +146,8 @@ Roles rolesOf(const ChronicleEvent& event) {
         return {2.5f};
     case K::Reunited:
         return {2.0f, 1.5f};
+    case K::EventCrew: // этап 7.7: выживший при крушении или из колонны — новый человек в краю
+        return {event.a == 1 ? 2.5f : 0.5f};
     default:
         return {};
     }

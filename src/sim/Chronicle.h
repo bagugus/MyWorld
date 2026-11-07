@@ -90,6 +90,7 @@ enum class ChronicleKind : std::uint8_t {
     EvacuationEnded, // пункт (subject) закрыт: a — всего увезли
     StayedBehind,  // солдат остался, когда армия ушла из пункта object
     Reunited,      // добрался до своих — object: a — кем он ему (kinCode), b = 1 — переехал к нему, 0 — забрал ребёнка
+    EventCrew,     // был среди экипажа ивента object (этап 7.7): a = 1 — выжил, 0 — погиб; b = 1 — укушен
     Count
 };
 

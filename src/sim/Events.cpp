@@ -16,6 +16,41 @@ constexpr EventSpec kSpecs[] = {
     // 800 м, люди слышат его за 1,5 км; дымовая шашка горит 6 игровых часов,
     // днём её видно за 2,5 км.
     {"drop", SoundKind::Aircraft, 800.0f, 1500.0f, 6 * 60, 2500.0f, 1, 2},
+    // Крушение вертолёта (этап 7.7): взрыв слышат зомби за 1,2 км, люди — за
+    // 3 км; обломки горят полсуток, столб дыма виден за 3 км. Груз — обломки
+    // с армейской укладкой; экипаж 2–3: треть выживает, треть укушена — вёз
+    // эвакуированных, среди которых был больной.
+    {.name = "crash",
+     .sound = SoundKind::Explosion,
+     .loudness = 1200.0f,
+     .heardRange = 3000.0f,
+     .signalMinutes = 12 * 60,
+     .signalRange = 3000.0f,
+     .cachesMin = 1,
+     .cachesMax = 1,
+     .crewMin = 2,
+     .crewMax = 3,
+     .crewSurvive = 0.35f,
+     .crewBitten = 0.3f},
+    // Застрявший конвой (этап 7.7): колонна встала на дороге и отбивалась —
+    // перестрелку зомби слышат за 1,5 км, люди — за 2,5; горит грузовик, дым
+    // виден 4 часа за 2 км. Грузы — 2–3 грузовика с запасами для пункта
+    // эвакуации; солдат 3–5, выживает меньше трети, многие укушены; вокруг —
+    // зомби, которые колонну остановили.
+    {.name = "convoy",
+     .sound = SoundKind::Gunshot,
+     .loudness = 1500.0f,
+     .heardRange = 2500.0f,
+     .signalMinutes = 4 * 60,
+     .signalRange = 2000.0f,
+     .cachesMin = 2,
+     .cachesMax = 3,
+     .crewMin = 3,
+     .crewMax = 5,
+     .crewSurvive = 0.3f,
+     .crewBitten = 0.4f,
+     .zombiesMin = 5,
+     .zombiesMax = 10},
 };
 static_assert(std::size(kSpecs) == static_cast<std::size_t>(EventKind::Count));
 
@@ -49,6 +84,34 @@ void fillCache(Inventory& inventory, EventKind kind, Rng& rng) {
         inventory.add(kAmmo[rng.below(3)], rng.rangeInt(10, 24));
         if (rng.chance(0.25f)) {
             inventory.add(rng.chance(0.5f) ? ItemKind::Rifle : ItemKind::Shotgun, 1);
+        }
+        break;
+    }
+    case EventKind::HelicopterCrash:
+        // Обломки: армейская аптечка, патроны, бортовое оружие, НЗ экипажа.
+        inventory.add(ItemKind::Bandage, rng.rangeInt(3, 6));
+        inventory.add(ItemKind::Medicine, rng.rangeInt(2, 5));
+        inventory.add(ItemKind::RifleAmmo, rng.rangeInt(20, 40));
+        inventory.add(ItemKind::Food, rng.rangeInt(2, 4));
+        inventory.add(ItemKind::Water, rng.rangeInt(2, 4));
+        if (rng.chance(0.6f)) {
+            inventory.add(ItemKind::Rifle, 1);
+        }
+        if (rng.chance(0.4f)) {
+            inventory.add(ItemKind::Pistol, 1);
+            inventory.add(ItemKind::PistolAmmo, rng.rangeInt(8, 16));
+        }
+        break;
+    case EventKind::MilitaryConvoy: {
+        // Грузовик: запасы для пункта эвакуации — много еды и воды, медикаменты,
+        // ящик патронов. Всего не унести и вдвоём: сюда возвращаются.
+        inventory.add(ItemKind::Food, rng.rangeInt(15, 30));
+        inventory.add(ItemKind::Water, rng.rangeInt(12, 25));
+        inventory.add(ItemKind::Bandage, rng.rangeInt(3, 8));
+        inventory.add(ItemKind::Medicine, rng.rangeInt(1, 4));
+        inventory.add(ItemKind::RifleAmmo, rng.rangeInt(20, 60));
+        if (rng.chance(0.3f)) {
+            inventory.add(ItemKind::Rifle, 1);
         }
         break;
     }

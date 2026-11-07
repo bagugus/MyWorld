@@ -40,6 +40,17 @@ struct EventSpec {
     float signalRange = 0.0f;
     int cachesMin = 1;           // грузов
     int cachesMax = 1;
+    // Экипаж (этап 7.7): солдаты — люди с именами, как у пункта эвакуации.
+    // Каждый выживает с вероятностью crewSurvive (раненым — кровотечение,
+    // перевязаться есть чем) и укушен с вероятностью crewBitten: погибший
+    // укушенный встанет у места ивента, выживший — заражён и придёт к людям.
+    int crewMin = 0;
+    int crewMax = 0;
+    float crewSurvive = 0.0f;
+    float crewBitten = 0.0f;
+    // Зомби у места: те, от кого отбивалась колонна (этап 7.7).
+    int zombiesMin = 0;
+    int zombiesMax = 0;
 };
 
 const EventSpec& eventSpec(EventKind kind);

@@ -591,6 +591,13 @@ Phrase phraseOf(const ChronicleEvent& event) {
             std::snprintf(phrase.tail, sizeof(phrase.tail), "— домой");
         }
         break;
+    case ChronicleKind::EventCrew:
+        phrase.verb = event.a == 1 ? "выжил — ивент" : "погиб — ивент";
+        phrase.withObject = true;
+        if (event.b == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— укушен");
+        }
+        break;
     case ChronicleKind::Count:
         break;
     }

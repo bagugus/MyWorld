@@ -222,78 +222,6 @@ EntityId pickEvacuationSite(const Places::SettlementPlace& place) {
     return kInvalidId;
 }
 
-void spawnSoldier(World& world, EntityId point, Cell door, Rng& rng, std::unordered_set<std::string>& taken) {
-    entt::registry& registry = world.registry();
-    const bool female = rng.chance(kSoldierFemale);
-    Name name;
-    for (int attempt = 0; attempt < kNameAttempts; ++attempt) {
-        name.first = randomFirstName(rng, female);
-        name.last = randomLastName(rng);
-        if (!taken.contains(name.first + " " + name.last)) {
-            break;
-        }
-    }
-    taken.insert(name.first + " " + name.last);
-    // Солдат смелее и решительнее среднего жителя.
-    Traits traits = generateTraits(rng);
-    traits.bravery = 0.5f + 0.45f * traits.bravery;
-    traits.aggression = 0.3f + 0.5f * traits.aggression;
-    traits.prudence = 0.4f + 0.4f * traits.prudence;
-    traits.chronotype = 0.3f + 0.4f * traits.chronotype;
-    Walker walker;
-    walker.speed = rng.range(1.3f, 1.7f);
-    Needs needs;
-    needs.hunger = rng.range(0.0f, 0.3f);
-    needs.thirst = rng.range(0.0f, 0.3f);
-    needs.fatigue = rng.range(0.1f, 0.4f);
-    Mind mind;
-    mind.spot = door;
-    mind.nextThink = world.tick() + rng.below(static_cast<std::uint32_t>(10 * kTicksPerGameMinute));
-    mind.until = mind.nextThink;
-    Person person;
-    person.home = point;
-    Job job;
-    job.profession = Profession::Soldier;
-    job.workplace = point;
-    job.start = static_cast<std::uint16_t>(kSoldierShiftStart);
-    job.end = static_cast<std::uint16_t>(kSoldierShiftEnd);
-    job.days = 0b1111111;
-    const int ammo = rng.rangeInt(kSoldierAmmoMin, kSoldierAmmoMax);
-    const int age = rng.rangeInt(kSoldierAgeMin, kSoldierAgeMax);
-
-    const entt::entity entity = world.create();
-    const EntityId id = registry.get<Id>(entity).value;
-    registry.emplace<Position>(entity, Map::cellCenter(door.x), Map::cellCenter(door.y));
-    registry.emplace<Velocity>(entity);
-    registry.emplace<Person>(entity, person);
-    registry.emplace<Name>(entity, std::move(name));
-    registry.emplace<Age>(entity, Age{static_cast<std::uint8_t>(age)});
-    registry.emplace<Kin>(entity);
-    registry.emplace<Walker>(entity, std::move(walker));
-    registry.emplace<Needs>(entity, needs);
-    registry.emplace<Traits>(entity, traits);
-    registry.emplace<Mind>(entity, mind);
-    Inventory inventory;
-    inventory.set(ItemKind::Food, 3);
-    inventory.set(ItemKind::Water, 3);
-    inventory.set(ItemKind::Bandage, 2);
-    inventory.set(ItemKind::Medicine, 1);
-    inventory.set(ItemKind::RifleAmmo, ammo);
-    registry.emplace<Inventory>(entity, inventory);
-    registry.emplace<Senses>(entity);
-    registry.emplace<Awareness>(entity);
-    registry.emplace<Weapon>(entity, Weapon{WeaponKind::Rifle, static_cast<std::uint16_t>(ammo)});
-    registry.emplace<Combat>(entity);
-    registry.emplace<Wounds>(entity);
-    registry.emplace<Relations>(entity);
-    registry.emplace<Memories>(entity);
-    registry.emplace<Leads>(entity);
-    registry.emplace<Job>(entity, job);
-    // Солдат знает, зачем его прислали.
-    registry.emplace<Alarm>(entity, Alarm{broadcastLevel(BroadcastKind::Evacuation), AlarmClue::Broadcast,
-                                          scenarioIdOf(world), world.tick(), 0});
-    world.record(ChronicleKind::Settled, id, point);
-}
 
 void openEvacuation(World& world) {
     if (evacuationOpen(world)) {
@@ -301,10 +229,7 @@ void openEvacuation(World& world) {
     }
     entt::registry& registry = world.registry();
     Rng& rng = world.rng(RngStream::Society);
-    std::unordered_set<std::string> taken;
-    for (const auto [entity, name] : registry.view<const Name>().each()) {
-        taken.insert(name.first + " " + name.last);
-    }
+    std::unordered_set<std::string> taken = takenNames(world);
     bool opened = false;
     for (const Places::SettlementPlace& place : world.places().settlements()) {
         const entt::entity settlement = world.find(place.id);
@@ -386,6 +311,89 @@ void closeEvacuation(World& world) {
 }
 
 } // namespace
+
+std::unordered_set<std::string> takenNames(const World& world) {
+    std::unordered_set<std::string> taken;
+    for (const auto [entity, name] : world.registry().view<const Name>().each()) {
+        taken.insert(name.first + " " + name.last);
+    }
+    return taken;
+}
+
+entt::entity spawnSoldier(World& world, EntityId point, Cell door, Rng& rng,
+                          std::unordered_set<std::string>& taken) {
+    entt::registry& registry = world.registry();
+    const bool female = rng.chance(kSoldierFemale);
+    Name name;
+    for (int attempt = 0; attempt < kNameAttempts; ++attempt) {
+        name.first = randomFirstName(rng, female);
+        name.last = randomLastName(rng);
+        if (!taken.contains(name.first + " " + name.last)) {
+            break;
+        }
+    }
+    taken.insert(name.first + " " + name.last);
+    // Солдат смелее и решительнее среднего жителя.
+    Traits traits = generateTraits(rng);
+    traits.bravery = 0.5f + 0.45f * traits.bravery;
+    traits.aggression = 0.3f + 0.5f * traits.aggression;
+    traits.prudence = 0.4f + 0.4f * traits.prudence;
+    traits.chronotype = 0.3f + 0.4f * traits.chronotype;
+    Walker walker;
+    walker.speed = rng.range(1.3f, 1.7f);
+    Needs needs;
+    needs.hunger = rng.range(0.0f, 0.3f);
+    needs.thirst = rng.range(0.0f, 0.3f);
+    needs.fatigue = rng.range(0.1f, 0.4f);
+    Mind mind;
+    mind.spot = door;
+    mind.nextThink = world.tick() + rng.below(static_cast<std::uint32_t>(10 * kTicksPerGameMinute));
+    mind.until = mind.nextThink;
+    Person person;
+    person.home = point;
+    Job job;
+    job.profession = Profession::Soldier;
+    job.workplace = point;
+    job.start = static_cast<std::uint16_t>(kSoldierShiftStart);
+    job.end = static_cast<std::uint16_t>(kSoldierShiftEnd);
+    job.days = 0b1111111;
+    const int ammo = rng.rangeInt(kSoldierAmmoMin, kSoldierAmmoMax);
+    const int age = rng.rangeInt(kSoldierAgeMin, kSoldierAgeMax);
+
+    const entt::entity entity = world.create();
+    const EntityId id = registry.get<Id>(entity).value;
+    registry.emplace<Position>(entity, Map::cellCenter(door.x), Map::cellCenter(door.y));
+    registry.emplace<Velocity>(entity);
+    registry.emplace<Person>(entity, person);
+    registry.emplace<Name>(entity, std::move(name));
+    registry.emplace<Age>(entity, Age{static_cast<std::uint8_t>(age)});
+    registry.emplace<Kin>(entity);
+    registry.emplace<Walker>(entity, std::move(walker));
+    registry.emplace<Needs>(entity, needs);
+    registry.emplace<Traits>(entity, traits);
+    registry.emplace<Mind>(entity, mind);
+    Inventory inventory;
+    inventory.set(ItemKind::Food, 3);
+    inventory.set(ItemKind::Water, 3);
+    inventory.set(ItemKind::Bandage, 2);
+    inventory.set(ItemKind::Medicine, 1);
+    inventory.set(ItemKind::RifleAmmo, ammo);
+    registry.emplace<Inventory>(entity, inventory);
+    registry.emplace<Senses>(entity);
+    registry.emplace<Awareness>(entity);
+    registry.emplace<Weapon>(entity, Weapon{WeaponKind::Rifle, static_cast<std::uint16_t>(ammo)});
+    registry.emplace<Combat>(entity);
+    registry.emplace<Wounds>(entity);
+    registry.emplace<Relations>(entity);
+    registry.emplace<Memories>(entity);
+    registry.emplace<Leads>(entity);
+    registry.emplace<Job>(entity, job);
+    // Солдат знает, зачем его прислали.
+    registry.emplace<Alarm>(entity, Alarm{broadcastLevel(BroadcastKind::Evacuation), AlarmClue::Broadcast,
+                                          scenarioIdOf(world), world.tick(), 0});
+    world.record(ChronicleKind::Settled, id, point);
+    return entity;
+}
 
 int departConvoy(World& world, EntityId pointId, bool /*last*/) {
     entt::registry& registry = world.registry();
