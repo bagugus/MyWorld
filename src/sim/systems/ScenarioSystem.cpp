@@ -1,9 +1,11 @@
 #include "sim/systems/ScenarioSystem.h"
 
 #include "sim/Calendar.h"
-#include "sim/Population.h"
+#include "sim/Infection.h"
+#include "sim/Names.h"
 #include "sim/Scenario.h"
 #include "sim/World.h"
+#include "sim/systems/InfectionSystem.h"
 
 #include <algorithm>
 #include <cmath>
@@ -61,11 +63,55 @@ void beginNextPhase(World& world, entt::entity entity) {
                  scenarioStats(world).casualties());
     recordQuitters(world, before, after);
     if (after == WorldPhase::Outbreak) {
-        // Первые заражённые. Позиции остальных с начала тика не менялись:
-        // индекс узнаёт только о пришедших.
-        Rng& rng = world.rng(RngStream::Scenario);
-        spawnZombieGroup(world, rng.rangeInt(kFirstInfectedMin, kFirstInfectedMax), rng);
-        world.syncSpatial();
+        // Нулевой пациент (этап 7.5): никто, и он сам, ещё не знает.
+        const EntityId zero = infectPatientZero(world, id, world.rng(RngStream::Scenario));
+        registry.get<Scenario>(entity).patientZero = zero;
+    }
+}
+
+// Есть ли среди жителей зараза (этап 7.5): заражённый, тело, которое встанет,
+// зомби из жителей (с именем).
+bool infectionAmongResidents(const World& world) {
+    const entt::registry& registry = world.registry();
+    for (const auto [entity, person, wounds] : registry.view<const Person, const Wounds>().each()) {
+        if (isInfected(wounds)) {
+            return true;
+        }
+    }
+    for (const auto [entity, corpse] : registry.view<const Corpse>().each()) {
+        if (corpse.kind == CorpseKind::Human && corpse.turnsAt > world.tick()) {
+            return true;
+        }
+    }
+    for (const auto [entity, zombie] : registry.view<const Zombie>().each()) {
+        if (registry.all_of<Name>(entity)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// Вспышка и паника, раз в час: вирус приходит в край не один раз. Затишье
+// (заразы среди жителей нет) дольше kReimportTicks — новый завозной случай.
+void watchForReimport(World& world, entt::entity entity) {
+    entt::registry& registry = world.registry();
+    const WorldPhase phase = registry.get<Scenario>(entity).phase;
+    if (phase != WorldPhase::Outbreak && phase != WorldPhase::Panic) {
+        return;
+    }
+    const std::uint64_t tick = world.tick();
+    if (infectionAmongResidents(world)) {
+        registry.get<Scenario>(entity).quietSince = Scenario::kNever;
+        return;
+    }
+    Scenario& scenario = registry.get<Scenario>(entity);
+    if (scenario.quietSince == Scenario::kNever) {
+        scenario.quietSince = tick;
+        return;
+    }
+    if (tick >= scenario.quietSince + kReimportTicks) {
+        scenario.quietSince = Scenario::kNever;
+        infectPatientZero(world, registry.get<Id>(entity).value, world.rng(RngStream::Scenario), true);
     }
 }
 
@@ -116,12 +162,17 @@ void updateScenario(World& world) {
         beginNextPhase(world, entity);
         return;
     }
+    if (calendarAt(tick).minute != 0) {
+        return;
+    }
     // Беда дошла до порога — раз в час.
     const int trigger = phaseTrigger(scenario);
-    if (trigger > 0 && calendarAt(tick).minute == 0 && tick >= phaseEarliest(scenario) &&
-        scenarioStats(world).casualties() >= trigger) {
+    if (trigger > 0 && tick >= phaseEarliest(scenario) && scenarioStats(world).casualties() >= trigger) {
         beginNextPhase(world, entity);
+        return;
     }
+    // Вирус пришёл снова (этап 7.5).
+    watchForReimport(world, entity);
 }
 
 } // namespace lw

@@ -1,6 +1,8 @@
 #include "ui/StoryText.h"
 
 #include "sim/Components.h"
+#include "sim/Infection.h"
+#include "sim/Scenario.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 #include "ui/Captions.h"
@@ -217,15 +219,31 @@ std::string storyHeadline(const World& world, const Story& story) {
         }
         return idLabel(leader) + said(world, leader, " и его люди", " и её люди");
     }
-    case StoryKind::Infection:
+    case StoryKind::Infection: {
+        // Укус или больной рядом (этап 7.5).
+        const InfectionRoute route = infectionRouteOf(world, hero);
+        const bool bitten = route == InfectionRoute::Bite;
         switch (story.ending) {
         case StoryEnding::Turned:
             return a + said(world, hero, " стал зомби", " стала зомби");
         case StoryEnding::Death:
-            return a + said(world, hero, " умер от укуса", " умерла от укуса");
+            return bitten ? a + said(world, hero, " умер от укуса", " умерла от укуса")
+                          : a + said(world, hero, " умер от заразы", " умерла от заразы");
         default:
-            return a + said(world, hero, " укушен", " укушена");
+            if (bitten) {
+                return a + said(world, hero, " укушен", " укушена");
+            }
+            if (route == InfectionRoute::Origin) {
+                return isPatientZero(world, hero)
+                           ? a + said(world, hero, " заболел первым", " заболела первой")
+                           : a + said(world, hero, " заразился неизвестно где", " заразилась неизвестно где");
+            }
+            if (story.other != kInvalidId) {
+                return a + said(world, hero, " заразился от ", " заразилась от ") + b;
+            }
+            return a + said(world, hero, " заражён", " заражена");
         }
+    }
     case StoryKind::Salvage:
         switch (story.ending) {
         case StoryEnding::Claimed:

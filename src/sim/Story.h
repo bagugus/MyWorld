@@ -26,7 +26,7 @@ class World;
 enum class StoryKind : std::uint8_t {
     Feud,      // кража, нападение, бросил в беде → обида → месть или примирение
     Group,     // сбор группы → вступления, изгнания, смена вожака, побег → распад
-    Infection, // укус → лихорадка → смерть → обращение
+    Infection, // укус или заражение от больного → лихорадка → смерть → обращение
     Salvage,   // ивент → кто узнал → кто добрался до груза → ивент кончился
     Count
 };
@@ -49,7 +49,7 @@ enum class StoryEnding : std::uint8_t {
     Killed,     // обидчик убил пострадавшего
     Death,      // кто-то из главных погиб не от рук другого
     Faded,      // забылось: давно ничего не происходит
-    Turned,     // укушенный встал зомби
+    Turned,     // заражённый встал зомби
     Disbanded,  // группа распалась
     Claimed,    // груз забрали
     Unclaimed,  // ивент кончился, до груза никто не добрался
@@ -67,7 +67,7 @@ struct Story {
     StoryKind kind = StoryKind::Feud;
     StoryStage stage = StoryStage::Setup;
     StoryEnding ending = StoryEnding::None;
-    // Главный герой — за кем следить: пострадавший во вражде, укушенный, вожак
+    // Главный герой — за кем следить: пострадавший во вражде, заражённый, вожак
     // группы, кто первым узнал о грузе или добрался до него (нет — kInvalidId).
     EntityId hero = kInvalidId;
     EntityId other = kInvalidId; // противник: обидчик во вражде, укусивший зомби
@@ -98,7 +98,7 @@ public:
     // Номера линий (Story::id), где участвует id, по возрастанию.
     std::vector<std::uint32_t> storiesOf(EntityId id) const;
     // Идущая линия, к кульминации которой ведёт предвестие (этап 12а.2):
-    // вражда мстителя с обидчиком или вора с хозяином, заражение укушенного,
+    // вражда мстителя с обидчиком или вора с хозяином, заражение укушенного (или заразившегося),
     // гонка за грузом ивента; nullptr — такой линии нет (орда, первая кража).
     const Story* lineOf(const Foresight& foresight) const;
 
@@ -137,7 +137,7 @@ private:
     static Pair pairOf(EntityId a, EntityId b) { return a < b ? Pair{a, b} : Pair{b, a}; }
     std::unordered_map<Pair, std::uint32_t, PairHash> feuds_;
     std::unordered_map<EntityId, std::uint32_t> groups_;     // группа
-    std::unordered_map<EntityId, std::uint32_t> infections_; // укушенный
+    std::unordered_map<EntityId, std::uint32_t> infections_; // заражённый
     std::unordered_map<EntityId, std::uint32_t> salvages_;   // ивент
     std::unordered_map<EntityId, std::vector<std::uint32_t>> byEntity_;
     std::unordered_set<Pair, PairHash> friends_; // пары, когда-то ставшие друзьями

@@ -51,6 +51,8 @@ add_library(lw_sim STATIC
     src/sim/Grid.h
     src/sim/Hash.h
     src/sim/Id.h
+    src/sim/Infection.cpp
+    src/sim/Infection.h
     src/sim/Items.cpp
     src/sim/Items.h
     src/sim/Map.cpp
@@ -115,6 +117,8 @@ add_library(lw_sim STATIC
     src/sim/systems/FamilySystem.h
     src/sim/systems/GroupSystem.cpp
     src/sim/systems/GroupSystem.h
+    src/sim/systems/InfectionSystem.cpp
+    src/sim/systems/InfectionSystem.h
     src/sim/systems/MemorySystem.cpp
     src/sim/systems/MemorySystem.h
     src/sim/systems/MovementSystem.cpp

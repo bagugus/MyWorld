@@ -215,7 +215,7 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.verb = "встал зомби";
         break;
     case ChronicleKind::Feverish:
-        phrase.verb = "слёг в лихорадке от укуса";
+        phrase.verb = "слёг в лихорадке";
         break;
     case ChronicleKind::FoundWeapon:
         phrase.verb = "нашёл оружие:";
@@ -490,6 +490,16 @@ Phrase phraseOf(const ChronicleEvent& event) {
         if (event.b == 1) {
             std::snprintf(phrase.tail, sizeof(phrase.tail), "— в дом своей группы");
         }
+        break;
+    case ChronicleKind::PatientZero:
+        phrase.verb = event.a == 1 ? "заразился неизвестно где — новый завозной случай"
+                                   : "заразился первым — нулевой пациент; где, неизвестно";
+        break;
+    case ChronicleKind::Infected:
+        phrase.verb = "заразился от";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      infectionRouteText(static_cast<InfectionRoute>(event.a)));
         break;
     case ChronicleKind::Count:
         break;

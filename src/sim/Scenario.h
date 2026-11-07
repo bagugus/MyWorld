@@ -47,13 +47,16 @@ struct PhaseRules {
     float stockpile = 1.0f;   // сколько еды держать дома — × это: в панике скупают
     bool groups = false;      // сбиваются в группы выживших (GroupSystem)
     // Приток зомби издалека (этап 5.7): их число держится не ниже zombieShare
-    // от жителей к началу вспышки; орда приходит arrivals раз в сутки.
+    // от жителей к началу вспышки; орда приходит arrivals раз в сутки. Зомби
+    // во вспышке и панике — только свои, бывшие жители (этап 7.5): приток
+    // начинается с коллапсом, когда беда пришла и к соседям.
     float zombieShare = 0.0f;
     int arrivals = 0;
     // Когда фаза уступает следующей: не раньше minHours игровых часов после
-    // начала; если пострадавших (погибли, обратились, заражены) — не меньше
-    // trigger от жителей к началу вспышки и не меньше triggerMin человек, — то
-    // сразу, иначе — через maxHours. maxHours = 0 — сама не кончается.
+    // начала; если пострадавших (погибли, обратились, заметно больны — укушены
+    // или в лихорадке) — не меньше trigger от жителей к началу вспышки и не
+    // меньше triggerMin человек, — то сразу, иначе — через maxHours.
+    // maxHours = 0 — сама не кончается.
     int minHours = 0;
     int maxHours = 0;
     float trigger = 0.0f;
@@ -70,6 +73,9 @@ WorldPhase nextPhase(WorldPhase phase);
 const Scenario* scenarioOf(const World& world);
 // Id сущности сценария; kInvalidId — нет.
 EntityId scenarioIdOf(const World& world);
+// Нулевой пациент ли id (этап 7.5): с него началась вспышка. Завозные случаи
+// после него — нет.
+bool isPatientZero(const World& world, EntityId id);
 
 // Фаза мира: без сценария — выживание (катастрофа уже случилась).
 WorldPhase worldPhase(const World& world);
@@ -105,11 +111,14 @@ int arrivalsPerDay(const World& world);
 struct ScenarioStats {
     int population = 0; // людей к началу вспышки (до неё — сейчас)
     int alive = 0;      // живых людей
-    int infected = 0;   // из них заражены укусом
+    int infected = 0;   // из них заражены — укусом или от больного (этап 7.5)
+    int sick = 0;       // из заражённых заметно больны: укушены или в лихорадке
     int lost = 0;       // погибли и обратились с начала вспышки
     int zombies = 0;
-    // Пострадавшие: потерянные и заражённые.
-    int casualties() const { return lost + infected; }
+    int residents = 0;  // из зомби — бывшие жители (с именем); остальные пришли издалека
+    // Пострадавшие: потерянные и заметно больные. Скрытый период не замечает
+    // никто — он беду ещё не торопит.
+    int casualties() const { return lost + sick; }
 };
 ScenarioStats scenarioStats(const World& world);
 

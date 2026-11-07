@@ -130,6 +130,10 @@ Roles rolesOf(const ChronicleEvent& event) {
         return {2.5f, 1.0f}; // сирота; погибший родитель — только связь (этап 7.3)
     case K::TookIn:
         return {2.0f, 2.0f}; // взял к себе — и ребёнок: теперь они связаны
+    case K::PatientZero:
+        return {2.5f}; // объект — сценарий, не человек (этап 7.5)
+    case K::Infected:
+        return {1.5f, 0.8f}; // заразился — и от кого: больной сам не знал
     default:
         return {};
     }

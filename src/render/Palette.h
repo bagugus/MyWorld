@@ -23,6 +23,8 @@ inline constexpr Color kEmptyCacheColor = {88, 82, 60, 255};
 inline constexpr Color kCacheOutline = {40, 38, 24, 255};
 inline constexpr Color kSmokeColor = {222, 92, 80, 255};
 inline constexpr Color kBuildingOutline = {40, 34, 30, 255};
+// Больной в лихорадке (этап 7.5) — кольцо вокруг кружка на виде сверху.
+inline constexpr Color kFeverRingColor = {255, 140, 50, 255};
 // Небо в 3D: фон и то, что отражает вода. Ночью его затемняет погода.
 inline constexpr Color kSkyColor = {132, 166, 200, 255};
 

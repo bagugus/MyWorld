@@ -43,6 +43,8 @@ const char* animalStateName(AnimalState state);
 const char* weaponName(WeaponKind kind);
 const char* deathCauseName(DeathCause cause);
 const char* corpseKindName(CorpseKind kind);
+// Как заразился (этап 7.5): «под одной крышей», «в больнице», «укус зомби».
+const char* infectionRouteText(InfectionRoute route);
 // Воспоминание о ком-то: «спас», «бросил в беде», «погиб».
 const char* memoryKindName(MemoryKind kind);
 // Ивент: «падение припасов».

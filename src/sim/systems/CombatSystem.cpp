@@ -181,6 +181,12 @@ void updateCombat(World& world) {
             if (registry.all_of<Zombie>(entity) && rng.chance(kBiteChance)) {
                 ++wounds.bites;
                 wounds.bleeding += kBiteBleeding;
+                // Первое заражение — укусом (этап 7.5): путь и от кого.
+                if (wounds.infection <= 0.0f) {
+                    wounds.route = InfectionRoute::Bite;
+                    wounds.infectedBy = id.value;
+                    wounds.infectedAt = tick;
+                }
                 wounds.infection = std::min(1.0f, wounds.infection + kBiteInfection);
                 world.record(ChronicleKind::Bitten, combat.target, id.value);
             }

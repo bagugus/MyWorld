@@ -1,6 +1,7 @@
 #include "ui/Captions.h"
 
 #include "sim/Cast.h"
+#include "sim/Infection.h"
 #include "sim/Map.h"
 #include "sim/Names.h"
 #include "sim/World.h"
@@ -162,6 +163,7 @@ bool aboutObject(ChronicleKind kind) {
     case K::BetrayedBy:
     case K::AssaultedBy:
     case K::Expelled:
+    case K::Infected:
         return true;
     default:
         return false;
@@ -303,10 +305,11 @@ std::string statusLine(const World& world, EntityId id) {
                                  : "в группе " + idLabel(info.leader));
     }
     if (const auto* wounds = registry.try_get<Wounds>(entity)) {
-        if (wounds->infection >= 0.5f) {
-            append(std::string(g(female, "укушен", "укушена")) + ", лихорадка");
-        } else if (wounds->infection > 0.0f) {
-            append(g(female, "укушен", "укушена"));
+        // Укушен или заразился от больного (этап 7.5) — зритель знает.
+        if (isInfected(*wounds)) {
+            const std::string how = wounds->bites > 0 ? g(female, "укушен", "укушена")
+                                                      : g(female, "заражён", "заражена");
+            append(isFeverish(*wounds) ? how + ", лихорадка" : how);
         }
         if (wounds->bleeding > 0.0f) {
             append("истекает кровью");
@@ -429,6 +432,14 @@ std::string episodeSummary(const World& world, EntityId id, std::uint64_t since,
                        : name + " " + g(female, "изгнан", "изгнана") + " из группы";
     case K::Bitten:
         return name + " " + g(female, "укушен", "укушена") + " зомби";
+    case K::PatientZero:
+        return event.a == 1 ? name + " " + g(female, "заразился", "заразилась") + " неизвестно где"
+                            : name + " " + g(female, "заболел первым", "заболела первой") +
+                                  " — и ещё не знает об этом";
+    case K::Infected:
+        return subject ? name + " " + g(female, "заразился", "заразилась") + " от " + other
+                       : name + " " + g(female, "заразил", "заразила") + " " + idLabel(event.subject) +
+                             g(female, " — сам того не зная", " — сама того не зная");
     case K::Feverish:
         return name + ": у " + g(female, "него", "неё") + " лихорадка — заражение";
     case K::SavedBy:

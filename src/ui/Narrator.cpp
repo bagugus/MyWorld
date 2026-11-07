@@ -2,6 +2,7 @@
 
 #include "sim/Calendar.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Map.h"
 #include "sim/Names.h"
 #include "sim/Scenario.h"
@@ -475,6 +476,37 @@ std::uint64_t bittenAt(const World& world, EntityId id) {
 }
 
 // «сегодня утром» — для середины фразы.
+std::string agoLower(std::uint64_t then, std::uint64_t now);
+
+// Как человек заразился — началом фразы (этап 7.5): «John укусили сегодня
+// утром», «Mary заразилась вчера от John», «Raymond заболел первым». Живой —
+// по ранам, погибший — по летописи.
+std::string infectedClause(const World& world, EntityId id, bool f) {
+    const std::string name = firstName(world, id);
+    const InfectionRoute route = infectionRouteOf(world, id);
+    if (route == InfectionRoute::Bite || route == InfectionRoute::None) {
+        const std::uint64_t at = bittenAt(world, id);
+        std::string line = name + " укусили";
+        if (at != 0) {
+            line += " " + agoLower(at, world.tick());
+        }
+        return line;
+    }
+    if (route == InfectionRoute::Origin) {
+        return isPatientZero(world, id) ? name + fill(" {заболел первым|заболела первой}", f)
+                                        : name + fill(" {заразился|заразилась} неизвестно где", f);
+    }
+    std::string line = name + fill(" {заразился|заразилась}", f);
+    const entt::entity entity = entityOf(world, id);
+    if (const auto* wounds = entity != entt::null ? world.registry().try_get<Wounds>(entity) : nullptr) {
+        line += " " + agoLower(wounds->infectedAt, world.tick());
+        if (named(world, wounds->infectedBy)) {
+            line += " от " + firstName(world, wounds->infectedBy);
+        }
+    }
+    return line;
+}
+
 std::string agoLower(std::uint64_t then, std::uint64_t now) {
     std::string text = agoPhrase(then, now);
     // Только свои слова: первая буква — кириллица из двух байт.
@@ -495,6 +527,7 @@ constexpr std::uint8_t kBitten = 1;
 constexpr std::uint8_t kFever = 2;
 constexpr std::uint8_t kBleeding = 4;
 constexpr std::uint8_t kDying = 8;
+constexpr std::uint8_t kInfected = 16; // заразился от больного (этап 7.5)
 
 // Местоимения «который» в нужном падеже и роде.
 const char* whoAcc(bool f) { return f ? "которую" : "которого"; }   // винительный
@@ -687,14 +720,31 @@ std::string introduction(const World& world, EntityId id) {
         }
     }
 
-    // Укус — главное, что о нём надо знать.
-    if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && wounds->infection > 0.0f) {
-        const std::uint64_t at = bittenAt(world, id);
-        std::string line = fill("{Укушен|Укушена}", f);
-        if (at != 0) {
-            line += " " + agoLower(at, world.tick());
+    // Заражение — главное, что о нём надо знать: укус или больной рядом (этап 7.5).
+    if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
+        const bool fever = isFeverish(*wounds);
+        std::string line;
+        if (wounds->bites > 0) {
+            const std::uint64_t at = bittenAt(world, id);
+            line = fill("{Укушен|Укушена}", f);
+            if (at != 0) {
+                line += " " + agoLower(at, world.tick());
+            }
+            line += fever ? " — и жар уже поднимается." : ". Пока никто не знает.";
+        } else if (wounds->route == InfectionRoute::Origin) {
+            line = isPatientZero(world, id)
+                       ? "Болен{|а} — первым из всех, и где подхватил{|а} заразу, не знает никто"
+                       : "Болен{|а} — и где подхватил{|а} заразу, не знает никто";
+            line += fever ? ". Жар уже поднимается." : ", даже {он|она} сам{|а}.";
+            line = fill(line, f);
+        } else {
+            line = fill("{Заразился|Заразилась} ", f) + agoLower(wounds->infectedAt, world.tick());
+            if (named(world, wounds->infectedBy)) {
+                line += " от " + firstName(world, wounds->infectedBy);
+            }
+            line += fever ? " — и жар уже поднимается." : " — и ещё не знает об этом.";
         }
-        sentences.push_back(line + (wounds->infection >= 0.5f ? " — и жар уже поднимается." : ". Пока никто не знает."));
+        sentences.push_back(line);
     }
 
     std::string text;
@@ -773,14 +823,13 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
         case ForesightKind::Turning: {
             const entt::entity body = entityOf(world, hero);
             if (body != entt::null && registry.all_of<Corpse>(body)) {
-                return name + fill(" {умер|умерла} от укуса. Но это ещё не конец.", hf);
+                // Укус или болезнь (этап 7.5).
+                return infectionRouteOf(world, hero) == InfectionRoute::Bite
+                           ? name + fill(" {умер|умерла} от укуса. Но это ещё не конец.", hf)
+                           : name + fill(" {сгорел|сгорела} в жару. Но это ещё не конец.", hf);
             }
-            const std::uint64_t at = bittenAt(world, hero);
-            std::string line = name + " укусили";
-            if (at != 0) {
-                line += " " + agoLower(at, world.tick());
-            }
-            return line + ". Жар поднимается, а вокруг — люди, которые ничего не знают.";
+            return infectedClause(world, hero, hf) +
+                   ". Жар поднимается, а вокруг — люди, которые ничего не знают.";
         }
         case ForesightKind::CacheRace:
             if (named(world, omen->other)) {
@@ -831,12 +880,8 @@ std::string motive(const World& world, const Story* story, const Foresight* omen
             if (!alivePerson(world, story->hero)) {
                 break;
             }
-            const std::uint64_t at = bittenAt(world, story->hero);
-            std::string line = name + " укусили";
-            if (at != 0) {
-                line += " " + agoLower(at, world.tick());
-            }
-            return line + fill(". Сколько {ему} осталось — не знает никто.", hf);
+            return infectedClause(world, story->hero, hf) +
+                   fill(". Сколько {ему} осталось — не знает никто.", hf);
         }
         case StoryKind::Salvage:
             return "Где-то упал груз, и " + name + " знает, где.";
@@ -1105,10 +1150,10 @@ std::uint8_t Narrator::conditionOf(const World& world, EntityId id) {
     }
     std::uint8_t bits = 0;
     if (const auto* wounds = world.registry().try_get<Wounds>(entity)) {
-        if (wounds->infection > 0.0f) {
-            bits |= kBitten;
+        if (isInfected(*wounds)) {
+            bits |= wounds->bites > 0 ? kBitten : kInfected;
         }
-        if (wounds->infection >= 0.5f) {
+        if (isFeverish(*wounds)) {
             bits |= kFever;
         }
         if (wounds->bleeding > 0.0f) {
@@ -1164,6 +1209,8 @@ void Narrator::update(const World& world, EntityId subject, float dt, bool visib
             say("У " + name + " начинается жар. Времени всё меньше.");
         } else if ((fresh & kBitten) != 0) {
             say("Зубы всё-таки достали " + name + ".");
+        } else if ((fresh & kInfected) != 0) {
+            say(name + fill(" {заразился|заразилась}. Пока об этом не знает никто — даже {он|она} сам{|а}.", f));
         }
         if ((fresh & kDying) != 0) {
             say(name + " при смерти. Каждый вдох даётся с трудом.");

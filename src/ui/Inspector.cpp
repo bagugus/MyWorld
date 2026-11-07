@@ -6,6 +6,7 @@
 #include "sim/Map.h"
 #include "sim/Perception.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Names.h"
 #include "sim/Relations.h"
 #include "sim/Scenario.h"
@@ -77,6 +78,12 @@ constexpr Color kGroupLeaderColor = {190, 255, 250, 255};
 // Ивенты (этап 7.1): место, грузы, кто туда идёт; у человека — вести.
 constexpr Color kEventColor = {255, 120, 100, 230};
 constexpr Color kLeadColor = {255, 170, 90, 170};
+// Заражение (этап 7.5): скрытый период, лихорадка, нулевой пациент, цепочка
+// «кто от кого».
+constexpr Color kLatentColor = {190, 230, 120, 200};
+constexpr Color kFeverColor = {255, 140, 60, 230};
+constexpr Color kPatientZeroColor = {255, 255, 140, 255};
+constexpr Color kContagionColor = {190, 120, 255, 220};
 
 // Позиция, в которой сущность сейчас нарисована: между началом тика и текущей
 // (как в WorldRenderer).
@@ -293,6 +300,24 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
         }
         return;
     }
+    if (const auto* scenario = registry.try_get<Scenario>(entity)) {
+        // Вспышка (этап 7.5): кольцо у каждого заражённого — бледное в скрытый
+        // период, оранжевое в лихорадке; нулевой пациент — ещё одно, яркое.
+        const float radius = std::max(1.2f, 6.0f * px);
+        for (const auto [other, person, wounds] : registry.view<const Person, const Wounds>().each()) {
+            if (isInfected(wounds)) {
+                DrawRing(drawnPosition(registry, other, alpha), radius, radius + line, 0.0f, 360.0f, 24,
+                         isFeverish(wounds) ? kFeverColor : kLatentColor);
+            }
+        }
+        if (const entt::entity zero = world_.find(scenario->patientZero);
+            zero != entt::null && registry.all_of<Position>(zero)) {
+            const float outer = radius + 3.0f * line;
+            DrawRing(drawnPosition(registry, zero, alpha), outer, outer + line, 0.0f, 360.0f, 32,
+                     kPatientZeroColor);
+        }
+        return;
+    }
     if (!registry.all_of<Position>(entity)) {
         return;
     }
@@ -384,6 +409,26 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
                 registry.all_of<Person>(other) && kinOf(registry, entity, bond.other) == KinKind::Count) {
                 DrawLineEx(at, drawnPosition(registry, other, alpha), line,
                            bond.hostile() ? kFoeColor : kFriendColor);
+            }
+        }
+    }
+    // Цепочка заражения (этап 7.5): от кого заразился и кого заразил сам —
+    // кто из них ещё в мире (живой, тело или зомби).
+    {
+        const auto chain = [&](EntityId other) {
+            const entt::entity link = world_.find(other);
+            if (link != entt::null && link != entity && registry.all_of<Position>(link)) {
+                DrawLineEx(at, drawnPosition(registry, link, alpha), line, kContagionColor);
+            }
+        };
+        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
+            chain(wounds->infectedBy);
+        }
+        const auto& events = world_.chronicle().events();
+        for (const std::uint32_t index : world_.chronicle().eventsOf(selected_)) {
+            const ChronicleEvent& event = events[index];
+            if (event.kind == ChronicleKind::Infected && event.object == selected_) {
+                chain(event.subject);
             }
         }
     }
@@ -708,8 +753,44 @@ void Inspector::drawPerson(entt::entity entity) {
         if (wounds->bites > 0) {
             ImGui::TextColored({1.0f, 0.4f, 0.35f, 1.0f}, "Укушен: %d раз", wounds->bites);
         }
-        if (wounds->infection > 0.0f) {
+        if (isInfected(*wounds)) {
             meter("Заражение", wounds->infection);
+            // Как, от кого и когда (этап 7.5) — зритель знает, сам больной нет.
+            char ago[32];
+            formatGameDuration(ago, sizeof(ago), world_.tick() - wounds->infectedAt);
+            ImGui::Text("Заразился: %s, %s назад", infectionRouteText(wounds->route), ago);
+            if (wounds->infectedBy != kInvalidId && wounds->route != InfectionRoute::Origin) {
+                ImGui::SameLine();
+                ImGui::TextUnformatted("от");
+                ImGui::SameLine();
+                if (idLink(wounds->infectedBy)) {
+                    select(wounds->infectedBy);
+                    return;
+                }
+            }
+            char left[32];
+            if (!isFeverish(*wounds)) {
+                formatGameDuration(left, sizeof(left),
+                                   static_cast<std::uint64_t>(hoursToFever(*wounds) * kTicksPerGameHour));
+                ImGui::Text("Скрытый период: жар через ~%s", left);
+            } else {
+                formatGameDuration(left, sizeof(left),
+                                   static_cast<std::uint64_t>(hoursToEnd(*wounds) * kTicksPerGameHour));
+                ImGui::TextColored({1.0f, 0.55f, 0.25f, 1.0f}, "Лихорадка: до конца ~%s", left);
+            }
+            if (const float shedding = contagiousness(*wounds); shedding > 0.0f) {
+                ImGui::TextColored({0.7f, 0.95f, 0.35f, 1.0f}, "Заразен%s",
+                                   shedding < 1.0f ? " (слабо)" : "");
+            }
+        }
+        // Кого заразил сам (по летописи).
+        int spread = 0;
+        const auto& events = world_.chronicle().events();
+        for (const std::uint32_t index : world_.chronicle().eventsOf(selected_)) {
+            spread += events[index].kind == ChronicleKind::Infected && events[index].object == selected_ ? 1 : 0;
+        }
+        if (spread > 0) {
+            ImGui::Text("Заразил сам: %d", spread);
         }
     }
 
@@ -1558,9 +1639,22 @@ void Inspector::drawScenario(entt::entity entity) {
     const ScenarioStats stats = scenarioStats(world_);
     ImGui::SeparatorText("Беда в цифрах");
     ImGui::Text("Людей к началу вспышки: %d, живы: %d", stats.population, stats.alive);
-    ImGui::Text("Погибли и обратились: %d, заражены: %d", stats.lost, stats.infected);
-    ImGui::Text("Зомби: %d; приток держит %d, орда %d раз в сутки", stats.zombies,
-                zombieTarget(world_), arrivalsPerDay(world_));
+    ImGui::Text("Погибли и обратились: %d", stats.lost);
+    ImGui::Text("Заражены: %d, из них заметно больны: %d", stats.infected, stats.sick);
+    // Нулевой пациент (этап 7.5): с кого всё началось.
+    if (scenario.patientZero != kInvalidId) {
+        ImGui::TextUnformatted("Нулевой пациент:");
+        ImGui::SameLine();
+        if (idLink(scenario.patientZero)) {
+            select(scenario.patientZero);
+            return;
+        }
+    }
+    ImGui::Text("Заражений от больных: %zu, укусов: %zu", world_.chronicle().countOf(ChronicleKind::Infected),
+                world_.chronicle().countOf(ChronicleKind::Bitten));
+    ImGui::Text("Зомби: %d, из них бывших жителей: %d", stats.zombies, stats.residents);
+    ImGui::Text("Приток издалека держит %d, орда %d раз в сутки", zombieTarget(world_),
+                arrivalsPerDay(world_));
     int onDuty = 0;
     int employed = 0;
     for (const auto [other, person, job] : registry.view<const Person, const Job>().each()) {
