@@ -866,17 +866,37 @@ void drawEventsPanel(const World& world, SimDriver& driver, Inspector& inspector
         ImGui::TextWrapped("По расписанию (пока нет рассказчика): в среднем %.1f в сутки, днём",
                            kEventsPerDay);
     } else {
-        ImGui::TextDisabled("Расписание выключено");
+        ImGui::TextDisabled("Временное расписание выключено");
     }
-    ImGui::TextUnformatted("Сбросить груз:");
-    ImGui::SameLine();
-    if (ImGui::Button("где выберет мир")) {
-        driver.requestEvent(EventKind::SupplyDrop);
+    if (world.config().phaseEvents && scenarioOf(world) != nullptr) {
+        // Этап 7.7: частоты ивентов в нынешней фазе.
+        const PhaseRules& rules = rulesOf(world);
+        float total = 0.0f;
+        for (const float rate : rules.eventsPerDay) {
+            total += rate;
+        }
+        if (total > 0.0f) {
+            ImGui::TextWrapped("По фазе «%s», в сутки: груз %.2f, вертолёт %.2f, конвой %.2f",
+                               phaseName(worldPhase(world)), rules.eventsPerDay[0], rules.eventsPerDay[1],
+                               rules.eventsPerDay[2]);
+        } else {
+            ImGui::TextDisabled("В фазе «%s» ивентов нет", phaseName(worldPhase(world)));
+        }
     }
-    ImGui::SameLine();
-    if (ImGui::Button("у центра экрана")) {
-        const Vector2 center = camera.focus();
-        driver.requestEvent(EventKind::SupplyDrop, world.map().clampedCellAt(center.x, center.y));
+    for (std::size_t i = 0; i < kEventKinds; ++i) {
+        const auto kind = static_cast<EventKind>(i);
+        ImGui::PushID(static_cast<int>(i));
+        ImGui::Text("%s:", eventKindName(kind));
+        ImGui::SameLine();
+        if (ImGui::Button("где выберет мир")) {
+            driver.requestEvent(kind);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("у центра экрана")) {
+            const Vector2 center = camera.focus();
+            driver.requestEvent(kind, world.map().clampedCellAt(center.x, center.y));
+        }
+        ImGui::PopID();
     }
 
     std::vector<std::pair<EntityId, const WorldEvent*>> events;

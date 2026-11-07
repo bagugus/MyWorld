@@ -123,6 +123,8 @@ const char* causePhrase(DeathCause cause) {
         return " от изнеможения";
     case DeathCause::Infection:
         return " от заражения";
+    case DeathCause::Crash:
+        return " при крушении";
     default:
         return "";
     }

@@ -3,8 +3,14 @@
 #include "sim/Components.h"
 #include "sim/TimeScale.h"
 
+#include <entt/entt.hpp>
+
+#include <string>
+#include <unordered_set>
+
 namespace lw {
 
+class Rng;
 class World;
 
 // Реакция общества (этап 7.6): правила — sim/Society.h, подробности и числа —
@@ -34,5 +40,16 @@ void onPhaseBegan(World& world, WorldPhase phase);
 // родитель без своих детей не уезжает. last — последняя колонна (армия уходит).
 // Возвращает, скольких увезли.
 int departConvoy(World& world, EntityId point, bool last = false);
+
+// Полные имена всех, у кого есть имя, — чтобы новое имя не повторилось.
+std::unordered_set<std::string> takenNames(const World& world);
+
+// Солдат, пришедший извне (этап 7.6): смелее среднего, с винтовкой и
+// патронами, пайком и бинтами, знает о беде. Живёт и служит в здании point
+// (пункт эвакуации), появляется у door; смена — днём каждый день. Летопись —
+// Settled. Ивенты этапа 7.7 (экипаж) меняют ему дом и снимают смены.
+// Имя — не из taken (и добавляется туда). Возвращает сущность.
+entt::entity spawnSoldier(World& world, EntityId point, Cell door, Rng& rng,
+                          std::unordered_set<std::string>& taken);
 
 } // namespace lw

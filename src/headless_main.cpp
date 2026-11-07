@@ -11,6 +11,8 @@
 //   lw_headless --seed 42 --ticks 720000 --events         и журнал ивентов (этап 7)
 //   lw_headless --seed 42 --event drop 3                 один сброс груза через 3 ч
 //   lw_headless --seed 42 --event-schedule               временное расписание ивентов (до рассказчика)
+//   lw_headless --seed 42 --event crash 3                крушение вертолёта через 3 ч (convoy — конвой)
+//   lw_headless --seed 42 --no-events                    без ивентов по фазам сценария (этап 7.7)
 //   lw_headless --seed 42 --outbreak 3 --daily           вспышка на 4-е сутки (0 — не по расписанию)
 //   lw_headless --seed 42 --phase collapse               сразу в фазу коллапса (этап 7.4)
 //   lw_headless --seed 42 --phase panic --stories        и сюжетные линии из летописи (этап 12а)
@@ -749,7 +751,7 @@ void printCombat(const lw::World& world) {
     }
     // Погибшие люди по причинам — по летописи: тела со временем исчезают.
     constexpr const char* kCauses[] = {"wounds", "bleeding", "starvation", "dehydration",
-                                       "exhaustion", "infection"};
+                                       "exhaustion", "infection", "crash"};
     static_assert(std::size(kCauses) == static_cast<std::size_t>(lw::DeathCause::Count));
     std::size_t causes[std::size(kCauses)] = {};
     for (const lw::ChronicleEvent& event : world.chronicle().events()) {
@@ -1783,6 +1785,8 @@ int main(int argc, char** argv) {
             castLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
             config.events = true;
+        } else if (std::strcmp(argv[i], "--no-events") == 0) {
+            config.phaseEvents = false;
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
             config.peacetime = false;
         } else if (std::strcmp(argv[i], "--outbreak") == 0 && hasValue) {
@@ -1804,7 +1808,8 @@ int main(int argc, char** argv) {
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
-                        "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
+                        "[--social] [--events] [--event-schedule] [--no-events] "
+                        "[--event drop|crash|convoy HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
                         "[--stories] [--foresight] [--cast] [--families] [--infections] [--society] "
                         "[--profile]\n");

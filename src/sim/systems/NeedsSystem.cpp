@@ -231,7 +231,8 @@ void updateNeeds(World& world, float minutes) {
         if (const auto* awareness = registry.try_get<Awareness>(entity)) {
             for (std::size_t i = 0; i < awareness->count; ++i) {
                 const Contact& contact = awareness->contacts[i];
-                if (contact.heard == SoundKind::Gunshot && isFresh(contact, world.tick())) {
+                if ((contact.heard == SoundKind::Gunshot || contact.heard == SoundKind::Explosion) &&
+                    isFresh(contact, world.tick())) {
                     fearTarget += kGunshotFear * timidity;
                     break;
                 }

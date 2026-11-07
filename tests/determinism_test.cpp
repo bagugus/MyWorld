@@ -7500,6 +7500,134 @@ void testCordon() {
     CHECK(boldOpen > 0.0f && boldWith / boldOpen > obedient / open + 0.01f);
 }
 
+// --- Ивенты по фазам (этап 7.7) -------------------------------------------------
+
+// Экипаж ивента: каждый в летописи; выживший — раненый человек с домом, без
+// смен, знает о месте; погибший — тело, укушенный встанет.
+void checkCrew(const lw::World& world, lw::EntityId event, int crewMin, int crewMax, lw::DeathCause cause) {
+    const entt::registry& registry = world.registry();
+    int crew = 0;
+    for (const lw::ChronicleEvent& record : world.chronicle().events()) {
+        if (record.kind != lw::ChronicleKind::EventCrew || record.object != event) {
+            continue;
+        }
+        ++crew;
+        const entt::entity soldier = world.find(record.subject);
+        CHECK(soldier != entt::null);
+        if (soldier == entt::null) {
+            continue;
+        }
+        const lw::Job& job = registry.get<lw::Job>(soldier);
+        CHECK(job.profession == lw::Profession::Soldier && job.days == 0);
+        if (record.a == 1) {
+            const lw::Person* person = registry.try_get<lw::Person>(soldier);
+            CHECK(person != nullptr && person->home != lw::kInvalidId && job.workplace == person->home);
+            CHECK(registry.get<lw::Wounds>(soldier).bleeding > 0.0f);
+            CHECK(registry.get<lw::Leads>(soldier).find(event) != nullptr);
+            CHECK(lw::isInfected(registry.get<lw::Wounds>(soldier)) == (record.b == 1));
+        } else {
+            const lw::Corpse* corpse = registry.try_get<lw::Corpse>(soldier);
+            CHECK(corpse != nullptr && corpse->cause == cause);
+            CHECK(corpse != nullptr && (corpse->turnsAt != 0) == (record.b == 1));
+            CHECK(registry.all_of<lw::Weapon>(soldier)); // винтовка осталась при теле
+        }
+    }
+    CHECK(crew >= crewMin && crew <= crewMax);
+}
+
+// Крушение вертолёта и застрявший конвой: место по виду (вертолёт — не на воде
+// и не на дороге, колонна — на дороге, грузовики тоже), экипаж, зомби у
+// колонны; один seed — один и тот же ивент.
+void testMilitaryEvents() {
+    lw::World a(7, regionConfig());
+    lw::World b(7, regionConfig());
+    const lw::EntityId crash = lw::startEvent(a, lw::EventKind::HelicopterCrash);
+    CHECK(crash != lw::kInvalidId && lw::startEvent(b, lw::EventKind::HelicopterCrash) == crash);
+    CHECK(a.stateHash() == b.stateHash());
+    const entt::registry& registry = a.registry();
+    const lw::Map& map = a.map();
+    if (const entt::entity entity = a.find(crash); entity != entt::null) {
+        const lw::WorldEvent& event = registry.get<lw::WorldEvent>(entity);
+        CHECK(event.kind == lw::EventKind::HelicopterCrash && event.caches.size() == 1);
+        CHECK(map.water.at(event.site.x, event.site.y) == lw::Water::None &&
+              map.road.at(event.site.x, event.site.y) == lw::Road::None);
+        checkCrew(a, crash, 2, 3, lw::DeathCause::Crash);
+    }
+
+    const std::size_t zombiesBefore = registry.view<const lw::Zombie>().size();
+    const lw::EntityId convoy = lw::startEvent(a, lw::EventKind::MilitaryConvoy);
+    CHECK(convoy != lw::kInvalidId && lw::startEvent(b, lw::EventKind::MilitaryConvoy) == convoy);
+    CHECK(a.stateHash() == b.stateHash());
+    if (const entt::entity entity = a.find(convoy); entity != entt::null) {
+        const lw::WorldEvent& event = registry.get<lw::WorldEvent>(entity);
+        CHECK(event.caches.size() >= 2 && event.caches.size() <= 3);
+        for (const lw::EntityId cache : event.caches) {
+            const lw::Position& at = registry.get<lw::Position>(a.find(cache));
+            const lw::Cell cell = lw::Map::cellAt(at.x, at.y);
+            CHECK(map.road.at(cell.x, cell.y) != lw::Road::None);
+            CHECK(registry.get<lw::Inventory>(a.find(cache)).count(lw::ItemKind::Food) >= 15);
+        }
+        checkCrew(a, convoy, 3, 5, lw::DeathCause::Wounds);
+        const std::size_t zombies = registry.view<const lw::Zombie>().size() - zombiesBefore;
+        CHECK(zombies >= 5 && zombies <= 10);
+    }
+    // Мир живёт дальше: укушенные погибшие встают, всё детерминировано.
+    runMinutes(a, 60);
+    runMinutes(b, 60);
+    CHECK(a.stateHash() == b.stateHash());
+}
+
+// Ивенты по фазам: в мирное время и во вспышке их нет, с паники — есть;
+// гуманитарный груз тянется к поселению на карантине; расписание фазы
+// выключается флажком.
+void testPhaseEvents() {
+    const auto total = [](lw::WorldPhase phase) {
+        float sum = 0.0f;
+        for (const float rate : lw::phaseRules(phase).eventsPerDay) {
+            sum += rate;
+        }
+        return sum;
+    };
+    CHECK(total(lw::WorldPhase::Peace) == 0.0f && total(lw::WorldPhase::Outbreak) == 0.0f);
+    CHECK(total(lw::WorldPhase::Panic) > 0.0f && total(lw::WorldPhase::Collapse) > 0.0f &&
+          total(lw::WorldPhase::Survival) > 0.0f);
+    CHECK(lw::phaseRules(lw::WorldPhase::Panic).eventsPerDay[static_cast<std::size_t>(lw::EventKind::SupplyDrop)] >
+          lw::phaseRules(lw::WorldPhase::Panic).eventsPerDay[static_cast<std::size_t>(lw::EventKind::HelicopterCrash)]);
+
+    // Коллапс на несколько суток: ивенты идут сами; без флажка — нет.
+    lw::World world(7, peaceConfig(0));
+    lw::WorldConfig off = peaceConfig(0);
+    off.phaseEvents = false;
+    lw::World quiet(7, off);
+    lw::enterPhase(world, lw::WorldPhase::Collapse);
+    lw::enterPhase(quiet, lw::WorldPhase::Collapse);
+    runMinutes(world, 4 * 24 * 60);
+    runMinutes(quiet, 4 * 24 * 60);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::EventBegan) > 0);
+    CHECK(quiet.chronicle().countOf(lw::ChronicleKind::EventBegan) == 0);
+
+    // Поселение на карантине: гуманитарный груз чаще падает у него.
+    lw::World aid(7, regionConfig());
+    entt::registry& registry = aid.registry();
+    const lw::Places::SettlementPlace& place = aid.places().settlements().front();
+    const entt::entity settlement = aid.find(place.id);
+    registry.emplace<lw::Quarantine>(settlement);
+    const lw::Settlement& info = registry.get<lw::Settlement>(settlement);
+    const float edge = static_cast<float>(info.radius) * lw::Map::kCellSize;
+    lw::Rng rng(11);
+    int near = 0;
+    constexpr int kTries = 40;
+    for (int i = 0; i < kTries; ++i) {
+        const std::optional<lw::Cell> site = lw::pickEventSite(aid, lw::EventKind::SupplyDrop, rng);
+        CHECK(site.has_value());
+        if (site) {
+            const float d = std::hypot(lw::Map::cellCenter(site->x) - place.x, lw::Map::cellCenter(site->y) - place.y);
+            near += d <= edge + 800.0f + 2.0f * lw::Map::kCellSize ? 1 : 0;
+        }
+    }
+    CHECK(near >= kTries / 3);
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -7645,6 +7773,8 @@ int main() {
     testEvacuation();
     testReunite();
     testCordon();
+    testMilitaryEvents();
+    testPhaseEvents();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

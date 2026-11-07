@@ -109,7 +109,7 @@ const char* actionName(Action action) {
 
 const char* soundName(SoundKind kind) {
     constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы", "выстрел", "крик",
-                                      "гул самолёта"};
+                                      "гул самолёта", "взрыв"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(SoundKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -146,7 +146,8 @@ const char* weaponName(WeaponKind kind) {
 
 const char* deathCauseName(DeathCause cause) {
     constexpr const char* kNames[] = {"убит в схватке", "истёк кровью",   "умер от голода",
-                                      "умер от жажды",  "умер от изнеможения", "сгорел от заражения"};
+                                      "умер от жажды",  "умер от изнеможения", "сгорел от заражения",
+                                      "разбился при крушении"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(DeathCause::Count));
     const auto index = static_cast<std::size_t>(cause);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -179,7 +180,7 @@ const char* memoryKindName(MemoryKind kind) {
 }
 
 const char* eventKindName(EventKind kind) {
-    constexpr const char* kNames[] = {"падение припасов"};
+    constexpr const char* kNames[] = {"падение припасов", "крушение вертолёта", "застрявший конвой"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(EventKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
