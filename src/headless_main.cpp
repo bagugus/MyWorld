@@ -17,12 +17,14 @@
 //   lw_headless --seed 42 --phase panic --foresight      что предвиделось и сбылось ли (этап 12а.2)
 //   lw_headless --seed 42 --phase panic --cast           главные герои: кто, когда и через кого (этап 12а.3)
 //   lw_headless --seed 42 --ticks 0 --families           семьи: дома, родня, сироты, прошлое (этап 7.3)
+//   lw_headless --seed 42 --outbreak 1 --ticks 1440000 --infections   вспышка: кто от кого заразился (этап 7.5)
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Events.h"
 #include "sim/Family.h"
 #include "sim/Cast.h"
+#include "sim/Infection.h"
 #include "sim/Foresight.h"
 #include "sim/Names.h"
 #include "sim/Perception.h"
@@ -48,6 +50,7 @@
 #include <iterator>
 #include <optional>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -1239,10 +1242,10 @@ void printScenario(const lw::World& world) {
     }
     std::printf("\n");
     const lw::ScenarioStats stats = lw::scenarioStats(world);
-    std::printf("  population %d, alive %d (infected %d), lost %d, casualties %d; zombies %d "
+    std::printf("  population %d, alive %d (infected %d, sick %d), lost %d, casualties %d; zombies %d "
                 "(target %d, arrivals %d a day)",
-                stats.population, stats.alive, stats.infected, stats.lost, stats.casualties(),
-                stats.zombies, lw::zombieTarget(world), lw::arrivalsPerDay(world));
+                stats.population, stats.alive, stats.infected, stats.sick, stats.lost,
+                stats.casualties(), stats.zombies, lw::zombieTarget(world), lw::arrivalsPerDay(world));
     if (const std::uint64_t deadline = lw::phaseDeadline(*scenario); deadline != lw::Scenario::kNever) {
         std::printf("; next phase by %s", dayTime(deadline).c_str());
         if (const int trigger = lw::phaseTrigger(*scenario); trigger > 0) {
@@ -1262,10 +1265,130 @@ void printScenario(const lw::World& world) {
                 left[static_cast<std::size_t>(lw::WorldPhase::Survival)]);
 }
 
+// Вспышка (этап 7.5): нулевой пациент, сколько заражений каким путём, поколения
+// «кто от кого» и сколько заразил в среднем каждый из поколения; с detailed —
+// каждое заражение по порядку.
+void printOutbreak(const lw::World& world, bool detailed) {
+    using K = lw::ChronicleKind;
+    const entt::registry& registry = world.registry();
+    const lw::Scenario* scenario = lw::scenarioOf(world);
+    constexpr auto kRoutes = static_cast<std::size_t>(lw::InfectionRoute::Count);
+    std::size_t routes[kRoutes] = {};
+    // Первое заражение каждого: поколение (нулевой пациент — 0; от зомби
+    // издалека — -1, его потомки в поколения не входят), от кого, сколько
+    // заразил сам.
+    struct Case {
+        int generation = -1;
+        lw::EntityId from = lw::kInvalidId;
+        int spread = 0;
+    };
+    std::unordered_map<lw::EntityId, Case> cases;
+    std::vector<const lw::ChronicleEvent*> order;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        if (event.kind != K::PatientZero && event.kind != K::Infected && event.kind != K::Bitten) {
+            continue;
+        }
+        if (cases.count(event.subject) != 0) {
+            continue; // укушен ещё раз — не новое заражение
+        }
+        Case infection;
+        lw::InfectionRoute route = lw::InfectionRoute::Origin;
+        if (event.kind == K::PatientZero) {
+            infection.generation = 0;
+        } else {
+            route = event.kind == K::Bitten ? lw::InfectionRoute::Bite
+                                            : static_cast<lw::InfectionRoute>(event.a);
+            infection.from = event.object;
+            if (const auto it = cases.find(event.object); it != cases.end()) {
+                ++it->second.spread;
+                if (it->second.generation >= 0) {
+                    infection.generation = it->second.generation + 1;
+                }
+            }
+        }
+        ++routes[static_cast<std::size_t>(route)];
+        cases.emplace(event.subject, infection);
+        order.push_back(&event);
+    }
+    if (scenario == nullptr && order.empty()) {
+        return;
+    }
+    if (scenario != nullptr && scenario->patientZero != lw::kInvalidId) {
+        std::printf("outbreak: patient zero %s, %s;", label(world, scenario->patientZero).c_str(),
+                    dayTime(scenario->began[static_cast<std::size_t>(lw::WorldPhase::Outbreak)]).c_str());
+    } else {
+        std::printf("outbreak: no patient zero;");
+    }
+    std::printf(" infections %zu:", order.size());
+    for (std::size_t i = 1; i < kRoutes; ++i) {
+        if (routes[i] > 0) {
+            std::printf(" %s %zu", lw::infectionRouteName(static_cast<lw::InfectionRoute>(i)), routes[i]);
+        }
+    }
+    const lw::ScenarioStats stats = lw::scenarioStats(world);
+    std::printf("; infected now %d (sick %d); turned %zu; zombies %d (residents %d)\n", stats.infected,
+                stats.sick, world.chronicle().countOf(K::Turned), stats.zombies, stats.residents);
+    // Поколения от нулевого пациента: сколько в каждом и сколько в среднем
+    // заразил каждый из них.
+    std::vector<int> size;
+    std::vector<int> spread;
+    for (const auto& [id, infection] : cases) {
+        if (infection.generation < 0) {
+            continue;
+        }
+        const auto g = static_cast<std::size_t>(infection.generation);
+        if (size.size() <= g) {
+            size.resize(g + 1, 0);
+            spread.resize(g + 1, 0);
+        }
+        ++size[g];
+        spread[g] += infection.spread;
+    }
+    if (!size.empty()) {
+        std::printf("  generations (count/spread each):");
+        for (std::size_t g = 0; g < size.size(); ++g) {
+            std::printf(" %zu:%d/%.1f", g, size[g],
+                        static_cast<double>(spread[g]) / static_cast<double>(std::max(size[g], 1)));
+        }
+        std::printf("\n");
+    }
+    // До скольких поселений дошло: где сейчас заразившиеся (живые, тела и
+    // зомби, кто ещё в мире), — у какого поселения.
+    std::vector<lw::EntityId> places;
+    for (const lw::ChronicleEvent* event : order) {
+        const entt::entity entity = world.find(event->subject);
+        if (const auto* at = entity != entt::null ? registry.try_get<lw::Position>(entity) : nullptr) {
+            places.push_back(world.places().nearestSettlement(at->x, at->y));
+        }
+    }
+    std::sort(places.begin(), places.end());
+    places.erase(std::unique(places.begin(), places.end()), places.end());
+    std::printf("  infected are near %zu of %zu settlements\n", places.size(),
+                registry.view<const lw::Settlement>().size());
+    if (!detailed) {
+        return;
+    }
+    std::printf("infections:\n");
+    for (const lw::ChronicleEvent* event : order) {
+        const Case& infection = cases.at(event->subject);
+        if (event->kind == K::PatientZero) {
+            std::printf("  %s  %s - patient zero\n", dayTime(event->tick).c_str(),
+                        label(world, event->subject).c_str());
+            continue;
+        }
+        const char* how = event->kind == K::Bitten
+                              ? "bite"
+                              : lw::infectionRouteName(static_cast<lw::InfectionRoute>(event->a));
+        std::printf("  %s  %s <- %s (%s), gen %d\n", dayTime(event->tick).c_str(),
+                    label(world, event->subject).c_str(), label(world, infection.from).c_str(), how,
+                    infection.generation);
+    }
+}
+
 void printDailyHeader() {
     std::printf("day season phase | people (hungry thirsty) | zombies hordes | animals | died: wounds "
                 "bleed starve thirst exhaust infect | turned killedZ hunted | food bld/carried "
-                "forest | ammo | bought money | workers shops\n");
+                "forest | ammo | bought money | workers shops | infected sick zres\n");
 }
 
 void printDaily(const lw::World& world) {
@@ -1318,8 +1441,9 @@ void printDaily(const lw::World& world) {
                      : 0;
     }
     const lw::Chronicle& chronicle = world.chronicle();
+    const lw::ScenarioStats stats = lw::scenarioStats(world);
     std::printf("%3d %d %-8s | %3zu (%3zu %3zu) | %3zu %2zu | %3zu | %3zu %3zu %3zu %3zu %3zu %3zu | "
-                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f | %3zu %3zu\n",
+                "%3zu %4zu %3zu | %5lld/%3lld %5lld | %4lld | %5zu %4.0f | %3zu %3zu | %3d %3d %3d\n",
                 time.day, static_cast<int>(time.season), lw::rulesOf(world).name, people, hungry,
                 thirsty,
                 registry.view<const lw::Zombie>().size(), registry.view<const lw::Horde>().size(),
@@ -1329,7 +1453,7 @@ void printDaily(const lw::World& world) {
                 chronicle.countOf(lw::ChronicleKind::Hunted), food, carried,
                 world.resources().forestTotal(), ammo, chronicle.countOf(lw::ChronicleKind::Bought),
                 people > 0 ? static_cast<double>(money) / static_cast<double>(people) : 0.0, onDuty,
-                shops);
+                shops, stats.infected, stats.sick, stats.residents);
     std::fflush(stdout);
 }
 
@@ -1500,6 +1624,7 @@ int main(int argc, char** argv) {
     bool foresightLog = false;
     bool castLog = false;
     bool familyLog = false;
+    bool infectionLog = false;
     // Ивент вручную: вид и через сколько игровых часов.
     std::optional<lw::EventKind> manualEvent;
     double manualHour = 0.0;
@@ -1533,6 +1658,8 @@ int main(int argc, char** argv) {
             foresightLog = true;
         } else if (std::strcmp(argv[i], "--families") == 0) {
             familyLog = true;
+        } else if (std::strcmp(argv[i], "--infections") == 0) {
+            infectionLog = true;
         } else if (std::strcmp(argv[i], "--cast") == 0) {
             castLog = true;
         } else if (std::strcmp(argv[i], "--event-schedule") == 0) {
@@ -1560,7 +1687,7 @@ int main(int argc, char** argv) {
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
                         "[--social] [--events] [--event-schedule] [--event drop HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
-                        "[--stories] [--foresight] [--cast] [--families] [--profile]\n");
+                        "[--stories] [--foresight] [--cast] [--families] [--infections] [--profile]\n");
             return 2;
         }
     }
@@ -1614,6 +1741,7 @@ int main(int argc, char** argv) {
                 static_cast<unsigned long long>(world.stateHash()));
     printWeather(world);
     printScenario(world);
+    printOutbreak(world, infectionLog);
     printPeople(world);
     printWork(world);
     printRelations(world);

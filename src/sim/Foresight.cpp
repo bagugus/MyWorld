@@ -2,6 +2,7 @@
 
 #include "sim/Components.h"
 #include "sim/Death.h"
+#include "sim/Infection.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 
@@ -23,7 +24,7 @@ constexpr float kHorizon = 1800.0f;
 // Обращение предвидится с лихорадки (половина заражения) — до него не больше
 // 15 игровых часов.
 constexpr float kTurningFrom = 0.5f;
-// Люди ближе этого к укушенному — под угрозой, когда он встанет.
+// Люди ближе этого к заражённому — под угрозой, когда он встанет.
 constexpr float kTurningCrowd = 25.0f;
 // Медленнее этого никто не идёт: стоящий тоже когда-нибудь дойдёт.
 constexpr float kMinSpeed = 0.3f;
@@ -271,7 +272,7 @@ void foreseeRaids(const World& world, std::vector<Foresight>& out) {
     }
 }
 
-// Укушенный в лихорадке среди людей; тело укушенного, которое вот-вот встанет.
+// Заражённый в лихорадке среди людей; тело заражённого, которое вот-вот встанет.
 void foreseeTurning(const World& world, std::vector<Foresight>& out) {
     const entt::registry& registry = world.registry();
     const float mid = 0.5f * static_cast<float>(kTurnMinMinutes + kTurnMaxMinutes) *
@@ -294,8 +295,7 @@ void foreseeTurning(const World& world, std::vector<Foresight>& out) {
     for (const auto [entity, id, wounds, position] :
          registry.view<const Id, const Wounds, const Position>().each()) {
         if (wounds.infection >= kTurningFrom && registry.all_of<Person>(entity)) {
-            add(id.value, position,
-                (1.0f - wounds.infection) * kInfectionHours * kGameHourSeconds + mid);
+            add(id.value, position, hoursToEnd(wounds) * kGameHourSeconds + mid);
         }
     }
     const std::uint64_t now = world.tick();

@@ -4,6 +4,7 @@
 
 #include "sim/Components.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
 
@@ -138,6 +139,14 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
                            : registry.all_of<Age>(entity) && isMinor(registry, entity) ? radius * 0.7f
                                                                                        : radius;
         DrawCircleV(at, size, creatureColor(registry, entity));
+        // Больной в лихорадке (этап 7.5) — оранжевым кольцом: это видно и
+        // соседям. Скрытый период на карте не виден — его показывает инспектор
+        // сценария.
+        if (const auto* wounds = registry.try_get<Wounds>(entity);
+            wounds != nullptr && registry.all_of<Person>(entity) && isFeverish(*wounds)) {
+            const float ring = std::max(0.25f, 1.5f / zoom);
+            DrawRing(at, size + 0.5f * ring, size + 1.5f * ring, 0.0f, 360.0f, 20, kFeverRingColor);
+        }
     }
 }
 

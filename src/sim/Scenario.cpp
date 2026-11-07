@@ -1,6 +1,8 @@
 #include "sim/Scenario.h"
 
 #include "sim/Calendar.h"
+#include "sim/Infection.h"
+#include "sim/Names.h"
 #include "sim/Work.h"
 #include "sim/World.h"
 
@@ -27,12 +29,11 @@ constexpr PhaseRules kRules[] = {
     {.name = "peace",
      .professions = kEveryone,
      .eveningHome = 0.2f},
-    // Вспышка: правила мирные — никто ещё не понимает, что происходит.
+    // Вспышка: правила мирные — никто ещё не понимает, что происходит. Зомби
+    // — только свои: нулевой пациент и те, кого он заразил (этап 7.5).
     {.name = "outbreak",
      .professions = kEveryone,
      .eveningHome = 0.2f,
-     .zombieShare = 0.03f,
-     .arrivals = 1,
      .minHours = 12,
      .maxHours = 72,
      .trigger = 0.01f,
@@ -46,15 +47,14 @@ constexpr PhaseRules kRules[] = {
      .eveningHome = 0.35f,
      .stockpile = 2.5f,
      .groups = true,
-     .zombieShare = 0.1f,
-     .arrivals = 2,
      .minHours = 24,
      .maxHours = 96,
      .trigger = 0.1f,
      .triggerMin = 8},
     // Коллапс: власть кончилась — ни завоза, ни денег, ни воды; в больнице и
     // на улицах остались самые стойкие врачи и полицейские. Кража — уже не
-    // преступление, а то, что делают все.
+    // преступление, а то, что делают все. Беда пришла и к соседям: издалека
+    // забредают зомби.
     {.name = "collapse",
      .supply = 0.0f,
      .economy = false,
@@ -63,8 +63,8 @@ constexpr PhaseRules kRules[] = {
      .dutyNeeded = 0.7f,
      .lawful = false,
      .groups = true,
-     .zombieShare = 0.4f,
-     .arrivals = 4,
+     .zombieShare = 0.15f,
+     .arrivals = 1,
      .minHours = 72,
      .maxHours = 72},
     // Выживание: на работу не ходит никто, каждый сам за себя или со своими.
@@ -74,8 +74,8 @@ constexpr PhaseRules kRules[] = {
      .tapWater = false,
      .lawful = false,
      .groups = true,
-     .zombieShare = 1.0f,
-     .arrivals = 4},
+     .zombieShare = 0.4f,
+     .arrivals = 2},
 };
 static_assert(std::size(kRules) == kWorldPhases);
 
@@ -130,6 +130,11 @@ EntityId scenarioIdOf(const World& world) {
         }
     }
     return found;
+}
+
+bool isPatientZero(const World& world, EntityId id) {
+    const Scenario* scenario = scenarioOf(world);
+    return scenario != nullptr && id != kInvalidId && scenario->patientZero == id;
 }
 
 WorldPhase worldPhase(const World& world) {
@@ -234,10 +239,15 @@ ScenarioStats scenarioStats(const World& world) {
     ScenarioStats stats;
     for (const auto [entity, person] : registry.view<const Person>().each()) {
         ++stats.alive;
-        const auto* wounds = registry.try_get<Wounds>(entity);
-        stats.infected += wounds != nullptr && wounds->infection > 0.0f ? 1 : 0;
+        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
+            ++stats.infected;
+            stats.sick += isVisiblyIll(*wounds) ? 1 : 0;
+        }
     }
-    stats.zombies = static_cast<int>(registry.view<const Zombie>().size());
+    for (const auto [entity, zombie] : registry.view<const Zombie>().each()) {
+        ++stats.zombies;
+        stats.residents += registry.all_of<Name>(entity) ? 1 : 0;
+    }
     const Scenario* scenario = scenarioOf(world);
     const bool started = scenario != nullptr &&
                          scenario->began[static_cast<std::size_t>(WorldPhase::Outbreak)] != Scenario::kNever;

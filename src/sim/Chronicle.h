@@ -76,6 +76,8 @@ enum class ChronicleKind : std::uint8_t {
     LeftWork,      // бросил работу в object: в фазе a (WorldPhase) на работу больше не выходит
     Orphaned,      // ребёнок остался без родителей: object — кто погиб последним (этап 7.3)
     TookIn,        // взял к себе ребёнка object: a — кем он ему (kinCode), b = 1 — в дом группы
+    PatientZero,   // заразился неизвестно где — нулевой пациент сценария object (a = 0) или новый завозной случай (a = 1) (этап 7.5)
+    Infected,      // заразился от object (больного или тела): a — как (InfectionRoute)
     Count
 };
 

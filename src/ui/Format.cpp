@@ -151,6 +151,15 @@ const char* deathCauseName(DeathCause cause) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* infectionRouteText(InfectionRoute route) {
+    constexpr const char* kNames[] = {"не заражён",     "неизвестно где", "укус зомби",
+                                      "под одной крышей", "в больнице",   "лицом к лицу",
+                                      "рядом",           "у тела"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(InfectionRoute::Count));
+    const auto index = static_cast<std::size_t>(route);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
 const char* corpseKindName(CorpseKind kind) {
     constexpr const char* kNames[] = {"человек", "зомби", "животное"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(CorpseKind::Count));

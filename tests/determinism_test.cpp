@@ -14,6 +14,7 @@
 #include "sim/Death.h"
 #include "sim/Events.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Foresight.h"
 #include "sim/Components.h"
 #include "sim/Items.h"
@@ -46,6 +47,7 @@
 #include "sim/systems/NeedsSystem.h"
 #include "sim/systems/PerceptionSystem.h"
 #include "sim/systems/ResourceSystem.h"
+#include "sim/systems/InfectionSystem.h"
 #include "sim/systems/ScenarioSystem.h"
 #include "sim/systems/SocialSystem.h"
 #include "sim/systems/UtilityAiSystem.h"
@@ -3282,6 +3284,168 @@ void testInfectionTurns() {
     field.steps(100);
 }
 
+// --- Вспышка и заражение (этап 7.5) -------------------------------------------
+
+// Заражение от больного: затравка, путь, от кого и когда, запись в летописи;
+// течение дольше, чем после укуса; лихорадка с середины; погибший встаёт, хотя
+// его никто не кусал, а убийцы у него нет.
+void testContactInfectionCourse() {
+    Field field(2);
+    CHECK(field.open && field.people.size() >= 2);
+    if (!field.open || field.people.size() < 2) {
+        return;
+    }
+    const entt::entity sick = field.people[0];
+    const entt::entity person = field.people[1];
+    const lw::EntityId id = field.id(person);
+    field.freeze(person, 0);
+    field.dismiss(sick);
+    entt::registry& registry = field.world.registry();
+
+    CHECK(lw::infect(field.world, person, lw::InfectionRoute::Household, field.id(sick)));
+    CHECK(!lw::infect(field.world, person, lw::InfectionRoute::Nearby, field.id(sick))); // уже
+    lw::Wounds& wounds = registry.get<lw::Wounds>(person);
+    CHECK(wounds.infection == lw::kInfectionSeed && wounds.route == lw::InfectionRoute::Household &&
+          wounds.infectedBy == field.id(sick) && wounds.infectedAt == field.world.tick());
+    CHECK(wounds.bites == 0 && lw::infectionHours(wounds) == lw::kContactInfectionHours);
+    CHECK(lw::kContactInfectionHours > lw::kInfectionHours);
+    CHECK(lw::isInfected(wounds) && !lw::isFeverish(wounds) && !lw::isVisiblyIll(wounds));
+    CHECK(lw::contagiousness(wounds) == 0.0f);
+    CHECK(field.count(lw::ChronicleKind::Infected) == 1);
+    const lw::ChronicleEvent& infected = field.world.chronicle().events().back();
+    CHECK(infected.kind == lw::ChronicleKind::Infected && infected.subject == id &&
+          infected.object == field.id(sick) &&
+          infected.a == static_cast<std::int32_t>(lw::InfectionRoute::Household));
+    CHECK(lw::infectionRouteOf(field.world, id) == lw::InfectionRoute::Household);
+
+    // Конец скрытого периода: заразен слабо; лихорадка — в полную силу.
+    wounds.infection = 0.35f;
+    CHECK(lw::contagiousness(wounds) == lw::kLatentShedding && !lw::isVisiblyIll(wounds));
+    wounds.infection = 0.49f;
+    const float toFever = lw::hoursToFever(wounds);
+    CHECK(std::abs(toFever - 0.01f * lw::kContactInfectionHours) < 1e-3f);
+    const std::uint64_t start = field.world.tick();
+    for (int minute = 0; minute < 120 && field.count(lw::ChronicleKind::Feverish) == 0; ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(field.count(lw::ChronicleKind::Feverish) == 1);
+    const std::uint64_t feverAt = field.world.tick() - start;
+    CHECK(feverAt <= static_cast<std::uint64_t>(toFever * lw::kTicksPerGameHour) + 2 * lw::kTicksPerGameMinute);
+    CHECK(lw::isFeverish(registry.get<lw::Wounds>(person)) &&
+          lw::isVisiblyIll(registry.get<lw::Wounds>(person)) &&
+          lw::contagiousness(registry.get<lw::Wounds>(person)) == 1.0f);
+
+    // Под конец — смерть от заражения и подъём, хотя укусов не было.
+    registry.get<lw::Wounds>(person).infection = 0.98f;
+    for (int minute = 0; minute < 180 && !registry.all_of<lw::Corpse>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(registry.all_of<lw::Corpse>(person));
+    if (const auto* corpse = registry.try_get<lw::Corpse>(person)) {
+        CHECK(corpse->cause == lw::DeathCause::Infection && corpse->killer == lw::kInvalidId);
+        CHECK(corpse->turnsAt > corpse->diedAt);
+    }
+    CHECK(lw::infectionRouteOf(field.world, id) == lw::InfectionRoute::Household); // по летописи
+    for (int minute = 0; minute < 60 && !registry.all_of<lw::Zombie>(person); ++minute) {
+        field.steps(lw::kTicksPerGameMinute);
+    }
+    CHECK(registry.all_of<lw::Zombie>(person) && field.count(lw::ChronicleKind::Turned) == 1);
+}
+
+// Рядом с больным заражаются: под одной крышей — у двери общего дома, просто
+// рядом — в той же клетке; дальше нескольких метров — нет. Путь и от кого — в
+// ранах и летописи. Тело заражённого заразно тому, кто стоит рядом.
+void testContagion() {
+    constexpr int kGroup = 12;
+    Field field(2 * kGroup + 2);
+    CHECK(field.open && field.people.size() >= 2 * kGroup + 2);
+    if (!field.open || field.people.size() < 2 * kGroup + 2) {
+        return;
+    }
+    entt::registry& registry = field.world.registry();
+    const entt::entity sick = field.people[0];
+    const entt::entity far = field.people[1];
+    const lw::EntityId sickId = field.id(sick);
+    // Больной в лихорадке стоит в клетке ряда; его заражение держим на месте.
+    field.freeze(sick, 10);
+    lw::Wounds& fever = registry.get<lw::Wounds>(sick);
+    fever.infection = 0.6f;
+    fever.route = lw::InfectionRoute::Origin;
+    // Половина — его домашние (тот же дом), половина — чужие, все в той же клетке.
+    const lw::EntityId home = registry.get<lw::Person>(sick).home;
+    std::vector<entt::entity> housemates;
+    std::vector<entt::entity> strangers;
+    for (int i = 0; i < 2 * kGroup; ++i) {
+        const entt::entity person = field.people[static_cast<std::size_t>(i + 2)];
+        field.freeze(person, 10);
+        lw::Person& self = registry.get<lw::Person>(person);
+        if (i < kGroup) {
+            self.home = home;
+            housemates.push_back(person);
+        } else {
+            self.home = lw::kInvalidId;
+            strangers.push_back(person);
+        }
+        registry.get<lw::Needs>(person) = {};
+    }
+    // Дверь их дома — та самая клетка: «у себя дома» — значит здесь.
+    if (const entt::entity house = field.world.find(home); house != entt::null) {
+        registry.get<lw::Building>(house).door = field.at(10);
+    }
+    field.freeze(far, 13); // 12 м — уже не рядом
+    for (int hour = 0; hour < 10; ++hour) {
+        field.steps(lw::kTicksPerGameHour);
+        registry.get<lw::Wounds>(sick).infection = 0.6f;
+        registry.get<lw::Needs>(sick).health = 1.0f;
+    }
+    int household = 0;
+    int nearby = 0;
+    for (const lw::ChronicleEvent& event : field.world.chronicle().events()) {
+        if (event.kind != lw::ChronicleKind::Infected) {
+            continue;
+        }
+        CHECK(event.object == sickId);
+        const entt::entity person = field.world.find(event.subject);
+        const bool mate = std::find(housemates.begin(), housemates.end(), person) != housemates.end();
+        const auto route = static_cast<lw::InfectionRoute>(event.a);
+        CHECK(route == (mate ? lw::InfectionRoute::Household : lw::InfectionRoute::Nearby));
+        household += route == lw::InfectionRoute::Household ? 1 : 0;
+        nearby += route == lw::InfectionRoute::Nearby ? 1 : 0;
+        const lw::Wounds& wounds = registry.get<lw::Wounds>(person);
+        CHECK(wounds.route == route && wounds.infectedBy == sickId && wounds.bites == 0);
+    }
+    CHECK(household > 0 && nearby > 0);
+    CHECK(!lw::isInfected(registry, far));
+
+    // Тело заражённого (пока не встало) — тем, кто стоит рядом.
+    Field morgue(kGroup + 1);
+    CHECK(morgue.open && morgue.people.size() >= static_cast<std::size_t>(kGroup + 1));
+    if (!morgue.open || morgue.people.size() < static_cast<std::size_t>(kGroup + 1)) {
+        return;
+    }
+    entt::registry& place = morgue.world.registry();
+    const entt::entity dead = morgue.people[0];
+    morgue.freeze(dead, 5);
+    place.get<lw::Wounds>(dead).infection = 0.4f;
+    lw::die(morgue.world, dead, lw::DeathCause::Wounds, lw::kInvalidId);
+    CHECK(place.get<lw::Corpse>(dead).turnsAt > morgue.world.tick());
+    place.get<lw::Corpse>(dead).turnsAt = morgue.world.tick() + 20 * lw::kTicksPerGameHour;
+    for (int i = 1; i <= kGroup; ++i) {
+        morgue.freeze(morgue.people[static_cast<std::size_t>(i)], 5);
+        place.get<lw::Person>(morgue.people[static_cast<std::size_t>(i)]).home = lw::kInvalidId;
+    }
+    morgue.steps(10 * lw::kTicksPerGameHour);
+    int body = 0;
+    for (const lw::ChronicleEvent& event : morgue.world.chronicle().events()) {
+        if (event.kind == lw::ChronicleKind::Infected) {
+            CHECK(event.object == morgue.id(dead) &&
+                  event.a == static_cast<std::int32_t>(lw::InfectionRoute::Body));
+            ++body;
+        }
+    }
+    CHECK(body > 0);
+}
+
 // Здоровье кончилось от голода — смерть от голода; неукушенный не встаёт.
 void testStarvationDeath() {
     Field field(1);
@@ -5791,10 +5955,15 @@ void testPhaseRules() {
     const lw::PhaseRules& survival = lw::phaseRules(P::Survival);
     CHECK(peace.economy && peace.tapWater && peace.lawful && peace.supply == 1.0f &&
           !peace.groups && peace.zombieShare == 0.0f && peace.eveningHome > 0.0f);
-    CHECK(outbreak.lawful && outbreak.supply == 1.0f && outbreak.zombieShare > 0.0f);
+    // Во вспышке и панике зомби — только свои, бывшие жители (этап 7.5); приток
+    // издалека — с коллапсом.
+    CHECK(outbreak.lawful && outbreak.supply == 1.0f && outbreak.zombieShare == 0.0f &&
+          outbreak.arrivals == 0);
     CHECK(panic.economy && panic.lawful && panic.supply < 1.0f && panic.stockpile > 1.0f &&
-          panic.groups && panic.eveningHome > peace.eveningHome);
-    CHECK(!collapse.economy && !collapse.tapWater && !collapse.lawful && collapse.supply == 0.0f);
+          panic.groups && panic.eveningHome > peace.eveningHome && panic.arrivals == 0);
+    CHECK(!collapse.economy && !collapse.tapWater && !collapse.lawful && collapse.supply == 0.0f &&
+          collapse.zombieShare > 0.0f && collapse.arrivals > 0);
+    CHECK(survival.zombieShare > collapse.zombieShare && survival.arrivals >= collapse.arrivals);
     CHECK(!survival.economy && !survival.lawful && survival.professions == 0 &&
           survival.maxHours == 0);
     CHECK(lw::phaseByName("panic") == P::Panic);
@@ -5828,8 +5997,8 @@ void testPhaseRules() {
     CHECK(lw::zombieTarget(before) == 40 && lw::arrivalsPerDay(before) == 1);
 }
 
-// Мир начинается с фазы «мир»; вспышка — по расписанию, с ней издалека
-// приходят первые заражённые. Один seed — одна и та же вспышка.
+// Мир начинается с фазы «мир»; вспышка — по расписанию, с неё заражён
+// нулевой пациент — взрослый житель. Один seed — одна и та же вспышка.
 void testOutbreakScheduled() {
     lw::WorldConfig config = peaceConfig(60);
     config.outbreakDays = 0.25; // через 6 игровых часов
@@ -5857,13 +6026,20 @@ void testOutbreakScheduled() {
     CHECK(phaseBegan(world, lw::WorldPhase::Outbreak) == sixHours);
     const int people = static_cast<int>(registry.view<const lw::Person>().size());
     CHECK(lw::scenarioOf(world)->population == people);
-    const std::size_t zombies = registry.view<const lw::Zombie>().size();
-    CHECK(zombies >= static_cast<std::size_t>(lw::kFirstInfectedMin) &&
-          zombies <= static_cast<std::size_t>(lw::kFirstInfectedMax));
+    // Зомби издалека нет: вспышка начинается с нулевого пациента из жителей (этап 7.5).
+    CHECK(registry.view<const lw::Zombie>().empty() && lw::zombieTarget(world) == 0);
+    const lw::EntityId zero = lw::scenarioOf(world)->patientZero;
+    CHECK(zero != lw::kInvalidId && zero == lw::scenarioOf(twin)->patientZero);
+    const entt::entity patient = world.find(zero);
+    CHECK(patient != entt::null && registry.all_of<lw::Person>(patient) && !lw::isMinor(registry, patient));
+    if (patient != entt::null) {
+        const lw::Wounds& wounds = registry.get<lw::Wounds>(patient);
+        CHECK(wounds.route == lw::InfectionRoute::Origin && wounds.infectedAt == sixHours &&
+              wounds.bites == 0 && wounds.infection > 0.0f && !lw::isVisiblyIll(wounds));
+    }
+    CHECK(lw::scenarioStats(world).infected == 1 && lw::scenarioStats(world).casualties() == 0);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PatientZero) == 1);
     CHECK(world.chronicle().countOf(lw::ChronicleKind::PhaseBegan) == 2);
-    CHECK(lw::zombieTarget(world) ==
-          static_cast<int>(std::lround(lw::phaseRules(lw::WorldPhase::Outbreak).zombieShare *
-                                       static_cast<float>(people))));
     CHECK(world.stateHash() == twin.stateHash());
 }
 
@@ -5922,6 +6098,161 @@ void testPhaseTransitions() {
     }
     CHECK(employed > 0);
     CHECK(world.chronicle().countOf(lw::ChronicleKind::LeftWork) == employed);
+}
+
+// Нулевой пациент (этап 7.5): с началом вспышки заражён один взрослый житель с
+// домом; никто не замечает, пока у него нет жара, — потом он пострадавший.
+// Зомби — только из жителей: заражённый погибший встаёт. Один seed — одна
+// вспышка.
+void testPatientZero() {
+    lw::WorldConfig config = peaceConfig(60);
+    lw::World world(11, config);
+    lw::World twin(11, config);
+    entt::registry& registry = world.registry();
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    lw::enterPhase(twin, lw::WorldPhase::Outbreak);
+    const lw::Scenario* scenario = lw::scenarioOf(world);
+    const lw::EntityId zero = scenario->patientZero;
+    CHECK(zero != lw::kInvalidId && zero == lw::scenarioOf(twin)->patientZero);
+    const entt::entity patient = world.find(zero);
+    CHECK(patient != entt::null);
+    if (patient == entt::null) {
+        return;
+    }
+    CHECK(!lw::isMinor(registry, patient) && registry.get<lw::Person>(patient).home != lw::kInvalidId);
+    const lw::Wounds& wounds = registry.get<lw::Wounds>(patient);
+    CHECK(wounds.route == lw::InfectionRoute::Origin && wounds.infectedBy == lw::scenarioIdOf(world) &&
+          wounds.infection == lw::kPatientZeroInfection);
+    CHECK(lw::infectionRouteOf(world, zero) == lw::InfectionRoute::Origin);
+    const lw::ChronicleEvent* origin = nullptr;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        origin = event.kind == lw::ChronicleKind::PatientZero ? &event : origin;
+    }
+    CHECK(origin != nullptr && origin->subject == zero && origin->object == lw::scenarioIdOf(world));
+    CHECK(registry.view<const lw::Zombie>().empty());
+    lw::ScenarioStats stats = lw::scenarioStats(world);
+    CHECK(stats.infected == 1 && stats.sick == 0 && stats.casualties() == 0);
+
+    // Жар — через (0,5 − 0,2) × 40 = 12 игровых часов: теперь это заметно.
+    const auto hours = static_cast<int>(std::ceil(lw::hoursToFever(wounds))) + 1;
+    runMinutes(world, hours * 60);
+    runMinutes(twin, hours * 60);
+    if (world.find(zero) == patient && registry.all_of<lw::Person>(patient)) {
+        CHECK(lw::isFeverish(registry.get<lw::Wounds>(patient)));
+        stats = lw::scenarioStats(world);
+        CHECK(stats.sick >= 1 && stats.casualties() >= 1);
+    }
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::Feverish) >= 1);
+    CHECK(world.stateHash() == twin.stateHash());
+    // Зомби издалека во вспышке не приходят.
+    CHECK(lw::arrivalsPerDay(world) == 0 && lw::zombieTarget(world) == 0);
+}
+
+// Вирус приходит в край не один раз (этап 7.5): если во вспышке среди жителей
+// не осталось заразы, через kReimportTicks заражается новый житель — завозной
+// случай; нулевой пациент сценария остаётся прежним.
+void testReimport() {
+    lw::World world(5, peaceConfig(40));
+    entt::registry& registry = world.registry();
+    lw::enterPhase(world, lw::WorldPhase::Outbreak);
+    const lw::EntityId zero = lw::scenarioOf(world)->patientZero;
+    CHECK(zero != lw::kInvalidId);
+    // Нулевой пациент выздоровел — заразы больше нет.
+    registry.get<lw::Wounds>(world.find(zero)) = {};
+    CHECK(lw::scenarioStats(world).infected == 0);
+    runMinutes(world, 11 * 60);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PatientZero) == 1);
+    CHECK(lw::scenarioOf(world)->quietSince != lw::Scenario::kNever);
+    runMinutes(world, 3 * 60);
+    CHECK(world.chronicle().countOf(lw::ChronicleKind::PatientZero) == 2);
+    const lw::ChronicleEvent* imported = nullptr;
+    for (const lw::ChronicleEvent& event : world.chronicle().events()) {
+        imported = event.kind == lw::ChronicleKind::PatientZero ? &event : imported;
+    }
+    CHECK(imported != nullptr && imported->a == 1 && imported->subject != zero &&
+          imported->object == lw::scenarioIdOf(world));
+    if (imported != nullptr) {
+        CHECK(!lw::isPatientZero(world, imported->subject) && lw::isPatientZero(world, zero));
+        CHECK(lw::infectionRouteOf(world, imported->subject) == lw::InfectionRoute::Origin);
+    }
+    CHECK(lw::scenarioOf(world)->patientZero == zero);
+    CHECK(lw::scenarioOf(world)->quietSince == lw::Scenario::kNever);
+    CHECK(lw::scenarioStats(world).infected >= 1);
+}
+
+// Больной в лихорадке (этап 7.5): на работу почти не выходит, лежит дома и
+// днём, тянет к врачу, гулять — нет. Родня из другого дома и друзья навещают
+// его, даже если одиночества не чувствуют.
+void testSickBehaviour() {
+    lw::World world(7, peaceConfig(60));
+    entt::registry& registry = world.registry();
+    clearZombies(world);
+    const entt::entity worker = workerOf(world, lw::Profession::Shopkeeper);
+    CHECK(worker != entt::null);
+    if (worker == entt::null) {
+        return;
+    }
+    alwaysOnShift(registry, worker, traitsOf(0.5f));
+    // Второй день, 11:00: ни сна, ни вечера, и с начала мира прошло больше
+    // суток — родня успела не видеться.
+    runMinutes(world, 9 * 60);
+    runUntil(world, 11, 0);
+    registry.get<lw::Needs>(worker) = {};
+    const float work = scoreOf(world, worker, lw::Action::Work);
+    const float wander = scoreOf(world, worker, lw::Action::Wander);
+    CHECK(work > 0.5f);
+    CHECK(scoreOf(world, worker, lw::Action::Sleep) == 0.0f);
+
+    lw::Wounds& wounds = registry.get<lw::Wounds>(worker);
+    wounds.infection = 0.6f;
+    wounds.route = lw::InfectionRoute::Nearby;
+    const float sickWork = scoreOf(world, worker, lw::Action::Work);
+    const float bed = scoreOf(world, worker, lw::Action::Sleep);
+    CHECK(sickWork > 0.0f && sickWork < 0.3f * work);
+    CHECK(bed > sickWork);
+    CHECK(scoreOf(world, worker, lw::Action::Wander) <= 0.5f * wander + 1e-4f);
+
+    // Навестить больного: знакомый из другого дома — пусть он ему родня.
+    entt::entity visitor = entt::null;
+    entt::entity patient = entt::null;
+    for (const auto [entity, id, person, relations] :
+         registry.view<const lw::Id, const lw::Person, lw::Relations>().each()) {
+        if (lw::isMinor(registry, entity) || entity == worker) {
+            continue;
+        }
+        for (std::size_t i = 0; i < relations.count && patient == entt::null; ++i) {
+            const entt::entity other = world.find(relations.bonds[i].other);
+            if (other != entt::null && other != worker && registry.all_of<lw::Person>(other) &&
+                registry.get<lw::Person>(other).home != person.home) {
+                relations.bonds[i].origin = lw::BondOrigin::Kin;
+                visitor = entity;
+                patient = other;
+            }
+        }
+        if (patient != entt::null) {
+            break;
+        }
+    }
+    CHECK(patient != entt::null);
+    if (patient == entt::null) {
+        return;
+    }
+    // Рядом — чтобы дорога не съела оценку; одиночества нет.
+    registry.get<lw::Position>(visitor) = registry.get<lw::Position>(patient);
+    registry.get<lw::Position>(visitor).x += 30.0f;
+    world.syncSpatial();
+    registry.get<lw::Needs>(visitor) = {};
+    if (lw::Bond* bond = registry.get<lw::Relations>(visitor).find(idOf(world, patient))) {
+        bond->seen = 0; // давно не виделись
+    }
+    registry.get<lw::Wounds>(patient) = {};
+    const float calm = scoreOf(world, visitor, lw::Action::Socialize);
+    lw::Wounds& ill = registry.get<lw::Wounds>(patient);
+    ill.infection = 0.6f;
+    ill.route = lw::InfectionRoute::Household;
+    CHECK(lw::isFeverish(ill));
+    const float worried = scoreOf(world, visitor, lw::Action::Socialize);
+    CHECK(worried > calm + 0.1f);
 }
 
 // Коллапс: на работу выходят только самые стойкие врачи и полицейские, кто
@@ -6811,6 +7142,8 @@ int main() {
     testPersonFightsZombie();
     testHunting();
     testInfectionTurns();
+    testContactInfectionCourse();
+    testContagion();
     testStarvationDeath();
     testBodiesDecay();
     testBodyScares();
@@ -6869,6 +7202,9 @@ int main() {
     testPhaseRules();
     testOutbreakScheduled();
     testPhaseTransitions();
+    testPatientZero();
+    testReimport();
+    testSickBehaviour();
     testCollapseRules();
     testPanicRules();
     testCrimeCondemned();

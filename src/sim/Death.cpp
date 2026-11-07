@@ -1,6 +1,7 @@
 #include "sim/Death.h"
 
 #include "sim/Hash.h"
+#include "sim/Infection.h"
 #include "sim/World.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -48,9 +49,10 @@ void die(World& world, entt::entity entity, DeathCause cause, EntityId killer) {
     if (corpse.kind == CorpseKind::Human) {
         world.record(ChronicleKind::Died, id, killer, static_cast<std::int32_t>(cause),
                      static_cast<std::int32_t>(corpse.kind));
-        // Укушенный встанет: когда — из хеша id, без рандома (смерть случается
-        // в разных системах, а время подъёма не должно зависеть от того, в какой).
-        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && wounds->bites > 0) {
+        // Заражённый встанет — укушенный и заразившийся от больного (этап 7.5):
+        // когда — из хеша id, без рандома (смерть случается в разных системах,
+        // а время подъёма не должно зависеть от того, в какой).
+        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
             Hasher hasher;
             hasher.add(id);
             const auto span = static_cast<std::uint64_t>(kTurnMaxMinutes - kTurnMinMinutes + 1);

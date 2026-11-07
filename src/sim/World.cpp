@@ -12,6 +12,7 @@
 #include "sim/systems/EventSystem.h"
 #include "sim/systems/FamilySystem.h"
 #include "sim/systems/GroupSystem.h"
+#include "sim/systems/InfectionSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
@@ -93,9 +94,9 @@ void World::generate() {
 namespace {
 
 constexpr const char* kPhaseNames[World::kStepPhases] = {
-    "weather", "resources", "scenario", "events", "work", "needs", "relations", "memories",
-    "groups", "bodies", "perception", "zombies", "animals", "utility ai", "combat", "movement",
-    "spatial sync"};
+    "weather",    "resources", "scenario", "events",  "work",       "needs",
+    "infection",  "relations", "memories", "groups",  "bodies",     "perception",
+    "zombies",    "animals",   "utility ai", "combat", "movement",  "spatial sync"};
 
 } // namespace
 
@@ -131,6 +132,10 @@ void World::step() {
     updateWork(*this);
     lap();
     tickNeeds(*this);
+    lap();
+    // Заражение от больных (этап 7.5) — после нужд: заражение уже подросло за
+    // эту минуту, кто стал заразен — заразен сразу.
+    tickInfection(*this);
     lap();
     // Отношения — по тому, кто был рядом и чем занят на начало тика.
     tickRelations(*this);
@@ -355,6 +360,8 @@ std::uint64_t World::stateHash() const {
             }
             hasher.add(scenario->outbreakAt);
             hasher.add(scenario->population);
+            hasher.add(scenario->patientZero);
+            hasher.add(scenario->quietSince);
         }
         if (const auto* cache = registry_.try_get<Cache>(entity)) {
             hasher.add(std::uint64_t{29});
@@ -522,6 +529,9 @@ std::uint64_t World::stateHash() const {
             hasher.add(wounds->infection);
             hasher.add(wounds->hurtAt);
             hasher.add(wounds->hurtBy);
+            hasher.add(static_cast<std::uint8_t>(wounds->route));
+            hasher.add(wounds->infectedBy);
+            hasher.add(wounds->infectedAt);
         }
         if (const auto* relations = registry_.try_get<Relations>(entity)) {
             hasher.add(std::uint64_t{25});

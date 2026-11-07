@@ -19,7 +19,7 @@ constexpr std::uint64_t kEpilogue = 6 * kTicksPerGameHour;
 // Вражда без событий забывается (обида угасает за ~30 суток, но для зрителя
 // линия кончается раньше).
 constexpr std::uint64_t kFeudFades = 10 * kTicksPerGameDay;
-// Укушенный умер, а тело так и не встало.
+// Заражённый умер, а тело так и не встало.
 constexpr std::uint64_t kBodyStays = kTicksPerGameDay;
 // Заражение без событий (до обращения — не больше 30 игровых часов).
 constexpr std::uint64_t kInfectionFades = 3 * kTicksPerGameDay;
@@ -378,10 +378,15 @@ void StoryTracker::consume(const World& world, const ChronicleEvent& event, std:
 
     // --- Заражение -------------------------------------------------------------
     case K::Bitten:
+    case K::Infected:
+    case K::PatientZero:
         if (Story* story = keyed(infections_, event.subject); story != nullptr && story->active()) {
             beat(*story, index, StoryStage::Rising, tick); // укусили ещё раз
         } else {
-            Story& fresh = start(StoryKind::Infection, event.subject, event.object, kInvalidId, tick);
+            // Противник — укусивший зомби или тот, от кого заразился (этап 7.5);
+            // у нулевого пациента — никто (объект — сценарий).
+            const EntityId from = event.kind == K::PatientZero ? kInvalidId : event.object;
+            Story& fresh = start(StoryKind::Infection, event.subject, from, kInvalidId, tick);
             infections_[event.subject] = fresh.id - 1;
             beat(fresh, index, StoryStage::Setup, tick);
         }

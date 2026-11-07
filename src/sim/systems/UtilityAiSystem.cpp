@@ -3,6 +3,7 @@
 #include "sim/Calendar.h"
 #include "sim/Events.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Items.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
@@ -385,6 +386,33 @@ constexpr float kChildFlee = 1.3f;
 constexpr float kGuardianBonus = 1.5f;
 constexpr float kGuardianStays = 0.5f;
 
+// --- Вспышка (этап 7.5) ---------------------------------------------------------
+// В лихорадке человек болеет, не зная чем: на работу (и в школу) выходит
+// редко — оценка × kSickWork, гулять, в гости и по делам не тянет —
+// × kSickOuting; лежит дома в постели — сон и днём, kSickBedBase +
+// kSickBedFever × лихорадка (вдали от дома — сначала домой); к врачу — раз в
+// kSickDoctorTicks (12 ч), пока жар: тяжесть kSickDoctorBase +
+// kSickDoctorFever × лихорадка. Так больной сидит дома с семьёй и ходит в больницу — там и
+// заражает (InfectionSystem).
+constexpr float kSickWork = 0.2f;
+constexpr float kSickOuting = 0.4f;
+constexpr float kSickBedBase = 0.3f;
+constexpr float kSickBedFever = 0.4f;
+constexpr float kSickDoctorBase = 0.5f;
+constexpr float kSickDoctorFever = 0.4f;
+constexpr std::uint64_t kSickDoctorTicks = 12 * kTicksPerGameHour;
+// Навестить больного: родня или друг слёг в лихорадке — днём, не дальше
+// kSickVisitRange и если не виделись kSickVisitGap; лежит дома — к нему домой
+// («Общение», даже если он в постели). Оценка — kSickVisitWeight × близость
+// (родня — 1, друг — kSickVisitFriend) × (kSickVisitCare + альтруизм) ×
+// near(d, kNearScale), одиночество не нужно. Так вирус переходит в другие дома
+// и деревни.
+constexpr float kSickVisitWeight = 0.6f;
+constexpr float kSickVisitFriend = 0.7f;
+constexpr float kSickVisitCare = 0.5f;
+constexpr float kSickVisitRange = 4000.0f;
+constexpr std::uint64_t kSickVisitGap = 8 * kTicksPerGameHour;
+
 std::uint64_t minutes(int count) {
     return static_cast<std::uint64_t>(count) * kTicksPerGameMinute;
 }
@@ -483,6 +511,9 @@ struct Context {
     bool policing = false;
     // Возраст (этап 7.3): дети делают не всё.
     std::uint8_t age = 30;
+    // Лихорадка (этап 7.5): 0..1, и есть ли она вообще (на пороге — 0).
+    bool feverish = false;
+    float fever = 0.0f;
 };
 
 Context makeContext(const World& world, entt::entity entity) {
@@ -515,6 +546,8 @@ Context makeContext(const World& world, entt::entity entity) {
     }
     if (const auto* wounds = registry.try_get<Wounds>(entity)) {
         ctx.bleeding = wounds->bleeding;
+        ctx.feverish = isFeverish(*wounds);
+        ctx.fever = feverOf(*wounds);
     }
     ctx.relations = registry.try_get<Relations>(entity);
     ctx.group = person.group;
@@ -648,11 +681,16 @@ Option evalSleep(const Context& ctx) {
         const float u = (fatigue - kDayNapStart) / (1.0f - kDayNapStart);
         score = 0.9f * u * u;
     }
+    const bool nearHome = ctx.homeId != kInvalidId && ctx.homeDistance <= kSleepHomeRange;
+    // Больной лежит дома в постели и днём (этап 7.5).
+    if (ctx.feverish && nearHome) {
+        score = std::max(score, kSickBedBase + kSickBedFever * ctx.fever);
+    }
     if (score <= 0.0f) {
         return {};
     }
     // Спать — дома; если дом далеко, а уже ночь, — где застала.
-    if (ctx.homeId != kInvalidId && ctx.homeDistance <= kSleepHomeRange) {
+    if (nearHome) {
         return {score, ctx.homeDoor, ctx.homeId};
     }
     return here(ctx, score);
@@ -811,17 +849,55 @@ float loyaltyTo(const Context& ctx, EntityId other) {
     return std::min(1.0f, close + (groupMate(ctx, other) ? kGroupLoyalty : 0.0f));
 }
 
+// Навестить близкого, который слёг в лихорадке (этап 7.5); score 0 — некого.
+Option sickVisit(const Context& ctx) {
+    Option best;
+    if (ctx.relations == nullptr) {
+        return best;
+    }
+    const World& world = ctx.world;
+    const entt::registry& registry = world.registry();
+    for (std::size_t i = 0; i < ctx.relations->count; ++i) {
+        const Bond& bond = ctx.relations->bonds[i];
+        const bool kin = bond.origin == BondOrigin::Kin;
+        if ((!kin && !bond.friendly()) || bond.seen + kSickVisitGap > world.tick()) {
+            continue;
+        }
+        const entt::entity other = world.find(bond.other);
+        if (other == entt::null || !registry.all_of<Person>(other)) {
+            continue;
+        }
+        const auto* wounds = registry.try_get<Wounds>(other);
+        if (wounds == nullptr || !isFeverish(*wounds) ||
+            registry.get<Person>(other).home == ctx.person.home) {
+            continue; // здоров или живёт под той же крышей — и так рядом
+        }
+        const Position& at = registry.get<Position>(other);
+        const float d = distance(ctx.x, ctx.y, at.x, at.y);
+        if (d > kSickVisitRange) {
+            continue;
+        }
+        const float closeness = kin ? 1.0f : kSickVisitFriend;
+        best = better(best, {kSickVisitWeight * closeness * (kSickVisitCare + ctx.traits.altruism) *
+                                 nearness(d, kNearScale),
+                             Map::cellAt(at.x, at.y), bond.other});
+    }
+    return best;
+}
+
 // К людям: к другу или приятелю (их ищут дальше), к ближайшему, кто не спит,
-// а никого рядом — на площадь своего поселения. Недругов обходят.
+// а никого рядом — на площадь своего поселения. Недругов обходят. Слёгшего
+// близкого навещают и без одиночества (этап 7.5).
 Option evalSocialize(const Context& ctx) {
     if (ctx.night) {
         return {};
     }
+    const Option visit = sickVisit(ctx);
     const float lonely = ctx.needs.loneliness;
     const float need =
         kSocializeWeight * lonely * std::sqrt(lonely) * (0.5f + ctx.traits.sociability);
     if (need <= 0.0f) {
-        return {};
+        return visit;
     }
     const World& world = ctx.world;
     const entt::registry& registry = world.registry();
@@ -854,6 +930,7 @@ Option evalSocialize(const Context& ctx) {
         best = better(best, {need * warmth(ctx, other->id) * nearness(d, kSocialScale),
                              Map::cellAt(other->x, other->y), other->id});
     }
+    best = better(best, visit);
     // Площадь — если идти не к кому: пустая площадь рядом не лучше друга вдали.
     if (best.score > 0.0f) {
         return best;
@@ -883,6 +960,10 @@ Option evalGoHome(const Context& ctx) {
     // Вечер — домой (этап 7.2), пока жизнь идёт по распорядку (этап 7.4).
     if (!ctx.night && ctx.time.minuteOfDay >= kEveningMinute) {
         score = std::max(score, ctx.rules->eveningHome);
+    }
+    // Заболел — домой, в постель (этап 7.5).
+    if (ctx.feverish) {
+        score = std::max(score, kSickBedBase);
     }
     return {score, ctx.homeDoor, ctx.homeId};
 }
@@ -1601,6 +1682,24 @@ Option evalBuy(const Context& ctx) {
     return {need * nearness(d, kNearScale), shop->door, shop->id};
 }
 
+// Был ли у врача за последние kSickDoctorTicks (по летописи).
+bool sawDoctorLately(const Context& ctx) {
+    const Chronicle& chronicle = ctx.world.chronicle();
+    const auto& events = chronicle.events();
+    const std::span<const std::uint32_t> mine = chronicle.eventsOf(ctx.id);
+    const std::uint64_t now = ctx.world.tick();
+    for (auto it = mine.rbegin(); it != mine.rend(); ++it) {
+        const ChronicleEvent& event = events[*it];
+        if (event.tick + kSickDoctorTicks < now) {
+            return false;
+        }
+        if (event.kind == ChronicleKind::SawDoctor && event.subject == ctx.id) {
+            return true;
+        }
+    }
+    return false;
+}
+
 // К врачу: плохо (не от голода и жажды) или течёт кровь, а бинта нет. В
 // ближайшую больницу, где врач на смене.
 Option evalSeeDoctor(const Context& ctx) {
@@ -1610,6 +1709,10 @@ Option evalSeeDoctor(const Context& ctx) {
     }
     if (ctx.bleeding > kTreatBleeding && ctx.carry.count(ItemKind::Bandage) == 0) {
         severity = std::max(severity, std::min(1.0f, 0.5f + 2.0f * ctx.bleeding));
+    }
+    // Жар (этап 7.5): к врачу, если давно у него не был.
+    if (ctx.feverish && !sawDoctorLately(ctx)) {
+        severity = std::max(severity, kSickDoctorBase + kSickDoctorFever * ctx.fever);
     }
     if (severity <= 0.0f) {
         return {};
@@ -1720,6 +1823,28 @@ float childFactor(const Context& ctx, Action action) {
     }
 }
 
+// Что больной в лихорадке делает неохотно (этап 7.5): множитель оценки.
+float sickFactor(const Context& ctx, Action action) {
+    if (!ctx.feverish) {
+        return 1.0f;
+    }
+    switch (action) {
+    case Action::Work:
+        return kSickWork;
+    case Action::Wander:
+    case Action::Socialize:
+    case Action::Forage:
+    case Action::Hunt:
+    case Action::Trade:
+    case Action::Steal:
+    case Action::Avenge:
+    case Action::Salvage:
+        return kSickOuting;
+    default:
+        return 1.0f;
+    }
+}
+
 // Не идти туда, где недавно видел зомби, и не оставаться там. Без этого
 // жажда раз за разом вела к реке мимо зомби, человек убегал, через минуту шёл
 // снова и так и не напивался.
@@ -1728,7 +1853,7 @@ Option evaluate(const Context& ctx, Action action) {
         return {};
     }
     Option option = evaluateRaw(ctx, action);
-    option.score *= childFactor(ctx, action);
+    option.score *= childFactor(ctx, action) * sickFactor(ctx, action);
     if (action != Action::Flee && action != Action::Fight && option.score > 0.0f &&
         risky(ctx, option.spot)) {
         option.score *= kDangerPenalty;

@@ -6,6 +6,7 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Family.h"
+#include "sim/Infection.h"
 #include "sim/Map.h"
 #include "sim/Memory.h"
 #include "sim/Names.h"
@@ -1385,10 +1386,24 @@ void Showrunner::startCliffhanger(const ShowInput& in, ShowOrders& orders) {
             cliffLine_ = "Что ждёт группу " + nameOf(world, leader) + "?";
             break;
         }
-        case StoryKind::Infection:
-            cliffLine_ = nameOf(world, story->hero) + (isFemale(world, story->hero) ? " укушена" : " укушен") +
-                         ". Сколько осталось?";
+        case StoryKind::Infection: {
+            // Укушен или заразился от больного (этап 7.5): тот, кто заразился,
+            // ещё не знает.
+            const bool female = isFemale(world, story->hero);
+            if (infectionRouteOf(world, story->hero) == InfectionRoute::Bite) {
+                cliffLine_ = nameOf(world, story->hero) + (female ? " укушена" : " укушен") +
+                             ". Сколько осталось?";
+            } else if (const entt::entity sick = world.find(story->hero);
+                       sick != entt::null && world.registry().all_of<Wounds>(sick) &&
+                       isFeverish(world.registry().get<Wounds>(sick))) {
+                cliffLine_ = nameOf(world, story->hero) + (female ? " слегла в жару" : " слёг в жару") +
+                             ". Сколько осталось?";
+            } else {
+                cliffLine_ = nameOf(world, story->hero) + (female ? " заражена" : " заражён") +
+                             " и ещё не знает об этом.";
+            }
             break;
+        }
         case StoryKind::Salvage:
             cliffLine_ = "Кому достанется груз?";
             break;

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Components.h"
+#include "sim/TimeScale.h"
 
 namespace lw {
 
@@ -11,13 +12,13 @@ class World;
 // «Сценарий и фазы мира».
 //
 // Начало фазы — запись в летописи (PhaseBegan); кто из работников в новой
-// фазе на работу больше не выйдет, — тоже (LeftWork). С началом вспышки
-// приходят первые заражённые: до этапа 7.5 (нулевой пациент из жителей) —
-// издалека, как приток этапа 5.7.
-
-// Сколько зомби в первой орде, пришедшей с началом вспышки.
-inline constexpr int kFirstInfectedMin = 3;
-inline constexpr int kFirstInfectedMax = 5;
+// фазе на работу больше не выйдет, — тоже (LeftWork). Вспышка начинается с
+// нулевого пациента (этап 7.5): заражается один из жителей
+// (infectPatientZero), дальше вирус идёт сам — от больных и укусами. Вирус
+// приходит в край не один раз: пока идёт вспышка или паника, а среди жителей
+// заразы нет уже kReimportTicks (Scenario::quietSince), — новый завозной
+// случай.
+inline constexpr std::uint64_t kReimportTicks = 12 * kTicksPerGameHour;
 
 // Создать сценарий при рождении мира с мирной жизнью: фаза «мир», вспышка — по
 // расписанию WorldConfig::outbreakDays (0 — не по расписанию).
@@ -30,8 +31,9 @@ void createScenario(World& world);
 void enterPhase(World& world, WorldPhase phase);
 
 // Раз в игровую минуту: начать вспышку по расписанию, сменить фазу по сроку;
-// раз в час — не дошла ли беда до порога следующей фазы. Рандома нет, кроме
-// первых заражённых (поток RngStream::Scenario).
+// раз в час — не дошла ли беда до порога следующей фазы и не пора ли новому
+// завозному случаю. Рандома нет, кроме выбора заболевших (поток
+// RngStream::Scenario).
 void updateScenario(World& world);
 
 } // namespace lw
