@@ -1,6 +1,7 @@
 #include "sim/nav/NavGrid.h"
 
 #include "sim/Components.h"
+#include "sim/Parallel.h"
 
 #include <algorithm>
 #include <vector>
@@ -69,11 +70,14 @@ void NavGrid::build(const Map& map, const entt::registry& registry) {
     const int width = map.width();
     const int height = map.height();
     cost_ = Grid<std::uint8_t>(width, height);
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            cost_.at(x, y) = terrainCost(map, x, y);
+    // Клетки независимы — строками параллельно (этап 2а.2).
+    parallelFor(static_cast<std::size_t>(height), 64, 128, [&](std::size_t begin, std::size_t end, int) {
+        for (std::size_t y = begin; y < end; ++y) {
+            for (int x = 0; x < width; ++x) {
+                cost_.at(x, static_cast<int>(y)) = terrainCost(map, x, static_cast<int>(y));
+            }
         }
-    }
+    });
     // Внутренности зданий не моделируются: в здание входят до клетки двери.
     for (const auto [entity, building] : registry.view<const Building>().each()) {
         for (int y = building.origin.y; y < building.origin.y + building.height; ++y) {
@@ -93,34 +97,80 @@ void NavGrid::labelRegions() {
     region_ = Grid<Region>(width, height, kNoRegion);
     regionCount_ = 0;
 
-    // Номера по порядку обхода строк: разметка зависит только от сетки.
-    std::vector<Cell> queue;
-    Region next = 1;
+    // Области — по отрезкам строк (этап 2а.2; на 16 км обход в ширину по
+    // клеткам занимал четверть секунды): проходимые отрезки строки
+    // объединяются с отрезками строки выше, которых касаются сбоку
+    // (связность по сторонам), затем номера раздаются по порядку первого
+    // отрезка области при обходе строк — так же, как раньше раздавал обход в
+    // ширину от первой клетки области. Разметка зависит только от сетки.
+    struct Run {
+        int y = 0;
+        int x0 = 0; // клетки [x0, x1)
+        int x1 = 0;
+    };
+    std::vector<Run> runs;
+    std::vector<std::uint32_t> parent;
+    const auto find = [&parent](std::uint32_t i) {
+        std::uint32_t root = i;
+        while (parent[root] != root) {
+            root = parent[root];
+        }
+        while (parent[i] != root) {
+            const std::uint32_t up = parent[i];
+            parent[i] = root;
+            i = up;
+        }
+        return root;
+    };
+    const auto unite = [&](std::uint32_t a, std::uint32_t b) {
+        a = find(a);
+        b = find(b);
+        if (a != b) {
+            // Корень — меньший номер: порядок объединений на результат не влияет.
+            parent[std::max(a, b)] = std::min(a, b);
+        }
+    };
+    std::size_t above = 0; // первый отрезок строки выше
     for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            if (cost_.at(x, y) == kBlocked || region_.at(x, y) != kNoRegion) {
+        const std::size_t rowStart = runs.size();
+        for (int x = 0; x < width;) {
+            if (cost_.at(x, y) == kBlocked) {
+                ++x;
                 continue;
             }
-            const Region id = next;
+            Run run{y, x, x};
+            while (run.x1 < width && cost_.at(run.x1, y) != kBlocked) {
+                ++run.x1;
+            }
+            const auto index = static_cast<std::uint32_t>(runs.size());
+            runs.push_back(run);
+            parent.push_back(index);
+            // Отрезки строки выше, которые этот касается сбоку: пересекаются по x.
+            while (above < rowStart && runs[above].x1 <= run.x0) {
+                ++above;
+            }
+            for (std::size_t k = above; k < rowStart && runs[k].x0 < run.x1; ++k) {
+                unite(index, static_cast<std::uint32_t>(k));
+            }
+            x = run.x1;
+        }
+        above = rowStart;
+    }
+
+    std::vector<Region> idOf(runs.size(), kNoRegion); // по корню
+    Region next = 1;
+    for (std::size_t i = 0; i < runs.size(); ++i) {
+        const std::uint32_t root = find(static_cast<std::uint32_t>(i));
+        if (idOf[root] == kNoRegion) {
+            idOf[root] = next;
             if (next != kUnknownRegion) {
                 ++next;
             }
             ++regionCount_;
-            region_.at(x, y) = id;
-            queue.clear();
-            queue.push_back({x, y});
-            for (std::size_t k = 0; k < queue.size(); ++k) {
-                const Cell cell = queue[k];
-                for (int d = 0; d < 4; ++d) {
-                    const int nx = cell.x + kNavDx[d];
-                    const int ny = cell.y + kNavDy[d];
-                    if (contains(nx, ny) && cost_.at(nx, ny) != kBlocked &&
-                        region_.at(nx, ny) == kNoRegion) {
-                        region_.at(nx, ny) = id;
-                        queue.push_back({nx, ny});
-                    }
-                }
-            }
+        }
+        const Run& run = runs[i];
+        for (int x = run.x0; x < run.x1; ++x) {
+            region_.at(x, run.y) = idOf[root];
         }
     }
 }

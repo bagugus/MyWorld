@@ -354,10 +354,6 @@ void setFloat(const Shader& shader, const char* name, float value) {
     SetShaderValue(shader, GetShaderLocation(shader, name), &value, SHADER_UNIFORM_FLOAT);
 }
 
-void setInt(const Shader& shader, const char* name, int value) {
-    SetShaderValue(shader, GetShaderLocation(shader, name), &value, SHADER_UNIFORM_INT);
-}
-
 } // namespace
 
 Shader SceneShading::loadShader(const char* vertex, const char* fragmentBody) {
@@ -406,28 +402,60 @@ void SceneShading::setLight(const SceneLight& light, Vector3 eye, float fogScale
     shadowsOn_ = false;
 }
 
+const SceneShading::Uniforms& SceneShading::uniformsOf(const Shader& shader) const {
+    const auto found = uniforms_.find(shader.id);
+    if (found != uniforms_.end()) {
+        return found->second;
+    }
+    Uniforms u;
+    u.viewPos = GetShaderLocation(shader, "viewPos");
+    u.lightDir = GetShaderLocation(shader, "lightDir");
+    u.lightColor = GetShaderLocation(shader, "lightColor");
+    u.ambientSky = GetShaderLocation(shader, "ambientSky");
+    u.ambientGround = GetShaderLocation(shader, "ambientGround");
+    u.fogColor = GetShaderLocation(shader, "fogColor");
+    u.fogDensity = GetShaderLocation(shader, "fogDensity");
+    u.shadowMap = GetShaderLocation(shader, "shadowMap");
+    u.detailMap = GetShaderLocation(shader, "detailMap");
+    u.shadowStrength = GetShaderLocation(shader, "shadowStrength");
+    u.shadowTexel = GetShaderLocation(shader, "shadowTexel");
+    u.shadowRange = GetShaderLocation(shader, "shadowRange");
+    u.lightVP = GetShaderLocation(shader, "lightVP");
+    u.gradeTint = GetShaderLocation(shader, "gradeTint");
+    u.gradeFrame = GetShaderLocation(shader, "gradeFrame");
+    return uniforms_.emplace(shader.id, u).first->second;
+}
+
 void SceneShading::apply(const Shader& shader) const {
-    setVec3(shader, "viewPos", eye_);
-    setVec3(shader, "lightDir", light_.lightDir);
-    setVec3(shader, "lightColor", light_.lightColor);
-    setVec3(shader, "ambientSky", light_.ambientSky);
-    setVec3(shader, "ambientGround", light_.ambientGround);
-    setVec3(shader, "fogColor", light_.fogColor);
-    setFloat(shader, "fogDensity", fogDensity_);
-    setInt(shader, "shadowMap", kShadowUnit);
-    setInt(shader, "detailMap", kDetailUnit);
-    setFloat(shader, "shadowStrength", shadowsOn_ ? light_.shadowStrength : 0.0f);
-    setFloat(shader, "shadowTexel", 2.0f * shadowRadius_ / static_cast<float>(kShadowSize));
-    setFloat(shader, "shadowRange", shadowRange_);
-    SetShaderValueMatrix(shader, GetShaderLocation(shader, "lightVP"), lightViewProj_);
+    // Места униформ — один раз на шейдер: поиск по имени в драйвере дорог, а
+    // apply зовётся несколько раз за кадр (этап 2а.2).
+    const Uniforms& u = uniformsOf(shader);
+    const float fogDensity = fogDensity_;
+    const float shadowStrength = shadowsOn_ ? light_.shadowStrength : 0.0f;
+    const float shadowTexel = 2.0f * shadowRadius_ / static_cast<float>(kShadowSize);
+    const int shadowUnit = kShadowUnit;
+    const int detailUnit = kDetailUnit;
+    SetShaderValue(shader, u.viewPos, &eye_, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.lightDir, &light_.lightDir, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.lightColor, &light_.lightColor, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.ambientSky, &light_.ambientSky, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.ambientGround, &light_.ambientGround, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.fogColor, &light_.fogColor, SHADER_UNIFORM_VEC3);
+    SetShaderValue(shader, u.fogDensity, &fogDensity, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader, u.shadowMap, &shadowUnit, SHADER_UNIFORM_INT);
+    SetShaderValue(shader, u.detailMap, &detailUnit, SHADER_UNIFORM_INT);
+    SetShaderValue(shader, u.shadowStrength, &shadowStrength, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader, u.shadowTexel, &shadowTexel, SHADER_UNIFORM_FLOAT);
+    SetShaderValue(shader, u.shadowRange, &shadowRange_, SHADER_UNIFORM_FLOAT);
+    SetShaderValueMatrix(shader, u.lightVP, lightViewProj_);
     const float tint[4] = {grade_.tint.x, grade_.tint.y, grade_.tint.z, grade_.desaturate};
     const bool graded = grade_.desaturate > 0.0f || grade_.contrast > 0.0f || grade_.vignette > 0.0f ||
                         Vector3Length(grade_.tint) > 0.0f;
     const float frame[4] = {grade_.contrast, grade_.vignette,
                             graded ? static_cast<float>(GetRenderWidth()) : 0.0f,
                             graded ? static_cast<float>(GetRenderHeight()) : 0.0f};
-    SetShaderValue(shader, GetShaderLocation(shader, "gradeTint"), tint, SHADER_UNIFORM_VEC4);
-    SetShaderValue(shader, GetShaderLocation(shader, "gradeFrame"), frame, SHADER_UNIFORM_VEC4);
+    SetShaderValue(shader, u.gradeTint, tint, SHADER_UNIFORM_VEC4);
+    SetShaderValue(shader, u.gradeFrame, frame, SHADER_UNIFORM_VEC4);
 }
 
 bool SceneShading::beginShadowPass(Vector3 center, float radius) {

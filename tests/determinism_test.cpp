@@ -7,6 +7,7 @@
 // фазы мира, сюжетные линии.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
+#include "sim/BlockGrid.h"
 #include "sim/Calendar.h"
 #include "sim/Cast.h"
 #include "sim/Chronicle.h"
@@ -880,6 +881,33 @@ void testSpatialIndexParallelSync() {
     CHECK(same);
     CHECK(matchesBrute);
     CHECK(parallel.size() == kCount);
+}
+
+// Разреженный слой (этап 2а.2): без записи — «пустое» значение; запись
+// пустого блока не заводит, непустого — заводит один блок; чтение — то, что записано.
+void testBlockGrid() {
+    lw::BlockGrid<std::uint8_t> grid(100, 70, 30);
+    CHECK(grid.get(0, 0) == 30 && grid.get(99, 69) == 30);
+    const std::size_t empty = grid.memoryBytes();
+    grid.set(5, 5, 30);
+    CHECK(grid.memoryBytes() == empty);
+    grid.set(40, 33, 7);
+    grid.at(41, 33) |= 1;
+    CHECK(grid.get(40, 33) == 7 && grid.get(41, 33) == 31 && grid.get(42, 33) == 30);
+    CHECK(grid.memoryBytes() == empty + lw::BlockGrid<std::uint8_t>::kBlock * lw::BlockGrid<std::uint8_t>::kBlock);
+    grid.set(40, 33, 30);
+    CHECK(grid.get(40, 33) == 30);
+}
+
+// Карта по умолчанию — 16 × 16 км (этап 2а.2); на карте меньше — та же
+// плотность людей, зверей и стай: на 8 × 8 км — прежние 300, 160 и 24.
+void testPopulationForMap() {
+    const lw::WorldConfig defaults;
+    CHECK(defaults.mapWidth == lw::kDefaultMapCells && defaults.mapHeight == lw::kDefaultMapCells);
+    const lw::Population full = lw::populationFor(defaults.mapWidth, defaults.mapHeight);
+    CHECK(full.people == defaults.people && full.animals == defaults.animals && full.flocks == defaults.flocks);
+    const lw::Population quarter = lw::populationFor(2048, 2048);
+    CHECK(quarter.people == 300 && quarter.animals == 160 && quarter.flocks == 24);
 }
 
 // Параллельные проходы (восприятие, движение, синхронизация индекса — этап 2а.1)
@@ -8301,6 +8329,8 @@ int main() {
     testSpatialIndexParallelSync();
     testParallelThreadsSameHash();
     testProfilerDoesNotChangeWorld();
+    testBlockGrid();
+    testPopulationForMap();
     testSegmentWalk();
     testNavGrid();
     testPathfinderOnRandomMaps();

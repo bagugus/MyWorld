@@ -2,11 +2,14 @@
 
 #include "render/TreeLayout.h"
 #include "sim/Map.h"
+#include "sim/Parallel.h"
 
 #include <rlgl.h>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
+#include <unordered_map>
 
 namespace lw {
 
@@ -41,6 +44,8 @@ constexpr float kDeepSeaMeters = 45.0f;   // глубже цвет моря не
 constexpr float kReliefExaggeration = 3.0f; // во сколько раз подчёркнуты склоны в отмывке
 constexpr float kMinShade = 0.6f;
 constexpr float kMaxShade = 1.3f;
+// Вид сверху просит подробные текстуры, когда клетка на экране не мельче этого (пиксели).
+constexpr float kFineCellPixels = 1.0f;
 
 Color scale(Color color, float factor) {
     const auto channel = [factor](unsigned char value) {
@@ -76,7 +81,7 @@ float hillshade(const Map& map, int x, int y) {
 
 // Цвет клетки; shade — с отмывкой рельефа (вид сверху), без неё — для 3D, где
 // склоны лепит свет.
-Color cellColor(const Map& map, int x, int y, bool shade) {
+Color cellColor(const Map& map, int x, int y, bool shade, float relief) {
     // Дорога поверх всего, включая воду (мост).
     switch (map.road.at(x, y)) {
     case Road::Asphalt:
@@ -130,7 +135,7 @@ Color cellColor(const Map& map, int x, int y, bool shade) {
             break;
         }
     }
-    return shade ? scale(color, hillshade(map, x, y)) : color;
+    return shade ? scale(color, relief) : color;
 }
 
 // Насколько клетку видно белой под снегом: вода не заносится, лес и дороги — меньше.
@@ -147,6 +152,35 @@ unsigned char snowAlpha(const Map& map, int x, int y) {
     return 255;
 }
 
+// Четыре текселя клетки: с отмывкой, без неё, снег и маски для 3D.
+struct CellTexels {
+    Color shaded{};
+    Color plain{};
+    Color snow{};
+    Color masks{};
+};
+
+CellTexels texelsOf(const Map& map, int x, int y) {
+    CellTexels t;
+    const float relief = hillshade(map, x, y);
+    t.shaded = cellColor(map, x, y, true, relief);
+    t.plain = cellColor(map, x, y, false, relief);
+    // Снег тоже с отмывкой: склоны остаются читаемыми.
+    t.snow = scale({236, 240, 246, snowAlpha(map, x, y)}, std::min(1.0f, relief * 1.05f));
+    // Маски для 3D: R — доля лиственных в лесу, G — поле, B — луг (трава и цветы
+    // по сезону), A — дорога (канавы вдоль неё).
+    const float deciduous = map.cover.at(x, y) == Cover::Forest ? deciduousShareOf(map, {x, y}) : 0.0f;
+    const bool open = map.water.at(x, y) == Water::None && map.road.at(x, y) == Road::None &&
+                      map.cover.at(x, y) == Cover::None;
+    const bool field = open && map.ground.at(x, y) == Ground::Field;
+    const bool meadow = open && map.ground.at(x, y) == Ground::Grass;
+    const bool road = map.road.at(x, y) != Road::None && map.water.at(x, y) == Water::None;
+    t.masks = {static_cast<unsigned char>(std::lround(deciduous * 255.0f)),
+               static_cast<unsigned char>(field ? 255 : 0), static_cast<unsigned char>(meadow ? 255 : 0),
+               static_cast<unsigned char>(road ? 255 : 0)};
+    return t;
+}
+
 Texture2D makeTexture(const std::vector<Color>& pixels, int width, int height) {
     // Image не владеет пикселями, поэтому const_cast безопасен: LoadTextureFromImage только читает.
     const Image image = {const_cast<Color*>(pixels.data()), width, height, 1,
@@ -161,67 +195,112 @@ Texture2D makeTexture(const std::vector<Color>& pixels, int width, int height) {
 
 } // namespace
 
-MapRenderer::MapRenderer(const Map& map) : chunksX_((map.width() + kChunkCells - 1) / kChunkCells) {
-    std::vector<Color> pixels;
-    std::vector<Color> plain;
-    std::vector<Color> snow;
-    std::vector<Color> forest;
+MapRenderer::MapRenderer(const Map& map) : map_(map), chunksX_((map.width() + kChunkCells - 1) / kChunkCells) {
     for (int top = 0; top < map.height(); top += kChunkCells) {
         for (int left = 0; left < map.width(); left += kChunkCells) {
-            const int width = std::min(kChunkCells, map.width() - left);
-            const int height = std::min(kChunkCells, map.height() - top);
-            pixels.resize(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-            plain.resize(pixels.size());
-            snow.resize(pixels.size());
-            forest.resize(pixels.size());
-            for (int y = 0; y < height; ++y) {
-                for (int x = 0; x < width; ++x) {
-                    const std::size_t index = static_cast<std::size_t>(y) * static_cast<std::size_t>(width) +
-                                              static_cast<std::size_t>(x);
-                    pixels[index] = cellColor(map, left + x, top + y, true);
-                    plain[index] = cellColor(map, left + x, top + y, false);
-                    // Снег тоже с отмывкой: склоны остаются читаемыми.
-                    snow[index] = scale({236, 240, 246, snowAlpha(map, left + x, top + y)},
-                                        std::min(1.0f, hillshade(map, left + x, top + y) * 1.05f));
-                    // Маски для 3D: R — доля лиственных в лесу, G — поле, B — луг
-                    // (трава и цветы по сезону), A — дорога (канавы вдоль неё).
-                    const int cx = left + x;
-                    const int cy = top + y;
-                    const float deciduous = deciduousShareOf(map, {cx, cy});
-                    const bool open = map.water.at(cx, cy) == Water::None && map.road.at(cx, cy) == Road::None &&
-                                      map.cover.at(cx, cy) == Cover::None;
-                    const bool field = open && map.ground.at(cx, cy) == Ground::Field;
-                    const bool meadow = open && map.ground.at(cx, cy) == Ground::Grass;
-                    const bool road = map.road.at(cx, cy) != Road::None && map.water.at(cx, cy) == Water::None;
-                    forest[index] = {static_cast<unsigned char>(std::lround(deciduous * 255.0f)),
-                                     static_cast<unsigned char>(field ? 255 : 0),
-                                     static_cast<unsigned char>(meadow ? 255 : 0),
-                                     static_cast<unsigned char>(road ? 255 : 0)};
-                }
-            }
-
             Chunk chunk;
-            chunk.texture = makeTexture(pixels, width, height);
-            chunk.plain = makeTexture(plain, width, height);
-            chunk.snow = makeTexture(snow, width, height);
-            // Маска — плавная: на земле не видно квадратов клеток.
-            chunk.forest = makeTexture(forest, width, height);
-            SetTextureFilter(chunk.forest, TEXTURE_FILTER_TRILINEAR);
-            chunk.bounds = {static_cast<float>(left) * Map::kCellSize,
-                            static_cast<float>(top) * Map::kCellSize,
-                            static_cast<float>(width) * Map::kCellSize,
-                            static_cast<float>(height) * Map::kCellSize};
+            chunk.left = left;
+            chunk.top = top;
+            chunk.width = std::min(kChunkCells, map.width() - left);
+            chunk.height = std::min(kChunkCells, map.height() - top);
+            chunk.bounds = {static_cast<float>(left) * Map::kCellSize, static_cast<float>(top) * Map::kCellSize,
+                            static_cast<float>(chunk.width) * Map::kCellSize,
+                            static_cast<float>(chunk.height) * Map::kCellSize};
             chunks_.push_back(chunk);
         }
+    }
+    for (Chunk& chunk : chunks_) {
+        bake(chunk, kCoarse, chunk.coarse);
     }
 }
 
 MapRenderer::~MapRenderer() {
-    for (const Chunk& chunk : chunks_) {
-        UnloadTexture(chunk.texture);
-        UnloadTexture(chunk.plain);
-        UnloadTexture(chunk.snow);
-        UnloadTexture(chunk.forest);
+    for (Chunk& chunk : chunks_) {
+        unload(chunk.coarse);
+        unload(chunk.fine);
+    }
+}
+
+void MapRenderer::bake(const Chunk& chunk, int factor, Set& set) {
+    const int width = (chunk.width + factor - 1) / factor;
+    const int height = (chunk.height + factor - 1) / factor;
+    const std::size_t count = static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+    std::vector<Color> shaded(count);
+    std::vector<Color> plain(count);
+    std::vector<Color> snow(count);
+    std::vector<Color> masks(count);
+    // Тексель — среднее своих клеток; строки текселей независимы.
+    parallelFor(static_cast<std::size_t>(height), 8, 16, [&](std::size_t begin, std::size_t end, int) {
+        for (std::size_t ty = begin; ty < end; ++ty) {
+            for (int tx = 0; tx < width; ++tx) {
+                int sum[4][4] = {};
+                int cells = 0;
+                for (int dy = 0; dy < factor; ++dy) {
+                    const int y = chunk.top + static_cast<int>(ty) * factor + dy;
+                    if (y >= chunk.top + chunk.height) {
+                        break;
+                    }
+                    for (int dx = 0; dx < factor; ++dx) {
+                        const int x = chunk.left + tx * factor + dx;
+                        if (x >= chunk.left + chunk.width) {
+                            break;
+                        }
+                        const CellTexels t = texelsOf(map_, x, y);
+                        const Color colors[4] = {t.shaded, t.plain, t.snow, t.masks};
+                        for (int k = 0; k < 4; ++k) {
+                            sum[k][0] += colors[k].r;
+                            sum[k][1] += colors[k].g;
+                            sum[k][2] += colors[k].b;
+                            sum[k][3] += colors[k].a;
+                        }
+                        ++cells;
+                    }
+                }
+                const std::size_t i = ty * static_cast<std::size_t>(width) + static_cast<std::size_t>(tx);
+                Color* out[4] = {&shaded[i], &plain[i], &snow[i], &masks[i]};
+                for (int k = 0; k < 4; ++k) {
+                    const auto avg = [&](int c) {
+                        return static_cast<unsigned char>((sum[k][c] + cells / 2) / std::max(cells, 1));
+                    };
+                    *out[k] = {avg(0), avg(1), avg(2), avg(3)};
+                }
+            }
+        }
+    });
+    set.shaded = makeTexture(shaded, width, height);
+    set.plain = makeTexture(plain, width, height);
+    set.snow = makeTexture(snow, width, height);
+    // Маска — плавная: на земле не видно квадратов клеток.
+    set.masks = makeTexture(masks, width, height);
+    SetTextureFilter(set.masks, TEXTURE_FILTER_TRILINEAR);
+    if (filter_ >= 0) {
+        applyFilter(set, filter_);
+    }
+}
+
+void MapRenderer::unload(Set& set) {
+    for (Texture2D* texture : {&set.shaded, &set.plain, &set.snow, &set.masks}) {
+        if (texture->id != 0) {
+            UnloadTexture(*texture);
+        }
+        *texture = {};
+    }
+}
+
+void MapRenderer::applyFilter(const Set& set, int filter) const {
+    for (const Texture2D& texture : {set.shaded, set.plain, set.snow}) {
+        if (texture.id == 0) {
+            continue;
+        }
+        if (filter != kGroundFilter) {
+            SetTextureFilter(texture, filter);
+            continue;
+        }
+        // Увеличение — билинейное: чёткость клеткам даёт шейдер земли
+        // (Terrain3D, crisp), а край клетки сглажен на пиксель и не рябит.
+        rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
+        rlTextureParameters(texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
+        rlTextureParameters(texture.id, RL_TEXTURE_FILTER_ANISOTROPIC, 16);
     }
 }
 
@@ -230,33 +309,114 @@ void MapRenderer::setFilter(int filter) {
         return;
     }
     for (const Chunk& chunk : chunks_) {
-        for (const Texture2D& texture : {chunk.texture, chunk.plain, chunk.snow}) {
-            if (filter != kGroundFilter) {
-                SetTextureFilter(texture, filter);
-                continue;
-            }
-            // Увеличение — билинейное: чёткость клеткам даёт шейдер земли
-            // (Terrain3D, crisp), а край клетки сглажен на пиксель и не рябит.
-            rlTextureParameters(texture.id, RL_TEXTURE_MAG_FILTER, RL_TEXTURE_FILTER_LINEAR);
-            rlTextureParameters(texture.id, RL_TEXTURE_MIN_FILTER, RL_TEXTURE_FILTER_MIP_LINEAR);
-            rlTextureParameters(texture.id, RL_TEXTURE_FILTER_ANISOTROPIC, 16);
-        }
+        applyFilter(chunk.coarse, filter);
+        applyFilter(chunk.fine, filter);
     }
     filter_ = filter;
+}
+
+int MapRenderer::chunkAt(int x, int y) const {
+    return (y / kChunkCells) * chunksX_ + x / kChunkCells;
+}
+
+void MapRenderer::requestFine(int x, int y, float priority) {
+    requests_.push_back({chunkAt(x, y), priority});
+}
+
+void MapRenderer::commitFine() {
+    ++frame_;
+    // У чанка — самая высокая из его просьб; самые нужные kMaxFine — нужны.
+    std::unordered_map<int, float> best;
+    for (const Request& request : requests_) {
+        const auto [it, added] = best.emplace(request.chunk, request.priority);
+        if (!added) {
+            it->second = std::min(it->second, request.priority);
+        }
+    }
+    requests_.clear();
+    std::vector<Request> wanted;
+    wanted.reserve(best.size());
+    for (const auto& [chunk, priority] : best) {
+        wanted.push_back({chunk, priority});
+    }
+    std::sort(wanted.begin(), wanted.end(), [](const Request& a, const Request& b) {
+        return a.priority != b.priority ? a.priority < b.priority : a.chunk < b.chunk;
+    });
+    if (wanted.size() > static_cast<std::size_t>(kMaxFine)) {
+        wanted.resize(kMaxFine);
+    }
+
+    // Испечь самый нужный из неготовых — один за кадр.
+    pending_ = 0;
+    bool baked = false;
+    for (const Request& request : wanted) {
+        Chunk& chunk = chunks_[static_cast<std::size_t>(request.chunk)];
+        chunk.wanted = frame_;
+        if (chunk.fine.ready()) {
+            continue;
+        }
+        if (!baked) {
+            const auto start = std::chrono::steady_clock::now();
+            bake(chunk, 1, chunk.fine);
+            fineSeconds_ += std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+            ++fineBaked_;
+            baked = true;
+        } else {
+            ++pending_;
+        }
+    }
+
+    // Лишние — те, что давно не нужны, — из видеопамяти.
+    int resident = fineChunks();
+    while (resident > kMaxFine) {
+        Chunk* oldest = nullptr;
+        for (Chunk& chunk : chunks_) {
+            if (chunk.fine.ready() && chunk.wanted != frame_ && (oldest == nullptr || chunk.wanted < oldest->wanted)) {
+                oldest = &chunk;
+            }
+        }
+        if (oldest == nullptr) {
+            break;
+        }
+        unload(oldest->fine);
+        --resident;
+    }
+}
+
+int MapRenderer::fineChunks() const {
+    int count = 0;
+    for (const Chunk& chunk : chunks_) {
+        count += chunk.fine.ready() ? 1 : 0;
+    }
+    return count;
 }
 
 void MapRenderer::draw(const Rectangle& visible, float zoom) {
     // Вблизи клетки рисуются чёткими квадратами, издали — сглаживаются.
     setFilter(zoom * Map::kCellSize >= 1.0f ? TEXTURE_FILTER_POINT : TEXTURE_FILTER_TRILINEAR);
 
+    // Клетка на экране крупнее пикселя — нужны подробные текстуры; ближе к
+    // середине экрана — нужнее.
+    const bool fine = zoom * Map::kCellSize >= kFineCellPixels;
+    const Vector2 middle = {visible.x + visible.width * 0.5f, visible.y + visible.height * 0.5f};
+    for (std::size_t i = 0; i < chunks_.size(); ++i) {
+        const Chunk& chunk = chunks_[i];
+        if (fine && CheckCollisionRecs(chunk.bounds, visible)) {
+            const float dx = chunk.bounds.x + chunk.bounds.width * 0.5f - middle.x;
+            const float dy = chunk.bounds.y + chunk.bounds.height * 0.5f - middle.y;
+            requestFine(chunk.left, chunk.top, std::sqrt(dx * dx + dy * dy));
+        }
+    }
+    commitFine();
+
     chunksDrawn_ = 0;
     for (const Chunk& chunk : chunks_) {
         if (!CheckCollisionRecs(chunk.bounds, visible)) {
             continue;
         }
-        const Rectangle source = {0.0f, 0.0f, static_cast<float>(chunk.texture.width),
-                                  static_cast<float>(chunk.texture.height)};
-        DrawTexturePro(chunk.texture, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, WHITE);
+        const Texture2D& texture = chunk.fine.ready() ? chunk.fine.shaded : chunk.coarse.shaded;
+        const Rectangle source = {0.0f, 0.0f, static_cast<float>(texture.width), static_cast<float>(texture.height)};
+        DrawTexturePro(texture, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, WHITE);
         ++chunksDrawn_;
     }
 }
@@ -270,22 +430,24 @@ void MapRenderer::drawSnow(const Rectangle& visible, float amount) {
         if (!CheckCollisionRecs(chunk.bounds, visible)) {
             continue;
         }
-        const Rectangle source = {0.0f, 0.0f, static_cast<float>(chunk.snow.width),
-                                  static_cast<float>(chunk.snow.height)};
-        DrawTexturePro(chunk.snow, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, tint);
+        const Texture2D& snow = chunk.fine.ready() ? chunk.fine.snow : chunk.coarse.snow;
+        const Rectangle source = {0.0f, 0.0f, static_cast<float>(snow.width), static_cast<float>(snow.height)};
+        DrawTexturePro(snow, source, chunk.bounds, {0.0f, 0.0f}, 0.0f, tint);
     }
 }
 
 MapRenderer::GroundChunk MapRenderer::groundChunk(int x, int y) const {
-    const Chunk& chunk = chunks_[static_cast<std::size_t>((y / kChunkCells) * chunksX_ + x / kChunkCells)];
+    const Chunk& chunk = chunks_[static_cast<std::size_t>(chunkAt(x, y))];
+    const Set& set = chunk.fine.ready() ? chunk.fine : chunk.coarse;
     GroundChunk result;
-    result.texture = chunk.plain;
-    result.snow = chunk.snow;
-    result.forest = chunk.forest;
-    result.left = x / kChunkCells * kChunkCells;
-    result.top = y / kChunkCells * kChunkCells;
-    result.width = chunk.texture.width;
-    result.height = chunk.texture.height;
+    result.texture = set.plain;
+    result.snow = set.snow;
+    result.forest = set.masks;
+    result.left = chunk.left;
+    result.top = chunk.top;
+    result.width = chunk.width;
+    result.height = chunk.height;
+    result.fine = chunk.fine.ready();
     return result;
 }
 
@@ -300,7 +462,9 @@ std::size_t MapRenderer::textureBytes() const {
     };
     std::size_t total = 0;
     for (const Chunk& chunk : chunks_) {
-        total += bytes(chunk.texture) + bytes(chunk.plain) + bytes(chunk.snow) + bytes(chunk.forest);
+        for (const Set* set : {&chunk.coarse, &chunk.fine}) {
+            total += bytes(set->shaded) + bytes(set->plain) + bytes(set->snow) + bytes(set->masks);
+        }
     }
     return total;
 }

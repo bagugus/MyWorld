@@ -5,6 +5,7 @@
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
 //                [--pose-gallery [ROW]] [--interior ID [YAW]] [--compose SENSE [ID [OTHER]]]
 //                [--map-size CELLS] [--people N] [--animals N] [--flocks N] [--threads N]
+//                [--sample [start]]
 //
 // --event       начать ивент на старте (drop — сброс груза, crash — крушение вертолёта,
 //               convoy — застрявший конвой) и открыть его в инспекторе;
@@ -28,7 +29,10 @@
 // --director    режим «Сериал» (этап 12а.7): кино в 3D во весь экран — камеру ведёт режиссёр
 //               по самой интересной сюжетной линии, окна спрятаны; Esc — выход, F11 — снова
 // --zombies, --no-peace, --map-size, --people, --animals, --flocks, --threads — как у
-//               lw_headless (--map-size 4096 — карта 16 × 16 км, этап 2а.1)
+//               lw_headless (по умолчанию карта 16 × 16 км, этап 2а.2; --map-size 2048 —
+//               8 × 8 км, люди, звери и стаи — по площади, если не заданы явно)
+// --sample      горячие функции кадров окна (сэмплирующий профайлер, Windows; этап 2а.2):
+//               отчёт при выходе; start — и старт (мир, текстуры карты, 3D)
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
 //               сохранить снимок окна и выйти
 // --screenshot-delay  снять не сразу, а через S реальных секунд работы окна (режиссёр)
@@ -69,6 +73,7 @@
 #include "ui/Showrunner.h"
 #include "ui/Ui.h"
 #include "util/ProcessMemory.h"
+#include "util/SamplingProfiler.h"
 
 #include <raylib.h>
 
@@ -293,13 +298,22 @@ void logStats(const lw::World& world, const lw::WorldRenderer& renderer, const l
     std::printf("STATS: frame on CPU %.1f ms average, %.1f ms worst in a second (simulation %.1f ms), "
                 "%d FPS, threads %d\n",
                 stats.frameMsAverage, stats.frameMsWorst, stats.simMs, stats.fps, lw::parallelThreads());
-    std::printf("STATS: memory: process %.0f MB (peak %.0f), world structures %.0f MB, map textures %.0f MB\n",
-                mb(memory.workingSet), mb(memory.peakWorkingSet), mb(structures), mb(renderer.map().textureBytes()));
+    std::printf("STATS: memory: process %.0f MB (peak %.0f), world structures %.0f MB, map textures %.0f MB "
+                "(fine chunks %d, baked %d in %.2f s)\n",
+                mb(memory.workingSet), mb(memory.peakWorkingSet), mb(structures), mb(renderer.map().textureBytes()),
+                renderer.map().fineChunks(), renderer.map().fineBaked(), renderer.map().fineSeconds());
     std::printf("STATS: 3d meshes built: terrain %d (%.2f s, loaded %d), trees %d (%.2f s, loaded %d), "
                 "props %d (%.2f s, loaded %d), pending %d\n",
                 terrain.meshesBuilt(), terrain.buildSeconds(), terrain.meshesLoaded(), trees.meshesBuilt(),
                 trees.buildSeconds(), trees.meshesLoaded(), props.meshesBuilt(), props.buildSeconds(),
                 props.meshesLoaded(), renderer3d.pending());
+    const lw::Buildings3D& buildings = renderer3d.buildings();
+    std::printf("STATS: 3d frame: terrain tiles %d (%d k triangles), buildings %d in %d chunks (meshes built %d, "
+                "%.2f s), creatures %d; height blocks %d (computed %d), land use %.1f MB\n",
+                terrain.tilesDrawn(), terrain.trianglesDrawn() / 1000, renderer3d.buildingsDrawn(),
+                buildings.chunksDrawn(), buildings.meshesBuilt(), buildings.buildSeconds(),
+                renderer3d.creaturesDrawn(), terrain.heightBlocks(), terrain.heightComputes(),
+                mb(renderer3d.land().memoryBytes()));
     std::fflush(stdout);
 }
 
@@ -332,6 +346,11 @@ int main(int argc, char** argv) {
     std::optional<lw::EventKind> event;
     std::optional<lw::WorldPhase> phase; // --phase: сразу в эту фазу мира
     lw::WorldConfig config;
+    bool peopleSet = false;   // --people, --animals, --flocks заданы явно;
+    bool animalsSet = false;  // иначе — по площади карты (этап 2а.2)
+    bool flocksSet = false;
+    bool sample = false;      // --sample: горячие функции кадров
+    bool sampleStart = false; // --sample start: и старта
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = std::strtoull(argv[++i], nullptr, 10);
@@ -406,10 +425,13 @@ int main(int argc, char** argv) {
             config.mapWidth = config.mapHeight = std::max(64, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--people") == 0 && i + 1 < argc) {
             config.people = std::atoi(argv[++i]);
+            peopleSet = true;
         } else if (std::strcmp(argv[i], "--animals") == 0 && i + 1 < argc) {
             config.animals = std::atoi(argv[++i]);
+            animalsSet = true;
         } else if (std::strcmp(argv[i], "--flocks") == 0 && i + 1 < argc) {
             config.flocks = std::atoi(argv[++i]);
+            flocksSet = true;
         } else if (std::strcmp(argv[i], "--threads") == 0 && i + 1 < argc) {
             lw::setParallelThreads(std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--no-peace") == 0) {
@@ -420,10 +442,21 @@ int main(int argc, char** argv) {
             phase = lw::phaseByName(argv[++i]);
         } else if (std::strcmp(argv[i], "--lod") == 0 && i + 1 < argc) {
             config.lod = std::strcmp(argv[++i], "off") != 0; // LOD симуляции (этап 6а)
+        } else if (std::strcmp(argv[i], "--sample") == 0) {
+            sample = true;
+            if (i + 1 < argc && std::strcmp(argv[i + 1], "start") == 0) {
+                sampleStart = true;
+                ++i;
+            }
         } else if (std::strcmp(argv[i], "--lod-map") == 0) {
             lw::ui::setLodOverlay(true); // слой детализации в виде сверху
         }
     }
+
+    const lw::Population population = lw::populationFor(config.mapWidth, config.mapHeight);
+    config.people = peopleSet ? config.people : population.people;
+    config.animals = animalsSet ? config.animals : population.animals;
+    config.flocks = flocksSet ? config.flocks : population.flocks;
 
     // Мир создаётся до окна: генерация карты занимает пару секунд, и пустое
     // окно в это время выглядело бы зависшим.
@@ -432,6 +465,10 @@ int main(int argc, char** argv) {
     const auto seconds = [](Clock::time_point from) {
         return std::chrono::duration<double>(Clock::now() - from).count();
     };
+    lw::SamplingProfiler sampler;
+    if (sampleStart) {
+        sampler.start();
+    }
     Clock::time_point mark = Clock::now();
     lw::World world(seed, config);
     stats.worldSeconds = seconds(mark);
@@ -510,6 +547,9 @@ int main(int argc, char** argv) {
         lw::ui::CinemaCamera composer; // --compose
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
+        if (sample && !sampleStart) {
+            sampler.start();
+        }
         for (int frame = 0; !WindowShouldClose(); ++frame) {
             const float dt = GetFrameTime();
             const Clock::time_point frameStart = Clock::now();
@@ -630,7 +670,9 @@ int main(int argc, char** argv) {
 
             EndDrawing();
 
-            const bool settled = !camera.is3d() || renderer3d.pending() == 0;
+            // Снимок ждёт подробных текстур карты, а в 3D — ещё деревьев и мелочи.
+            const bool settled =
+                renderer.map().pending() == 0 && (!camera.is3d() || renderer3d.pending() == 0);
             if (screenshot != nullptr && frame >= kScreenshotFrame && (settled || frame >= kScreenshotWait) &&
                 GetTime() >= screenshotDelay) {
                 TraceLog(LOG_INFO, "SCREENSHOT: frame %d, %d FPS", frame, GetFPS());
@@ -643,6 +685,10 @@ int main(int argc, char** argv) {
         }
 
         lw::ui::shutdown();
+    }
+    if (sample) {
+        sampler.stop();
+        sampler.report(stdout);
     }
     CloseWindow();
     return 0;

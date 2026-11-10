@@ -374,10 +374,6 @@ void WorldRenderer3D::setDrawDistance(float meters) {
     drawDistance_ = std::clamp(meters, kMinDrawDistance, kMaxDrawDistance);
 }
 
-BuildingModel WorldRenderer3D::buildingModel(const Building& building, EntityId id) const {
-    return buildingModelOf(building, id, terrain_);
-}
-
 bool WorldRenderer3D::interiorView(const CameraController& camera) const {
     const InteriorLayout* layout = interior_.layout();
     if (layout == nullptr || !camera.is3d()) {
@@ -518,16 +514,8 @@ void WorldRenderer3D::updateBuildingBounds(const World& world) {
         trees_.reset();
         props_.reset();
     }
-    const auto buildings = world.registry().view<const Building>();
-    if (buildingBounds_.size() == buildings.size()) {
-        return; // здания не меняются: посчитано раньше
-    }
-    buildingBounds_.clear();
-    buildingBounds_.reserve(buildings.size());
-    for (const auto [entity, building] : buildings.each()) {
-        const BuildingModel model = buildingModel(building, world.registry().get<Id>(entity).value);
-        buildingBounds_.push_back({{model.x0, model.low, model.z0}, {model.x1, buildingTop(model), model.z1}});
-    }
+    // Здания не меняются: модели и сетки — один раз.
+    buildings_.build(world, terrain_);
 }
 
 void WorldRenderer3D::draw(const World& world, const CameraController& camera, float alpha) {
@@ -602,6 +590,9 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         props_.update(view, Props3D::kSmallRange, std::min(drawDistance_, kMaxPropsRange));
     }
 
+    // Коробки зданий — сетками по чанкам; открытое изнутри — комнатами.
+    buildings_.update(snow, interior_.layout() != nullptr ? interior_.building() : kInvalidId);
+
     // Тени: квадрат вокруг точки взгляда, чуть вперёд по взгляду.
     const float distance = Vector3Distance(eye, view.target);
     if (shadowsEnabled_ && distance < kShadowsOff) {
@@ -613,6 +604,7 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         const Vector3 center = Vector3Add(view.target, Vector3Scale(ahead, 0.35f * radius));
         if (shading_.beginShadowPass(center, radius)) {
             terrain_.drawShadowCasters(view, shading_.shadowCenter(), shading_.shadowRadius());
+            buildings_.drawShadows(shading_);
             if (treesEnabled_) {
                 trees_.drawShadows(shading_, trees);
             }
@@ -643,8 +635,10 @@ void WorldRenderer3D::draw(const World& world, const CameraController& camera, f
         props_.draw(shading_, props);
     }
 
-    // Всё непрозрачное — одним набором четырёхугольников без текстуры.
+    // Всё непрозрачное — одним набором четырёхугольников без текстуры; коробки
+    // зданий — готовыми сетками тем же шейдером.
     shading_.beginModels();
+    buildingsDrawn_ = buildings_.drawShells(shading_);
     rlSetTexture(rlGetTextureIdDefault());
     rlBegin(RL_QUADS);
     emitScene(world, camera, alpha, false);
@@ -686,45 +680,51 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
 
     const entt::registry& registry = world.registry();
     if (!shadowPass) {
-        buildingsDrawn_ = 0;
         creaturesDrawn_ = 0;
     }
     const InteriorLayout* interior = interior_.layout();
-    for (const auto [entity, building] : registry.view<const Building>().each()) {
-        const EntityId id = registry.get<Id>(entity).value;
-        if (interior != nullptr && id == interior_.building()) {
-            // Открытое здание — комнатами изнутри (в карту теней — стены с окнами и потолок).
-            InteriorLook look;
-            look.hiddenWalls = &hiddenWalls_;
-            look.hiddenFurniture = &hiddenFurniture_;
-            look.lampsOn = lampsOn_;
-            look.shadowPass = shadowPass;
-            emitInterior(*interior, look);
-            buildingsDrawn_ += shadowPass ? 0 : 1;
-            continue;
-        }
-        BuildingModel model = buildingModel(building, id);
-        const Vector2 center = {(model.x0 + model.x1) * 0.5f, (model.z0 + model.z1) * 0.5f};
-        const float top = buildingTop(model);
-        if (skip({center.x, (model.low + top) * 0.5f, center.y},
-                   std::max(model.x1 - model.x0, model.z1 - model.z0) + top - model.low)) {
-            continue;
-        }
-        model.snow = snow;
-        // Мелочь на стенах тени не отбрасывает. Окно меньше нескольких пикселей
-        // мелькало бы при движении камеры: у предела детали тают в цвет стены.
-        const float pixels = camera.zoomAt(center);
-        const float distance = Vector3Distance(eye, {center.x, model.low, center.y});
-        model.detailed = !shadowPass && pixels >= kDetailPixels && distance < drawDistance_;
-        model.detail = std::clamp((pixels - kDetailPixels) / (2.0f * kDetailPixels), 0.0f, 1.0f);
-        // Окно — плоскость у самой стены. Вдали буфер глубины различает
-        // только слои в d² / (near · 2²⁴) друг от друга; окно отходит от стены
-        // на втрое больше, иначе стена и окно мерцают, перекрывая друг друга.
-        model.decalOut = std::max(0.04f, 3.0f * distance * distance / (nearPlane * 16777216.0f));
-        model.eye = eye;
-        model.lights = !shadowPass && litBuildings_.contains(id) ? lights_ : 0.0f;
-        emitBuilding(model);
-        buildingsDrawn_ += shadowPass ? 0 : 1;
+    if (interior != nullptr) {
+        // Открытое здание — комнатами изнутри (в карту теней — стены с окнами и потолок).
+        InteriorLook look;
+        look.hiddenWalls = &hiddenWalls_;
+        look.hiddenFurniture = &hiddenFurniture_;
+        look.lampsOn = lampsOn_;
+        look.shadowPass = shadowPass;
+        emitInterior(*interior, look);
+    }
+    // Коробки зданий — в сетках (Buildings3D); здесь только окна, двери и крыльца
+    // ближних: мелочь на стенах тени не отбрасывает.
+    if (!shadowPass) {
+        buildings_.forEachNear({eye.x, eye.z}, drawDistance_, [&](const Buildings3D::Entry& entry) {
+            if (interior != nullptr && entry.id == interior_.building()) {
+                return;
+            }
+            const BuildingModel& base = entry.model;
+            const Vector2 center = {(base.x0 + base.x1) * 0.5f, (base.z0 + base.z1) * 0.5f};
+            const float top = entry.bounds.max.y;
+            if (skip({center.x, (base.low + top) * 0.5f, center.y},
+                     std::max(base.x1 - base.x0, base.z1 - base.z0) + top - base.low)) {
+                return;
+            }
+            // Окно меньше нескольких пикселей мелькало бы при движении камеры: у
+            // предела детали тают в цвет стены.
+            const float pixels = camera.zoomAt(center);
+            const float distance = Vector3Distance(eye, {center.x, base.low, center.y});
+            if (pixels < kDetailPixels || distance >= drawDistance_) {
+                return;
+            }
+            BuildingModel model = base;
+            model.snow = snow;
+            model.detailed = true;
+            model.detail = std::clamp((pixels - kDetailPixels) / (2.0f * kDetailPixels), 0.0f, 1.0f);
+            // Окно — плоскость у самой стены. Вдали буфер глубины различает
+            // только слои в d² / (near · 2²⁴) друг от друга; окно отходит от стены
+            // на втрое больше, иначе стена и окно мерцают, перекрывая друг друга.
+            model.decalOut = std::max(0.04f, 3.0f * distance * distance / (nearPlane * 16777216.0f));
+            model.eye = eye;
+            model.lights = litBuildings_.contains(entry.id) ? lights_ : 0.0f;
+            emitBuildingDetails(model);
+        });
     }
 
     // Мосты: настил над водой по клеткам дороги, перила и опоры; вдали тают.
@@ -753,13 +753,18 @@ void WorldRenderer3D::emitScene(const World& world, const CameraController& came
             at.x -= v->x * back;
             at.y -= v->y * back;
         }
+        const EntityId id = registry.get<Id>(entity).value;
+        // Дальше дальности прорисовки — не рисуется (кроме выбранного), у края тает.
+        // По плоскости — до высоты: высоты вдали считаются блоками по требованию
+        // (Terrain3D), и спрашивать их у всех существ карты дорого.
+        const bool highlighted = id == highlight_;
+        if (!highlighted && Vector2Distance({eye.x, eye.z}, at) >= drawDistance_) {
+            continue;
+        }
         const float stand = terrain_.standAt(at.x, at.y);
         if (skip({at.x, stand, at.y}, 50.0f)) {
             continue;
         }
-        const EntityId id = registry.get<Id>(entity).value;
-        // Дальше дальности прорисовки — не рисуется (кроме выбранного), у края тает.
-        const bool highlighted = id == highlight_;
         const float distance = Vector3Distance(eye, {at.x, stand, at.y});
         const float fade = highlighted ? 1.0f : fadeAt(distance, drawDistance_);
         if (fade <= 0.0f) {

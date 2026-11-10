@@ -89,7 +89,13 @@ struct BuildingModel {
 };
 // Высота крыши здания над землёй (для отсечения).
 float buildingTop(const BuildingModel& model);
+// Здание целиком: коробка и, если detailed, окна, дверь, крыльцо, вывеска.
 void emitBuilding(const BuildingModel& model);
+// Коробка: цоколь, стены, крыша со снегом, труба, парапет. От взгляда не
+// зависит (только от снега), поэтому идёт в статичные сетки (render/Buildings3D).
+void emitBuildingShell(const BuildingModel& model);
+// Окна, дверь, крыльцо, вывеска — вблизи, по взгляду (decalOut, eye, detail, lights).
+void emitBuildingDetails(const BuildingModel& model);
 
 // Коробка здания (этап 12а.14): пол первого этажа, высота и число этажей —
 // по ним строится планировка внутри (render/Interior).
@@ -119,6 +125,22 @@ void emitInterior(const InteriorLayout& layout, const InteriorLook& look);
 // Следующие грани — внутри помещения: рассеянный свет неба на них приглушён
 // (люди в комнате). Пишется в первую текстурную координату грани.
 void setModelIndoor(bool indoor);
+
+// Грани, собранные в массивы вместо rlgl (этап 2а.2): из них строятся
+// статичные сетки (здания вдали — render/Buildings3D). Четыре вершины на грань
+// (четырёхугольник a-b-c-d), атрибуты — как у шейдера моделей.
+struct ModelMesh {
+    std::vector<float> vertices;       // x, y, z
+    std::vector<float> normals;        // x, y, z
+    std::vector<float> texcoords;      // u, v: свечение или «внутри», растворение
+    std::vector<unsigned char> colors; // r, g, b, a
+    std::size_t vertexCount() const { return vertices.size() / 3; }
+    void quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 normal, Vector2 texcoord, Color color);
+    void clear();
+};
+// Пока захват включён, все emit* пишут грани в sink, а не в rlgl.
+void beginModelCapture(ModelMesh& sink);
+void endModelCapture();
 
 // Коробка по осям мира от min до max (с дном, если bottom).
 void emitWorldBox(Vector3 min, Vector3 max, Color color, bool bottom = false);

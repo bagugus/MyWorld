@@ -50,7 +50,7 @@ LandUse::LandUse(const Map& map)
       lot_(map.width(), map.height(), 0),
       flowDir_(map.width(), map.height(), kNoFlow),
       drop_(map.width(), map.height(), 0),
-      inset_(map.width(), map.height(), 0) {
+      inset_(map.width(), map.height(), static_cast<std::uint8_t>(std::lround(kOpenInset * 100.0f))) {
     computeFlow();
     computeChannels();
     markRoadsAndShores();
@@ -84,6 +84,9 @@ void LandUse::computeFlow() {
     };
     std::priority_queue<Node, std::vector<Node>, std::greater<>> queue;
     Grid<std::uint8_t> visited(width, height, 0);
+    // Направления — во временном плотном слое: в затоплении участвуют и озёра,
+    // а хранятся (разреженно) только у рек.
+    Grid<std::uint8_t> direction(width, height, kNoFlow);
     std::uint32_t order = 0;
     const auto inland = [&](int x, int y) {
         return map_.contains({x, y}) && freshWater(map_.water.at(x, y));
@@ -100,7 +103,7 @@ void LandUse::computeFlow() {
                 }
                 visited.at(nx, ny) = 1;
                 // Из соседа вода течёт сюда: направление обратное d.
-                flowDir_.at(nx, ny) = static_cast<std::uint8_t>(d < 4 ? (d + 2) % 4 : 4 + (d - 4 + 2) % 4);
+                direction.at(nx, ny) = static_cast<std::uint8_t>(d < 4 ? (d + 2) % 4 : 4 + (d - 4 + 2) % 4);
                 queue.push({std::max(waterLevel({nx, ny}), node.key), order++, nx, ny});
             }
         }
@@ -122,7 +125,7 @@ void LandUse::computeFlow() {
             }
             if (out >= 0) {
                 visited.at(x, y) = 1;
-                flowDir_.at(x, y) = static_cast<std::uint8_t>(out);
+                direction.at(x, y) = static_cast<std::uint8_t>(out);
                 queue.push({waterLevel({x, y}), order++, x, y});
             }
         }
@@ -144,7 +147,7 @@ void LandUse::computeFlow() {
             continue;
         }
         visited.at(x, y) = 1;
-        flowDir_.at(x, y) = kNoFlow;
+        direction.at(x, y) = kNoFlow;
         queue.push({level, order++, x, y});
         flood();
     }
@@ -152,20 +155,17 @@ void LandUse::computeFlow() {
     // Падение уровня до следующей клетки — для перекатов; течёт только река.
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const std::uint8_t d = flowDir_.at(x, y);
-            if (map_.water.at(x, y) != Water::River) {
-                flowDir_.at(x, y) = kNoFlow;
+            const std::uint8_t d = direction.at(x, y);
+            if (map_.water.at(x, y) != Water::River || d == kNoFlow) {
                 continue;
             }
-            if (d == kNoFlow) {
-                continue;
-            }
+            flowDir_.set(x, y, d);
             const Cell next = {x + kDx8[d], y + kDy8[d]};
             if (!map_.contains(next) || map_.water.at(next.x, next.y) == Water::None) {
                 continue;
             }
             const float drop = waterLevel({x, y}) - waterLevel(next);
-            drop_.at(x, y) = static_cast<std::uint8_t>(std::clamp(drop * 100.0f, 0.0f, 255.0f));
+            drop_.set(x, y, static_cast<std::uint8_t>(std::clamp(drop * 100.0f, 0.0f, 255.0f)));
         }
     }
 }
@@ -221,7 +221,7 @@ void LandUse::computeChannels() {
                     static_cast<float>(kInsetRamp);
                 inset = kOpenInset + (full - kOpenInset) * std::clamp(share, 0.0f, 1.0f);
             }
-            inset_.at(x, y) = static_cast<std::uint8_t>(std::lround(inset * 100.0f));
+            inset_.set(x, y, static_cast<std::uint8_t>(std::lround(inset * 100.0f)));
         }
     }
 }
@@ -245,7 +245,7 @@ void LandUse::markRoadsAndShores() {
                     flags |= kShore;
                 }
             }
-            flags_.at(x, y) = flags;
+            flags_.set(x, y, flags);
         }
     }
 }
@@ -266,7 +266,7 @@ LandUse::Flow LandUse::flowAt(Cell cell) const {
             if (!map_.contains(around)) {
                 continue;
             }
-            const std::uint8_t d = flowDir_.at(around.x, around.y);
+            const std::uint8_t d = flowDir_.get(around.x, around.y);
             if (d == kNoFlow) {
                 continue;
             }
@@ -274,7 +274,7 @@ LandUse::Flow LandUse::flowAt(Cell cell) const {
             sx += static_cast<float>(kDx8[d]) / length;
             sz += static_cast<float>(kDy8[d]) / length;
             // Падение на клетку русла: от 12 см — рябит быстрее, от полуметра — пена.
-            const float drop = static_cast<float>(drop_.at(around.x, around.y)) / 100.0f / length;
+            const float drop = static_cast<float>(drop_.get(around.x, around.y)) / 100.0f / length;
             rapids += std::clamp((drop - 0.12f) / 0.38f, 0.0f, 1.0f);
             ++count;
         }
@@ -294,7 +294,7 @@ LandUse::Flow LandUse::flowAt(Cell cell) const {
 
 float LandUse::channelInset(Cell cell) const {
     const Cell c = map_.clampedCellAt(Map::cellCenter(cell.x), Map::cellCenter(cell.y));
-    return static_cast<float>(inset_.at(c.x, c.y)) / 100.0f;
+    return static_cast<float>(inset_.get(c.x, c.y)) / 100.0f;
 }
 
 float LandUse::bankHeight(Cell cell) const {
@@ -411,7 +411,7 @@ void LandUse::addLots(const World& world) {
         return 0;
     };
     const auto open = [&](int x, int y) {
-        return map_.contains({x, y}) && lot_.at(x, y) == 0 && map_.water.at(x, y) == Water::None &&
+        return map_.contains({x, y}) && lot_.get(x, y) == 0 && map_.water.at(x, y) == Water::None &&
                map_.road.at(x, y) == Road::None && map_.cover.at(x, y) == Cover::None;
     };
     struct Step {
@@ -468,7 +468,7 @@ void LandUse::addLots(const World& world) {
         const int y1 = lot.origin.y + lot.height;
         for (int y = lot.origin.y - 2; y < y1 + 2; ++y) {
             for (int x = lot.origin.x - 2; x < x1 + 2; ++x) {
-                if (!map_.contains({x, y}) || lot_.at(x, y) != i + 1 || (flags_.at(x, y) & kYard) == 0) {
+                if (!map_.contains({x, y}) || lot_.get(x, y) != i + 1 || (flags_.get(x, y) & kYard) == 0) {
                     continue;
                 }
                 bool behind = false;
@@ -499,7 +499,7 @@ void LandUse::addYardThings() {
         for (int y = lot.origin.y - 3; y < lot.origin.y + lot.height + 3; ++y) {
             for (int x = lot.origin.x - 3; x < lot.origin.x + lot.width + 3; ++x) {
                 const Cell cell = {x, y};
-                if (!map_.contains(cell) || lot_.at(x, y) != own || (flags_.at(x, y) & kYard) == 0) {
+                if (!map_.contains(cell) || lot_.get(x, y) != own || (flags_.get(x, y) & kYard) == 0) {
                     continue;
                 }
                 for (int d = 0; d < 4; ++d) {
@@ -507,8 +507,8 @@ void LandUse::addYardThings() {
                     if (!map_.contains(next)) {
                         continue;
                     }
-                    const int other = lot_.at(next.x, next.y);
-                    if (other == own || (flags_.at(next.x, next.y) & kBuilding) != 0 ||
+                    const int other = lot_.get(next.x, next.y);
+                    if (other == own || (flags_.get(next.x, next.y) & kBuilding) != 0 ||
                         map_.water.at(next.x, next.y) != Water::None) {
                         continue;
                     }
@@ -517,7 +517,7 @@ void LandUse::addYardThings() {
                     }
                     Thing fence;
                     const bool street = map_.road.at(next.x, next.y) != Road::None;
-                    fence.kind = street && (flags_.at(x, y) & kDoor) != 0 ? ThingKind::Gate : ThingKind::Fence;
+                    fence.kind = street && (flags_.get(x, y) & kDoor) != 0 ? ThingKind::Gate : ThingKind::Fence;
                     fence.style = lot.fence;
                     fence.length = kCell;
                     const float x0 = static_cast<float>(x) * kCell;
@@ -577,10 +577,10 @@ void LandUse::addYardThings() {
         const std::uint32_t bits = lot.bits;
         const auto yardCell = [&](float x, float z) {
             const Cell cell = Map::cellAt(x, z);
-            return map_.contains(cell) && lot_.at(cell.x, cell.y) == own && (flags_.at(cell.x, cell.y) & kYard) != 0;
+            return map_.contains(cell) && lot_.get(cell.x, cell.y) == own && (flags_.get(cell.x, cell.y) & kYard) != 0;
         };
 
-        if (lot.kind == BuildingKind::House && hashUnit(bits >> 5) < 0.6f && (flags_.at(lot.door.x, lot.door.y) & kYard)) {
+        if (lot.kind == BuildingKind::House && hashUnit(bits >> 5) < 0.6f && (flags_.get(lot.door.x, lot.door.y) & kYard)) {
             // Скамейка у стены сбоку от входа, сидящий смотрит на улицу. Крыльцо
             // (render/Models3D) — дверь 1 м и по 0,3 м с боков: скамейка длиной
             // 1,4 м начинается за ним.
@@ -628,8 +628,8 @@ void LandUse::addYardThings() {
             for (int y = lot.origin.y - 3; y < lot.origin.y + lot.height + 3; ++y) {
                 for (int x = lot.origin.x - 3; x < lot.origin.x + lot.width + 3; ++x) {
                     const Cell cell = {x, y};
-                    if (!map_.contains(cell) || lot_.at(x, y) != own ||
-                        (flags_.at(x, y) & (kYard | kDoor | kGarden)) != kYard) {
+                    if (!map_.contains(cell) || lot_.get(x, y) != own ||
+                        (flags_.get(x, y) & (kYard | kDoor | kGarden)) != kYard) {
                         continue;
                     }
                     const int gapX = std::max({lot.origin.x - x, 0, x - (lot.origin.x + lot.width - 1)});
@@ -743,7 +743,7 @@ void LandUse::addPoles(const World& world) {
 
     for (int y = 0; y < map_.height(); ++y) {
         for (int x = 0; x < map_.width(); ++x) {
-            const std::uint8_t flags = flags_.at(x, y);
+            const std::uint8_t flags = flags_.get(x, y);
             if ((flags & kRoadside) == 0 || (flags & (kBuilding | kYard)) != 0) {
                 continue;
             }
@@ -858,8 +858,8 @@ void LandUse::addPiers(const World& world) {
                 const Cell cell = {x, y};
                 const int dx = x - settlement->center.x;
                 const int dy = y - settlement->center.y;
-                if (!map_.contains(cell) || dx * dx + dy * dy > r * r || (flags_.at(x, y) & kShore) == 0 ||
-                    (flags_.at(x, y) & (kBuilding | kRoadside)) != 0) {
+                if (!map_.contains(cell) || dx * dx + dy * dy > r * r || (flags_.get(x, y) & kShore) == 0 ||
+                    (flags_.get(x, y) & (kBuilding | kRoadside)) != 0) {
                     continue;
                 }
                 for (int d = 0; d < 4; ++d) {
@@ -914,6 +914,16 @@ void LandUse::bucketThings() {
         buckets_[static_cast<std::size_t>((cell.y / kBucketCells) * bucketsX_ + cell.x / kBucketCells)].push_back(
             static_cast<int>(i));
     }
+}
+
+std::size_t LandUse::memoryBytes() const {
+    std::size_t bytes = flags_.memoryBytes() + lot_.memoryBytes() + flowDir_.memoryBytes() + drop_.memoryBytes() +
+                        inset_.memoryBytes();
+    bytes += lots_.capacity() * sizeof(Lot) + things_.capacity() * sizeof(Thing);
+    for (const std::vector<int>& bucket : buckets_) {
+        bytes += bucket.capacity() * sizeof(int);
+    }
+    return bytes + buckets_.capacity() * sizeof(std::vector<int>);
 }
 
 } // namespace lw

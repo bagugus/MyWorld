@@ -79,6 +79,8 @@ float gDissolve = 0.0f;
 bool gGlow = false;
 // Все следующие грани — внутри помещения (12а.14).
 bool gIndoor = false;
+// Захват граней в массивы вместо rlgl (этап 2а.2): статичные сетки зданий.
+ModelMesh* gCapture = nullptr;
 
 // Грани коробки.
 enum Faces : unsigned { kTop = 1u, kBottom = 2u, kSides = 4u, kAll = 7u };
@@ -114,9 +116,14 @@ public:
         const Vector3 wd = toWorld(d, joint);
         const Vector3 normal =
             Vector3Normalize(Vector3CrossProduct(Vector3Subtract(wb, wa), Vector3Subtract(wc, wa)));
+        const float flag = glow || gGlow ? 1.0f : gIndoor ? 2.0f : 0.0f;
+        if (gCapture != nullptr) {
+            gCapture->quad(wa, wb, wc, wd, normal, {flag, gDissolve}, color);
+            return;
+        }
         // Освещает шейдер (render/Lighting3D) по нормали грани.
         rlNormal3f(normal.x, normal.y, normal.z);
-        rlTexCoord2f(glow || gGlow ? 1.0f : gIndoor ? 2.0f : 0.0f, gDissolve);
+        rlTexCoord2f(flag, gDissolve);
         rlColor4ub(color.r, color.g, color.b, color.a);
         rlVertex3f(wa.x, wa.y, wa.z);
         rlVertex3f(wb.x, wb.y, wb.z);
@@ -849,28 +856,15 @@ float buildingTop(const BuildingModel& model) {
 }
 
 void emitBuilding(const BuildingModel& model) {
-    const Shape shape = shapeOf(model);
-    Layout layout = layoutOf(model, shape);
-    layout.decalOut = model.decalOut;
-    if (model.eye) {
-        // Глаз — в осях модели (обратный поворот ModelFrame).
-        const float c = std::cos(layout.frame.yaw);
-        const float s = std::sin(layout.frame.yaw);
-        const float dx = model.eye->x - layout.frame.origin.x;
-        const float dz = model.eye->z - layout.frame.origin.z;
-        const Vector3 eye = {dx * c - dz * s, model.eye->y, dx * s + dz * c};
-        const float midY = 0.5f * (layout.floor + layout.wallTop);
-        const Vector3 centers[4] = {{layout.hx, midY, 0.0f}, {-layout.hx, midY, 0.0f}, {0.0f, midY, layout.hz},
-                                    {0.0f, midY, -layout.hz}};
-        const Vector3 normals[4] = {{1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}};
-        for (int side = 0; side < 4; ++side) {
-            const Vector3 toEye = Vector3Subtract(eye, centers[side]);
-            const float facing = Vector3DotProduct(normals[side], toEye) / std::max(Vector3Length(toEye), 1e-3f);
-            layout.sideOut[side] = 1.0f / std::max(facing, 0.2f);
-            const float k = std::clamp((facing - 0.08f) / 0.2f, 0.0f, 1.0f);
-            layout.sideDetail[side] = k * k * (3.0f - 2.0f * k);
-        }
+    emitBuildingShell(model);
+    if (model.detailed) {
+        emitBuildingDetails(model);
     }
+}
+
+void emitBuildingShell(const BuildingModel& model) {
+    const Shape shape = shapeOf(model);
+    const Layout layout = layoutOf(model, shape);
     const Emitter e(layout.frame);
     const Color wall = buildingColor(model.kind);
     const float hx = layout.hx;
@@ -914,9 +908,33 @@ void emitBuilding(const BuildingModel& model) {
             e.box({-0.8f, y0, -3.0f}, {0.8f, y0 + 0.12f, 3.0f}, kCross, nullptr, kTop | kSides);
         }
     }
-    if (!model.detailed) {
-        return;
+}
+
+void emitBuildingDetails(const BuildingModel& model) {
+    const Shape shape = shapeOf(model);
+    Layout layout = layoutOf(model, shape);
+    layout.decalOut = model.decalOut;
+    if (model.eye) {
+        // Глаз — в осях модели (обратный поворот ModelFrame).
+        const float c = std::cos(layout.frame.yaw);
+        const float s = std::sin(layout.frame.yaw);
+        const float dx = model.eye->x - layout.frame.origin.x;
+        const float dz = model.eye->z - layout.frame.origin.z;
+        const Vector3 eye = {dx * c - dz * s, model.eye->y, dx * s + dz * c};
+        const float midY = 0.5f * (layout.floor + layout.wallTop);
+        const Vector3 centers[4] = {{layout.hx, midY, 0.0f}, {-layout.hx, midY, 0.0f}, {0.0f, midY, layout.hz},
+                                    {0.0f, midY, -layout.hz}};
+        const Vector3 normals[4] = {{1.0f, 0.0f, 0.0f}, {-1.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -1.0f}};
+        for (int side = 0; side < 4; ++side) {
+            const Vector3 toEye = Vector3Subtract(eye, centers[side]);
+            const float facing = Vector3DotProduct(normals[side], toEye) / std::max(Vector3Length(toEye), 1e-3f);
+            layout.sideOut[side] = 1.0f / std::max(facing, 0.2f);
+            const float k = std::clamp((facing - 0.08f) / 0.2f, 0.0f, 1.0f);
+            layout.sideDetail[side] = k * k * (3.0f - 2.0f * k);
+        }
     }
+    const Emitter e(layout.frame);
+    const Color wall = buildingColor(model.kind);
 
     // Дверь и окна — тем же списком, что и комнаты внутри (buildingOpenings).
     const std::vector<LocalOpening> openings = localOpenings(model, shape, layout);
@@ -994,6 +1012,30 @@ void setModelFade(float visible) {
 
 void setModelIndoor(bool indoor) {
     gIndoor = indoor;
+}
+
+void ModelMesh::quad(Vector3 a, Vector3 b, Vector3 c, Vector3 d, Vector3 normal, Vector2 texcoord, Color color) {
+    for (const Vector3& p : {a, b, c, d}) {
+        vertices.insert(vertices.end(), {p.x, p.y, p.z});
+        normals.insert(normals.end(), {normal.x, normal.y, normal.z});
+        texcoords.insert(texcoords.end(), {texcoord.x, texcoord.y});
+        colors.insert(colors.end(), {color.r, color.g, color.b, color.a});
+    }
+}
+
+void ModelMesh::clear() {
+    vertices.clear();
+    normals.clear();
+    texcoords.clear();
+    colors.clear();
+}
+
+void beginModelCapture(ModelMesh& sink) {
+    gCapture = &sink;
+}
+
+void endModelCapture() {
+    gCapture = nullptr;
 }
 
 // --- Комнаты внутри (этап 12а.14) ------------------------------------------------

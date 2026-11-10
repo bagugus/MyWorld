@@ -1,5 +1,6 @@
 #pragma once
 
+#include "sim/BlockGrid.h"
 #include "sim/Components.h"
 #include "sim/Grid.h"
 #include "sim/Map.h"
@@ -51,7 +52,7 @@ public:
         kDoor = 64,    // перед входом
     };
     std::uint8_t flags(Cell cell) const {
-        return map_.contains(cell) ? flags_.at(cell.x, cell.y) : 0;
+        return map_.contains(cell) ? flags_.get(cell.x, cell.y) : 0;
     }
     bool has(Cell cell, Flags flag) const { return (flags(cell) & flag) != 0; }
 
@@ -69,7 +70,7 @@ public:
     };
     const std::vector<Lot>& lots() const { return lots_; }
     // Участок клетки (двор или здание): номер в lots() + 1; 0 — ничей.
-    int lotOf(Cell cell) const { return map_.contains(cell) ? lot_.at(cell.x, cell.y) : 0; }
+    int lotOf(Cell cell) const { return map_.contains(cell) ? lot_.get(cell.x, cell.y) : 0; }
 
     // Отдельные предметы: стоят в точке (x, z), смотрят или тянутся по (dx, dz).
     enum class ThingKind : std::uint8_t {
@@ -102,6 +103,8 @@ public:
     // поселениям мира; один раз (здания не меняются).
     void addSettlements(const World& world);
     bool hasSettlements() const { return settled_; }
+    // Память раскладки, байты (для замеров, этап 2а.2).
+    std::size_t memoryBytes() const;
 
 private:
     void computeFlow();
@@ -115,11 +118,13 @@ private:
     float waterLevel(Cell cell) const;
 
     const Map& map_;
-    Grid<std::uint8_t> flags_;
-    Grid<std::uint16_t> lot_;
-    Grid<std::uint8_t> flowDir_; // 0..7 — куда течёт (kDx8, kDy8), 255 — не река
-    Grid<std::uint8_t> drop_;    // падение уровня до следующей клетки, сантиметры
-    Grid<std::uint8_t> inset_;   // опускание воды, сантиметры
+    // Слои разреженные (этап 2а.2): почти везде пусто — данные только у рек,
+    // дорог, берегов и в поселениях.
+    BlockGrid<std::uint8_t> flags_;
+    BlockGrid<std::uint16_t> lot_;
+    BlockGrid<std::uint8_t> flowDir_; // 0..7 — куда течёт (kDx8, kDy8), 255 — не река
+    BlockGrid<std::uint8_t> drop_;    // падение уровня до следующей клетки, сантиметры
+    BlockGrid<std::uint8_t> inset_;   // опускание воды, сантиметры; вне рек — как у озёр
     std::vector<Lot> lots_;
     std::vector<Thing> things_;
     std::vector<std::vector<int>> buckets_;
