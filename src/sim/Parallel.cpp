@@ -66,6 +66,9 @@ public:
             fn(0, count, 0);
             return;
         }
+        // Проход у пула один: второй поток (мир грузится в фоне, этап С.2)
+        // ждёт, пока кончится чужой. Сами куски от этого не меняются.
+        const std::lock_guard runLock(runMutex_);
         ensureWorkers(helpers);
         std::uint32_t generation = 0;
         {
@@ -163,6 +166,7 @@ private:
     }
 
     int threads_ = defaultThreads();
+    std::mutex runMutex_; // один проход за раз, из какого бы потока ни звали
     std::mutex mutex_;
     std::condition_variable wake_;
     std::vector<std::thread> workers_;

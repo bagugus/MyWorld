@@ -296,6 +296,7 @@ void drawKeyHelp(const CameraController& camera) {
         keyRow("Ctrl+ЛКМ", "путь: начало, Ctrl+Shift+ЛКМ — конец");
         keyRow("Пробел", "пауза");
         keyRow("1 / 2 / 3", "скорость x1 / x10 / x100");
+        keyRow("F5 / F9", "быстрое сохранение / загрузить его");
         keyRow("F1", "это окно");
         ImGui::EndTable();
     }

@@ -73,6 +73,7 @@
 #include <optional>
 #include <string>
 #include <system_error>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -8734,6 +8735,120 @@ void testSaveFile() {
     std::filesystem::remove_all(path.parent_path(), code);
 }
 
+// Этап С.2: проверка «фаза сменится в следующем тике» совпадает с тем, что
+// делает тик; драйвер, вставший перед сменой фазы, мира не меняет.
+lw::WorldConfig phaseTestConfig() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 80;
+    config.zombies = 20;
+    config.peacetime = true;
+    config.outbreakDays = 0.02; // вспышка через ~29 игровых минут
+    return config;
+}
+
+void testPhaseChangeDue() {
+    lw::World world(71, phaseTestConfig());
+    int changes = 0;
+    constexpr std::uint64_t kTicks = 90 * lw::kTicksPerGameHour;
+    for (std::uint64_t i = 0; i < kTicks && lw::worldPhase(world) < lw::WorldPhase::Collapse; ++i) {
+        const bool due = lw::phaseChangeDue(world);
+        const lw::WorldPhase before = lw::worldPhase(world);
+        world.step();
+        const bool changed = lw::worldPhase(world) != before;
+        CHECK(due == changed);
+        if (due != changed) {
+            std::printf("  tick %llu: due %d, changed %d\n", static_cast<unsigned long long>(world.tick()), due,
+                        changed);
+            return;
+        }
+        changes += changed ? 1 : 0;
+    }
+    CHECK(changes >= 2); // мир → вспышка → паника
+    // Мир без сценария — смены фазы не бывает.
+    lw::World plain(72, smallConfig(10));
+    CHECK(!lw::phaseChangeDue(plain));
+}
+
+void testDriverHoldsBeforePhase() {
+    constexpr std::uint64_t kTicks = 40 * lw::kTicksPerGameHour;
+    lw::World straight(73, phaseTestConfig());
+    for (std::uint64_t i = 0; i < kTicks; ++i) {
+        straight.step();
+    }
+
+    lw::World held(73, phaseTestConfig());
+    lw::SimDriver driver(held);
+    driver.setHoldBeforePhase(true);
+    driver.requestSkip(kTicks);
+    int holds = 0;
+    lw::WorldPhase phase = lw::worldPhase(held);
+    while (driver.skipping()) {
+        driver.advance(1.0 / 60.0);
+        if (const std::optional<lw::WorldPhase> next = driver.heldBeforePhase()) {
+            ++holds;
+            // Встал на границе: фаза ещё прежняя, следующий тик её сменит.
+            CHECK(lw::worldPhase(held) == phase && *next == lw::nextPhase(phase));
+            CHECK(lw::phaseChangeDue(held));
+        }
+        if (lw::worldPhase(held) != phase) {
+            phase = lw::worldPhase(held);
+        }
+    }
+    CHECK(held.tick() == straight.tick());
+    CHECK(held.stateHash() == straight.stateHash());
+    CHECK(holds >= 1 && holds == static_cast<int>(lw::worldPhase(held)) - static_cast<int>(lw::WorldPhase::Peace));
+
+    // Фаза по кнопке — тоже после остановки.
+    driver.requestPhase(lw::WorldPhase::Collapse);
+    const lw::WorldPhase before = lw::worldPhase(held);
+    driver.setPaused(true);
+    driver.advance(1.0 / 60.0);
+    CHECK(driver.heldBeforePhase().has_value() && lw::worldPhase(held) == before);
+    driver.advance(1.0 / 60.0);
+    CHECK(!driver.heldBeforePhase().has_value() && lw::worldPhase(held) == lw::WorldPhase::Collapse);
+}
+
+// Этап С.2: мир грузится в фоновом потоке, пока главный двигает свой, — пул
+// параллельных проходов общий, а результат у обоих тот же, что поодиночке.
+void testLoadInBackgroundThread() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 60;
+    config.zombies = 30;
+    lw::World source(81, config);
+    for (int i = 0; i < 300; ++i) {
+        source.step();
+    }
+    const std::vector<std::uint8_t> bytes = saveBytes(source);
+    for (int i = 0; i < 300; ++i) {
+        source.step();
+    }
+    const std::uint64_t expectedLoaded = source.stateHash();
+    lw::World alone(82, config);
+    for (int i = 0; i < 600; ++i) {
+        alone.step();
+    }
+    const std::uint64_t expectedOther = alone.stateHash();
+
+    std::uint64_t loadedHash = 0;
+    std::thread loader([&] {
+        std::string error;
+        std::unique_ptr<lw::World> loaded = lw::decodeSave(bytes, &error);
+        if (loaded) {
+            for (int i = 0; i < 300; ++i) {
+                loaded->step();
+            }
+            loadedHash = loaded->stateHash();
+        }
+    });
+    lw::World other(82, config);
+    for (int i = 0; i < 600; ++i) {
+        other.step();
+    }
+    loader.join();
+    CHECK(loadedHash == expectedLoaded);
+    CHECK(other.stateHash() == expectedOther);
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -8903,6 +9018,9 @@ int main() {
     testSaveRejectsBadFiles();
     testSaveRefusesUnknownComponent();
     testSaveFile();
+    testPhaseChangeDue();
+    testDriverHoldsBeforePhase();
+    testLoadInBackgroundThread();
 
     if (failures == 0) {
         std::printf("all tests passed\n");

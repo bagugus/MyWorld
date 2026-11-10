@@ -5,7 +5,7 @@
 //                [--no-peace] [--director] [--screenshot FILE.png] [--screenshot-delay S]
 //                [--pose-gallery [ROW]] [--interior ID [YAW]] [--compose SENSE [ID [OTHER]]]
 //                [--map-size CELLS] [--people N] [--animals N] [--flocks N] [--threads N]
-//                [--sample [start]]
+//                [--sample [start]] [--load FILE]
 //
 // --event       начать ивент на старте (drop — сброс груза, crash — крушение вертолёта,
 //               convoy — застрявший конвой) и открыть его в инспекторе;
@@ -31,6 +31,10 @@
 // --zombies, --no-peace, --map-size, --people, --animals, --flocks, --threads — как у
 //               lw_headless (по умолчанию карта 16 × 16 км, этап 2а.2; --map-size 2048 —
 //               8 × 8 км, люди, звери и стаи — по площади, если не заданы явно)
+// --load        загрузить мир из сохранения (этап С.2; seed и настройки — из файла) и
+//               поставить камеру, откуда смотрели при сохранении; в окне — F9 и окно
+//               «Сохранения» (F5 — быстрое сохранение, автосохранение раз в сутки
+//               и перед сменой фазы)
 // --sample      горячие функции кадров окна (сэмплирующий профайлер, Windows; этап 2а.2):
 //               отчёт при выходе; start — и старт (мир, текстуры карты, 3D)
 // --screenshot  нарисовать несколько кадров (в 3D — пока не достроятся деревья),
@@ -56,6 +60,7 @@
 #include "sim/Climate.h"
 #include "sim/Parallel.h"
 #include "sim/Profiler.h"
+#include "sim/Save.h"
 #include "sim/SimDriver.h"
 #include "sim/Events.h"
 #include "sim/Scenario.h"
@@ -70,6 +75,7 @@
 #include "ui/CinemaCamera.h"
 #include "ui/Composition.h"
 #include "ui/PathTool.h"
+#include "ui/Saves.h"
 #include "ui/Showrunner.h"
 #include "ui/Ui.h"
 #include "util/ProcessMemory.h"
@@ -85,6 +91,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <optional>
 #include <unordered_map>
 #include <utility>
@@ -317,6 +324,71 @@ void logStats(const lw::World& world, const lw::WorldRenderer& renderer, const l
     std::fflush(stdout);
 }
 
+// Всё, что живёт вместе с миром и держит на него ссылку: мир, ход времени,
+// отрисовка, камера, инструменты и режиссёр. Загрузка сохранения (этап С.2)
+// заменяет сеанс целиком: новый мир — новая карта, текстуры и рельеф.
+struct SessionOptions {
+    std::optional<float> foliage;
+    bool noProps = false;
+    std::optional<int> poseGallery;
+    bool fullscreenAllowed = true;
+};
+
+struct Session {
+    Session(std::unique_ptr<lw::World> loaded, const SessionOptions& options, lw::ui::AppStats& stats)
+        : world(std::move(loaded)), driver(*world), camera(world->width(), world->height()), pathTool(*world),
+          inspector(*world), director(*world) {
+        using Clock = std::chrono::steady_clock;
+        const auto seconds = [](Clock::time_point from) {
+            return std::chrono::duration<double>(Clock::now() - from).count();
+        };
+        // Замер систем тика (этап 2а.1) — всегда: два десятка засечек часов на тик.
+        world->setProfiling(true);
+        Clock::time_point mark = Clock::now();
+        renderer = std::make_unique<lw::WorldRenderer>(*world);
+        stats.map2dSeconds = seconds(mark);
+        stats.map2dMemory = lw::processMemory().workingSet;
+        mark = Clock::now();
+        renderer3d = std::make_unique<lw::WorldRenderer3D>(renderer->map(), world->map());
+        stats.renderer3dSeconds = seconds(mark);
+        stats.renderer3dMemory = lw::processMemory().workingSet;
+        camera.setTerrain(&renderer3d->terrain());
+        renderer3d->updateBuildingBounds(*world);
+        camera.setObstacles(&renderer3d->buildingBounds()); // кинокамера не заходит в стены
+        lw::ui::loadCameraSettings(camera.settings());
+        renderer3d->setFoliageYear(options.foliage);
+        renderer3d->setPropsEnabled(!options.noProps);
+        renderer3d->setPoseGallery(options.poseGallery);
+        director.setInteriors(&renderer3d->interiors()); // сцены дома — в комнатах (12а.14)
+        director.setFullscreenAllowed(options.fullscreenAllowed); // снимок — в окне того же размера
+    }
+    Session(const Session&) = delete;
+    Session& operator=(const Session&) = delete;
+
+    // Камера — туда, откуда смотрели при сохранении.
+    void applyView(const lw::SaveView& view) {
+        if (!view.valid) {
+            return;
+        }
+        camera.setOrbitAngles(view.yaw, view.pitch);
+        camera.setMode(view.mode == 1 ? lw::ViewMode::Orbit : lw::ViewMode::TopDown);
+        camera.lookAt(view.x, view.y, view.zoom);
+        camera.snap();
+    }
+
+    // Порядок важен: разрушаются снизу вверх — режиссёр и камера (держат
+    // указатели в отрисовку 3D) раньше неё, отрисовка раньше мира.
+    std::unique_ptr<lw::World> world;
+    lw::SimDriver driver;
+    std::unique_ptr<lw::WorldRenderer> renderer;
+    std::unique_ptr<lw::WorldRenderer3D> renderer3d;
+    lw::CameraController camera;
+    lw::ui::PathTool pathTool;
+    lw::ui::Inspector inspector;
+    lw::ui::Director director;
+    lw::ui::CinemaCamera composer; // --compose
+};
+
 } // namespace
 
 int main(int argc, char** argv) {
@@ -351,6 +423,7 @@ int main(int argc, char** argv) {
     bool flocksSet = false;
     bool sample = false;      // --sample: горячие функции кадров
     bool sampleStart = false; // --sample start: и старта
+    const char* loadPath = nullptr; // --load FILE: мир из сохранения
     for (int i = 1; i < argc; ++i) {
         if (std::strcmp(argv[i], "--seed") == 0 && i + 1 < argc) {
             seed = std::strtoull(argv[++i], nullptr, 10);
@@ -448,6 +521,8 @@ int main(int argc, char** argv) {
                 sampleStart = true;
                 ++i;
             }
+        } else if (std::strcmp(argv[i], "--load") == 0 && i + 1 < argc) {
+            loadPath = argv[++i];
         } else if (std::strcmp(argv[i], "--lod-map") == 0) {
             lw::ui::setLodOverlay(true); // слой детализации в виде сверху
         }
@@ -470,81 +545,85 @@ int main(int argc, char** argv) {
         sampler.start();
     }
     Clock::time_point mark = Clock::now();
-    lw::World world(seed, config);
+    std::unique_ptr<lw::World> created;
+    std::optional<lw::SaveInfo> loadedInfo;
+    if (loadPath != nullptr) {
+        std::string error;
+        loadedInfo = lw::readSaveInfo(loadPath, &error);
+        created = loadedInfo ? lw::loadWorld(loadPath, &error) : nullptr;
+        if (!created) {
+            std::fprintf(stderr, "не загрузить %s: %s\n", loadPath, error.c_str());
+            return 1;
+        }
+    } else {
+        created = std::make_unique<lw::World>(seed, config);
+    }
     stats.worldSeconds = seconds(mark);
     stats.worldMemory = lw::processMemory().workingSet;
-    // Замер систем тика (этап 2а.1) — всегда: два десятка засечек часов на тик.
-    world.setProfiling(true);
     if (phase) {
-        lw::enterPhase(world, *phase);
+        lw::enterPhase(*created, *phase);
     }
     if (event) {
-        const lw::EntityId id = lw::startEvent(world, *event);
+        const lw::EntityId id = lw::startEvent(*created, *event);
         if (selectId == 0) {
             selectId = id;
         }
     }
     const auto skipTicks = static_cast<std::uint64_t>(std::max(0.0, hours) * lw::kTicksPerGameHour);
     for (std::uint64_t i = 0; i < skipTicks; ++i) {
-        world.step();
+        created->step();
     }
-    lw::SimDriver driver(world);
 
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_VSYNC_HINT | FLAG_MSAA_4X_HINT);
     InitWindow(1600, 900, "Living World");
     SetExitKey(KEY_NULL); // Esc не закрывает окно
 
     {
-        // Текстуры карты должны быть освобождены до CloseWindow.
-        mark = Clock::now();
-        lw::WorldRenderer renderer(world);
-        stats.map2dSeconds = seconds(mark);
-        stats.map2dMemory = lw::processMemory().workingSet;
-        mark = Clock::now();
-        lw::WorldRenderer3D renderer3d(renderer.map(), world.map());
-        stats.renderer3dSeconds = seconds(mark);
-        stats.renderer3dMemory = lw::processMemory().workingSet;
+        // Текстуры карты и миниатюры сохранений должны быть освобождены до CloseWindow.
+        SessionOptions options;
+        options.foliage = foliage;
+        options.noProps = noProps;
+        options.poseGallery = poseGallery;
+        options.fullscreenAllowed = screenshot == nullptr;
+        auto session = std::make_unique<Session>(std::move(created), options, stats);
         double worstWindow = 0.0; // худший кадр текущей секунды
         double worstSince = 0.0;
         int framesWindow = 0;
         lw::WeatherRenderer weatherRenderer;
-        lw::CameraController camera(world.width(), world.height());
-        camera.setTerrain(&renderer3d.terrain());
-        renderer3d.updateBuildingBounds(world);
-        camera.setObstacles(&renderer3d.buildingBounds()); // кинокамера не заходит в стены
-        lw::ui::loadCameraSettings(camera.settings());
-        renderer3d.setFoliageYear(foliage);
-        renderer3d.setPropsEnabled(!noProps);
-        renderer3d.setPoseGallery(poseGallery);
-        if (orbit) {
-            camera.setOrbitAngles(orbit->first, orbit->second);
+        if (loadedInfo && !hasView && !orbit && !view3d) {
+            session->applyView(loadedInfo->view); // откуда смотрели при сохранении
         }
-        if (view3d) {
-            camera.setMode(lw::ViewMode::Orbit);
+        {
+            lw::CameraController& camera = session->camera;
+            if (orbit) {
+                camera.setOrbitAngles(orbit->first, orbit->second);
+            }
+            if (view3d) {
+                camera.setMode(lw::ViewMode::Orbit);
+            }
+            if (hasView) {
+                camera.lookAt(viewX, viewY, viewZoom);
+            }
+            camera.snap(); // с командной строки — сразу, без плавного перехода
         }
-        if (hasView) {
-            camera.lookAt(viewX, viewY, viewZoom);
-        }
-        camera.snap(); // с командной строки — сразу, без плавного перехода
         lw::ui::init();
-        lw::ui::PathTool pathTool(world);
-        pathTool.setShowGraph(navGraph);
+        session->pathTool.setShowGraph(navGraph);
         if (hasPath) {
-            pathTool.setEndpoints(path[0], path[1], path[2], path[3]);
+            session->pathTool.setEndpoints(path[0], path[1], path[2], path[3]);
         }
-        lw::ui::Inspector inspector(world);
         if (selectId != 0) {
-            inspector.select(selectId);
-            inspector.setFollow(true);
+            session->inspector.select(selectId);
+            session->inspector.setFollow(true);
         }
-        lw::ui::Director storyDirector(world);
-        storyDirector.setInteriors(&renderer3d.interiors()); // сцены дома — в комнатах (12а.14)
-        storyDirector.setFullscreenAllowed(screenshot == nullptr); // снимок — в окне того же размера
         if (director) {
-            storyDirector.requestSeries(true); // сериал сам включает режиссёра, Esc — выключает
+            session->director.requestSeries(true); // сериал сам включает режиссёра, Esc — выключает
         }
+        // Сохранения (этап С.2): слоты, F5 / F9, автосохранение. Снимок с
+        // командной строки автосохранений не пишет.
+        lw::ui::Saves saves;
+        saves.setAutosave(screenshot == nullptr);
+        saves.beginSession(*session->world);
 
-        lw::ui::CinemaCamera composer; // --compose
         constexpr int kScreenshotFrame = 3; // первые кадры уходят на загрузку шрифта
         constexpr int kScreenshotWait = 600; // в 3D — ждать, пока достроятся деревья, но не дольше
         if (sample && !sampleStart) {
@@ -553,8 +632,19 @@ int main(int argc, char** argv) {
         for (int frame = 0; !WindowShouldClose(); ++frame) {
             const float dt = GetFrameTime();
             const Clock::time_point frameStart = Clock::now();
+            // Сеанс может смениться в конце кадра (загрузка) — ссылки берутся заново.
+            lw::World& world = *session->world;
+            lw::SimDriver& driver = session->driver;
+            lw::WorldRenderer& renderer = *session->renderer;
+            lw::WorldRenderer3D& renderer3d = *session->renderer3d;
+            lw::CameraController& camera = session->camera;
+            lw::ui::PathTool& pathTool = session->pathTool;
+            lw::ui::Inspector& inspector = session->inspector;
+            lw::ui::Director& storyDirector = session->director;
+            lw::ui::CinemaCamera& composer = session->composer;
 
             lw::ui::handleHotkeys(driver);
+            saves.handleHotkeys(!lw::ui::wantsKeyboard()); // F5 — сохранить, F9 — загрузить
             storyDirector.handleHotkeys(!lw::ui::wantsKeyboard()); // F11 — сериал, Esc — выход
             // В сериале мир и камера ввода не получают: смотрим кино.
             if (!storyDirector.series()) {
@@ -565,6 +655,7 @@ int main(int argc, char** argv) {
             const Clock::time_point simStart = Clock::now();
             driver.advance(dt);
             stats.simMs = 1000.0 * seconds(simStart);
+            saves.update(world, driver); // итоги записи и загрузки, автосохранения
             const float alpha = driver.interpolationAlpha();
             storyDirector.update(inspector, driver, dt);
             // Камера — после шага мира: слежение и вид из-за плеча идут вровень
@@ -627,6 +718,8 @@ int main(int argc, char** argv) {
             if (!blind) {
                 weatherRenderer.draw(environment, world.weather(), camera.is3d(), renderer3d.interiorView(camera));
             }
+            // Заказанное сохранение — сейчас: мир на границе тика, в кадре ещё нет окон (миниатюра).
+            saves.capture(world, camera, blind);
             if (!series) {
                 // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
                 camera.beginOverlay();
@@ -648,8 +741,12 @@ int main(int argc, char** argv) {
                 lw::ui::drawEventsPanel(world, driver, inspector, camera);
                 lw::ui::drawChroniclePanel(world, inspector);
                 storyDirector.drawPanel(inspector);
+                saves.drawPanel(world);
             }
             storyDirector.drawCaption(inspector); // в сериале — широкий кадр и титры
+            if (!noUi) {
+                saves.drawStatus(series);
+            }
             lw::ui::endFrame();
             // До EndDrawing: там ожидание вертикальной синхронизации.
             stats.frameMs = 1000.0 * seconds(frameStart);
@@ -681,6 +778,31 @@ int main(int argc, char** argv) {
                 ExportImage(image, screenshot);
                 UnloadImage(image);
                 break;
+            }
+
+            // Загруженный мир готов — новый сеанс вместо прежнего. В конце кадра:
+            // ссылки этого кадра на прежний мир больше не нужны.
+            lw::SaveInfo nextInfo;
+            bool wasPaused = false;
+            if (std::unique_ptr<lw::World> loaded = saves.takeLoaded(nextInfo, wasPaused)) {
+                const bool wasSeries = storyDirector.series();
+                const int speed = driver.speed();
+                if (wasSeries && options.fullscreenAllowed && IsWindowState(FLAG_BORDERLESS_WINDOWED_MODE)) {
+                    ToggleBorderlessWindowed(); // новый режиссёр развернёт окно сам
+                }
+                const Clock::time_point rebuild = Clock::now();
+                session.reset(); // прежний мир и его текстуры — до сборки новых: память
+                session = std::make_unique<Session>(std::move(loaded), options, stats);
+                TraceLog(LOG_INFO, "SAVE: new session (map textures, 3D) in %.2f s", seconds(rebuild));
+                session->applyView(nextInfo.view);
+                session->driver.setSpeed(speed);
+                session->driver.setPaused(wasPaused);
+                if (wasSeries) {
+                    session->director.requestSeries(true); // режиссёр выбирает заново
+                }
+                saves.beginSession(*session->world);
+                compose.reset();    // --interior и --compose — только для мира
+                interiorId.reset(); // с командной строки
             }
         }
 
