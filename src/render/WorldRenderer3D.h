@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/Animator.h"
+#include "render/Buildings3D.h"
 #include "render/InteriorStage.h"
 #include "render/LandUse.h"
 #include "render/Lighting3D.h"
@@ -56,8 +57,8 @@ public:
     // рядами в точке взгляда камеры — посмотреть их, не дожидаясь в мире.
     // row < 0 — все ряды, иначе только этот ряд (крупно); nullopt — выключена.
     void setPoseGallery(std::optional<int> row) { poseGallery_ = row; }
-    // Сколько сеток деревьев и мелочи ещё не построено (снимок ждёт их).
-    int pending() const { return trees_.pending() + props_.pending(); }
+    // Сколько сеток рельефа, деревьев и мелочи ещё не построено (снимок ждёт их).
+    int pending() const { return terrain_.pending() + trees_.pending() + props_.pending(); }
     // Облик сезона на заданную долю года (0 — 1 марта) вместо календаря: листва
     // и снежный покров — посмотреть лес в любой сезон без промотки. Только
     // облик, симуляция не меняется; nullopt — по календарю и погоде.
@@ -88,9 +89,12 @@ public:
     // Коробки зданий (от фундамента до конька) для кинокамеры: она не заходит в
     // стены (CameraController::setObstacles). Считаются один раз (здания не
     // меняются) — при отрисовке или раньше; адрес списка не меняется. Тогда же
-    // LandUse раскладывает дворы, заборы, столбы и мостки.
-    const std::vector<BoundingBox>& buildingBounds() const { return buildingBounds_; }
+    // LandUse раскладывает дворы, заборы, столбы и мостки, а модели зданий
+    // ложатся в сетки по чанкам (Buildings3D, этап 2а.2).
+    const std::vector<BoundingBox>& buildingBounds() const { return buildings_.bounds(); }
     void updateBuildingBounds(const World& world);
+    const Buildings3D& buildings() const { return buildings_; }
+    const LandUse& land() const { return land_; }
     // Здание, открытое для кинокамеры (этап 12а.14): его режиссёр открывает,
     // когда герой сцены дома, — тогда вместо коробки снаружи рисуются комнаты,
     // жильцы сидят и лежат по местам, стены между камерой и героем спрятаны,
@@ -110,8 +114,6 @@ private:
         bool bottom = false; // с дном: настил виден снизу
     };
 
-    // Модель здания без облика сезона и мелочи: участок, земля под ним, дверь.
-    BuildingModel buildingModel(const Building& building, EntityId id) const;
     // Комната открытого здания: какие стены и мебель спрятать от камеры, горят
     // ли лампы и какие из них светят.
     void prepareInterior(const InteriorLayout& layout, Vector3 eye, const SceneLight& light);
@@ -125,6 +127,7 @@ private:
     Terrain3D terrain_;
     Trees3D trees_;
     Props3D props_;
+    Buildings3D buildings_;
     InteriorStage interior_;
     std::vector<bool> hiddenWalls_;
     std::vector<bool> hiddenFurniture_;
@@ -145,7 +148,6 @@ private:
     std::optional<float> foliageYear_;
     float drawDistance_ = 1500.0f;
     EntityId highlight_ = kInvalidId;
-    std::vector<BoundingBox> buildingBounds_;
     int buildingsDrawn_ = 0;
     int creaturesDrawn_ = 0;
 };

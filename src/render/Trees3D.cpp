@@ -5,6 +5,7 @@
 #include "render/Terrain3D.h"
 #include "render/TreeLayout.h"
 #include "sim/Map.h"
+#include "sim/Parallel.h"
 
 #include <raymath.h>
 #include <rlgl.h>
@@ -601,8 +602,7 @@ float farthestOfBox(Vector3 p, Vector3 min, Vector3 max) {
 
 Trees3D::Trees3D(const Map& map, const Terrain3D& terrain, const LandUse& land)
     : map_(map), terrain_(terrain), land_(land) {
-    scan();
-
+    // Чанки с деревьями — перед первой отрисовкой (scan): дворы раскладка узнаёт позже.
     shader_ = SceneShading::loadShader(kTreeVs, kTreeFs);
     const std::string shadowFs = std::string("#define SHADOW_PASS\n") + kTreeFs;
     shadowShader_ = SceneShading::loadShader(kTreeVs, shadowFs.c_str());
@@ -639,10 +639,14 @@ void Trees3D::scan() {
     const int chunksX = (map_.width() + kChunkCells - 1) / kChunkCells;
     const int chunksY = (map_.height() + kChunkCells - 1) / kChunkCells;
     chunks_.assign(static_cast<std::size_t>(chunksX) * static_cast<std::size_t>(chunksY), Chunk{});
-    TreeSpec trees[kMaxTreesPerCell];
-    for (int cy = 0; cy < chunksY; ++cy) {
-        for (int cx = 0; cx < chunksX; ++cx) {
-            Chunk& chunk = chunks_[static_cast<std::size_t>(cy * chunksX + cx)];
+    // Чанки независимы: каждый пишет только себя (этап 2а.2 — на 16 км обход
+    // карты в один поток занимал секунды старта).
+    parallelFor(chunks_.size(), 16, 32, [&](std::size_t begin, std::size_t end, int) {
+        TreeSpec trees[kMaxTreesPerCell];
+        for (std::size_t index = begin; index < end; ++index) {
+            const int cx = static_cast<int>(index % static_cast<std::size_t>(chunksX));
+            const int cy = static_cast<int>(index / static_cast<std::size_t>(chunksX));
+            Chunk& chunk = chunks_[index];
             chunk.left = cx * kChunkCells;
             chunk.top = cy * kChunkCells;
             chunk.width = std::min(kChunkCells, map_.width() - chunk.left);
@@ -667,11 +671,19 @@ void Trees3D::scan() {
                          high + kTallest,
                          static_cast<float>(chunk.top + chunk.height) * Map::kCellSize + kCrownReach};
         }
-    }
+    });
+    scanned_ = true;
 }
 
 void Trees3D::reset() {
-    scan();
+    for (Chunk& chunk : chunks_) {
+        unload(chunk.far);
+        for (Part& part : chunk.near) {
+            unload(part);
+        }
+    }
+    chunks_.clear();
+    scanned_ = false;
 }
 
 void Trees3D::buildFar(Chunk& chunk) {
@@ -747,6 +759,9 @@ void Trees3D::unload(Part& part) {
 }
 
 void Trees3D::update(const Camera3D& camera, float nearRange, float farRange) {
+    if (!scanned_) {
+        scan();
+    }
     ++frame_;
     farRange_ = farRange;
     // Подробные — не дальше середины дальности: иначе им негде смениться упрощёнными.

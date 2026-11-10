@@ -48,6 +48,7 @@ add_library(lw_sim STATIC
     src/sim/Foresight.cpp
     src/sim/Foresight.h
     src/sim/Components.h
+    src/sim/BlockGrid.h
     src/sim/Grid.h
     src/sim/Hash.h
     src/sim/Id.h
@@ -180,6 +181,8 @@ if(LW_BUILD_APP)
         src/main.cpp
         src/render/Animator.cpp
         src/render/Animator.h
+        src/render/Buildings3D.cpp
+        src/render/Buildings3D.h
         src/render/CameraController.cpp
         src/render/CameraController.h
         src/render/FieldLayout.cpp

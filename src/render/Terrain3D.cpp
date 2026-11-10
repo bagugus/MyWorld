@@ -4,6 +4,7 @@
 #include "render/LandUse.h"
 #include "render/Lighting3D.h"
 #include "render/MapRenderer.h"
+#include "sim/Parallel.h"
 
 #include <raymath.h>
 #include <rlgl.h>
@@ -39,18 +40,29 @@ constexpr float kBridgeDeck = 0.6f;
 // Отладочные слои — над поверхностью: вблизи — у самой земли (кольцо выбора —
 // у ног), вдали выше, чтобы не тонуть в грубых уровнях рельефа.
 constexpr float kDrapeLift = 0.15f;
+// Высоты для отладочных слоёв (этап 2а.2): грубая сетка — каждый kDrapeStep-й
+// угол карты, подробное окно — kDrapeWindow клеток вокруг камеры, сдвигается
+// шагом kDrapeShift.
+constexpr int kDrapeStep = 8;
+constexpr int kDrapeWindow = 1024;
+constexpr int kDrapeShift = 256;
 
 // Клетка на экране не крупнее стольких пикселей: так выбирается уровень детализации.
 constexpr float kMaxQuadPixels = 8.0f;
 // Запас при смене уровня детализации, в долях уровня (двоичный логарифм клеток).
 constexpr float kLevelHysteresis = 0.25f;
-// Уровни от этого и грубее строятся сразу и не выгружаются.
-constexpr int kFirstEagerLevel = 2;
+// Уровни от этого и грубее строятся сразу и не выгружаются. С этапа 2а.2 —
+// с шага 8 клеток: шаг 4 на всю карту 16 км — 60 МБ сеток, а нужен он только
+// в нескольких километрах от камеры.
+constexpr int kFirstEagerLevel = 3;
 // Подробных уровней за кадр строится не больше: при быстром полёте пока
 // рисуется грубее, зато кадр не замирает.
-constexpr int kBuildsPerFrame = 4;
+constexpr int kBuildsPerFrame = 6;
 // Подробный уровень, не нужный столько кадров, выгружается.
 constexpr std::uint32_t kEvictFrames = 600;
+// Плитке этого уровня и подробнее нужны подробные текстуры карты (этап 2а.2):
+// клетка на экране — пиксель и больше, грубый тексель (2 × 2 клетки) был бы мылом.
+constexpr int kFineTextureLevel = 2;
 
 // Юбка плитки — вниз на столько, чтобы закрыть расхождение с соседом грубее.
 float skirtDepth(int step) {
@@ -356,24 +368,44 @@ in vec3 vertexPosition;
 in vec2 vertexTexCoord;
 in vec4 vertexColor;
 uniform mat4 mvp;
-uniform sampler2D heights;
-uniform vec2 gridSize;
+uniform sampler2D heights;       // окно у камеры: углы клеток подряд
+uniform vec2 windowOrigin;       // первый угол окна (в углах карты)
+uniform vec2 windowSize;         // углов в окне
+uniform sampler2D coarseHeights; // вся карта: каждый coarseStep-й угол
+uniform vec2 coarseSize;
+uniform float coarseStep;
+uniform vec2 gridSize;           // углов карты
 uniform float cellSize;
 uniform float lift;
 out vec2 fragTexCoord;
 out vec4 fragColor;
 
-float heightAt(ivec2 p) {
-    return texelFetch(heights, clamp(p, ivec2(0), ivec2(gridSize) - 1), 0).r;
+float fineAt(ivec2 p) {
+    return texelFetch(heights, clamp(p, ivec2(0), ivec2(windowSize) - 1), 0).r;
+}
+
+float coarseAt(ivec2 p) {
+    return texelFetch(coarseHeights, clamp(p, ivec2(0), ivec2(coarseSize) - 1), 0).r;
 }
 
 void main() {
     vec2 g = clamp(vertexPosition.xz / cellSize, vec2(0.0), gridSize - 1.0);
-    vec2 base = min(floor(g), gridSize - 2.0);
-    ivec2 i = ivec2(base);
-    vec2 f = g - base;
-    float h = mix(mix(heightAt(i), heightAt(i + ivec2(1, 0)), f.x),
-                  mix(heightAt(i + ivec2(0, 1)), heightAt(i + ivec2(1, 1)), f.x), f.y);
+    vec2 w = g - windowOrigin;
+    float h;
+    if (all(greaterThanEqual(w, vec2(0.0))) && all(lessThanEqual(w, windowSize - 1.0))) {
+        vec2 base = min(floor(w), windowSize - 2.0);
+        ivec2 i = ivec2(base);
+        vec2 f = w - base;
+        h = mix(mix(fineAt(i), fineAt(i + ivec2(1, 0)), f.x),
+                mix(fineAt(i + ivec2(0, 1)), fineAt(i + ivec2(1, 1)), f.x), f.y);
+    } else {
+        vec2 c = clamp(g / coarseStep, vec2(0.0), coarseSize - 1.0);
+        vec2 base = min(floor(c), coarseSize - 2.0);
+        ivec2 i = ivec2(base);
+        vec2 f = c - base;
+        h = mix(mix(coarseAt(i), coarseAt(i + ivec2(1, 0)), f.x),
+                mix(coarseAt(i + ivec2(0, 1)), coarseAt(i + ivec2(1, 1)), f.x), f.y);
+    }
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     // w в перспективе — расстояние от камеры вдоль взгляда: на 250 м — ещё метр.
@@ -460,98 +492,74 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
     : map_(map), textures_(textures), land_(land) {
     const int width = map.width();
     const int height = map.height();
-    const std::size_t count = static_cast<std::size_t>(width + 1) * static_cast<std::size_t>(height + 1);
-    ground_.resize(count);
-    water_.assign(count, kNoWater);
-    surface_.resize(count);
     minSurface_ = std::numeric_limits<float>::max();
     maxSurface_ = std::numeric_limits<float>::lowest();
-    // Высота берега над водой у углов пресной воды (для откосов) — только на время постройки.
-    std::vector<float> bank(count, 0.0f);
-    for (int vy = 0; vy <= height; ++vy) {
-        for (int vx = 0; vx <= width; ++vx) {
-            // Угол делят до четырёх клеток. Среди воды высота — по дну. На границе
-            // воды и суши — чуть ниже поверхности воды: по среднему соседей узкая
-            // река оказалась бы выше своих берегов, а по дну берег проседал бы
-            // внутрь сухой клетки, и вода растекалась бы по нему. Даже если суша
-            // ниже реки (русло поперёк склона), угол не опускается: вдоль русла
-            // получается невысокий вал, и вода остаётся в своих клетках.
-            // С этапа 11.9 вода реки опущена глубже (русло врезано, LandUse::
-            // channelInset), а угол на границе с пресной водой — заметно ниже
-            // воды: кромка уходит в сухую клетку, выше — откос берега.
-            float landSum = 0.0f;
-            int lands = 0;
-            float bed = 0.0f;
-            float level = 0.0f;
-            float banks = 0.0f;
-            int wet = 0;
-            bool river = false;
-            bool lake = false;
-            for (int cy = vy - 1; cy <= vy; ++cy) {
-                for (int cx = vx - 1; cx <= vx; ++cx) {
-                    const Cell cell{cx, cy};
-                    if (!map.contains(cell)) {
-                        continue;
-                    }
-                    const float elevation = map.elevationMeters(cell);
-                    const Water water = map.water.at(cx, cy);
-                    if (water != Water::None) {
-                        bed += elevation;
-                        level += waterLevel(map, cell) - land_.channelInset(cell);
-                        banks = std::max(banks, land_.bankHeight(cell));
-                        river = river || water == Water::River;
-                        lake = lake || water == Water::Lake;
-                        ++wet;
-                    }
-                    landSum += elevation;
-                    ++lands;
-                }
-            }
-            const std::size_t i = vertexIndex(vx, vy);
-            if (wet == 0) {
-                ground_[i] = landSum / static_cast<float>(lands);
-            } else {
-                water_[i] = level / static_cast<float>(wet);
-                ground_[i] = bed / static_cast<float>(wet);
-                bank[i] = banks;
-                if (wet < lands) {
-                    ground_[i] = std::max(ground_[i], water_[i] - kShoreDepth);
-                    if (river || lake) {
-                        ground_[i] = std::min(ground_[i], water_[i] - (river ? kRiverEdgeDepth : kLakeEdgeDepth));
-                    }
-                }
-            }
+
+    tilesX_ = (width + kTileCells - 1) / kTileCells;
+    const int tilesY = (height + kTileCells - 1) / kTileCells;
+    tiles_.resize(static_cast<std::size_t>(tilesX_) * static_cast<std::size_t>(tilesY));
+    heights_.resize(tiles_.size());
+    for (int ty = 0; ty < tilesY; ++ty) {
+        for (int tx = 0; tx < tilesX_; ++tx) {
+            Tile& tile = tiles_[static_cast<std::size_t>(ty * tilesX_ + tx)];
+            tile.left = tx * kTileCells;
+            tile.top = ty * kTileCells;
+            tile.width = std::min(kTileCells, width - tile.left);
+            tile.height = std::min(kTileCells, height - tile.top);
         }
     }
-    // Берег над пресной водой — не ниже своей высоты: у русла поперёк склона
-    // нижний берег поднимается валом, и откос есть с обеих сторон.
-    for (int vy = 0; vy <= height; ++vy) {
-        for (int vx = 0; vx <= width; ++vx) {
-            const std::size_t i = vertexIndex(vx, vy);
-            if (water_[i] != kNoWater) {
-                continue;
+
+    // Грубая сетка высот поверхности для отладочных слоёв: угол min(i · step, край).
+    const int coarseX = (width + kDrapeStep - 1) / kDrapeStep + 1;
+    const int coarseZ = (height + kDrapeStep - 1) / kDrapeStep + 1;
+    std::vector<float> coarse(static_cast<std::size_t>(coarseX) * static_cast<std::size_t>(coarseZ), 0.0f);
+    const auto coarseIndex = [&](int v, int size, int count) {
+        if (v % kDrapeStep == 0) {
+            return v / kDrapeStep;
+        }
+        return v == size ? count - 1 : -1;
+    };
+
+    // Высоты — по ряду плиток параллельно (блоки независимы), затем границы
+    // плиток по высоте и грубые уровни сеток. Блоки остаются в кэше, пока он не полон.
+    std::vector<Heights> batch(static_cast<std::size_t>(tilesX_));
+    for (int ty = 0; ty < tilesY; ++ty) {
+        parallelFor(static_cast<std::size_t>(tilesX_), 1, 2, [&](std::size_t begin, std::size_t end, int) {
+            for (std::size_t tx = begin; tx < end; ++tx) {
+                computeHeights(tiles_[static_cast<std::size_t>(ty * tilesX_) + tx], batch[tx]);
             }
-            float wanted = std::numeric_limits<float>::lowest();
-            for (int dy = -1; dy <= 1; ++dy) {
-                for (int dx = -1; dx <= 1; ++dx) {
-                    const int nx = vx + dx;
-                    const int ny = vy + dy;
-                    if (nx < 0 || ny < 0 || nx > width || ny > height) {
-                        continue;
-                    }
-                    const std::size_t n = vertexIndex(nx, ny);
-                    if (water_[n] != kNoWater && bank[n] > 0.0f) {
-                        wanted = std::max(wanted, water_[n] + bank[n]);
+        });
+        heightComputes_ += tilesX_;
+        for (int tx = 0; tx < tilesX_; ++tx) {
+            const std::size_t index = static_cast<std::size_t>(ty * tilesX_ + tx);
+            Tile& tile = tiles_[index];
+            const Heights& block = batch[static_cast<std::size_t>(tx)];
+            tile.minY = std::numeric_limits<float>::max();
+            tile.maxY = std::numeric_limits<float>::lowest();
+            for (int vz = tile.top; vz <= tile.top + tile.height; ++vz) {
+                for (int vx = tile.left; vx <= tile.left + tile.width; ++vx) {
+                    const float ground = block.groundAt(vx, vz);
+                    const float water = block.waterAt(vx, vz);
+                    const float surface = std::max(ground, water);
+                    tile.minY = std::min(tile.minY, ground);
+                    tile.maxY = std::max(tile.maxY, surface);
+                    tile.hasWater = tile.hasWater || water != kNoWater;
+                    const int ci = coarseIndex(vx, width, coarseX);
+                    const int cj = coarseIndex(vz, height, coarseZ);
+                    if (ci >= 0 && cj >= 0) {
+                        coarse[static_cast<std::size_t>(cj) * static_cast<std::size_t>(coarseX) +
+                               static_cast<std::size_t>(ci)] = surface;
                     }
                 }
             }
-            ground_[i] = std::max(ground_[i], wanted);
+            minSurface_ = std::min(minSurface_, tile.minY);
+            maxSurface_ = std::max(maxSurface_, tile.maxY);
+            adopt(index, std::make_unique<Heights>(std::move(batch[static_cast<std::size_t>(tx)])));
+            batch[static_cast<std::size_t>(tx)] = Heights{};
+            for (int level = kFirstEagerLevel; level < kLevels; ++level) {
+                build(tile, level);
+            }
         }
-    }
-    for (std::size_t i = 0; i < count; ++i) {
-        surface_[i] = std::max(ground_[i], water_[i]);
-        minSurface_ = std::min(minSurface_, surface_[i]);
-        maxSurface_ = std::max(maxSurface_, surface_[i]);
     }
 
     for (int y = 0; y < height; ++y) {
@@ -562,32 +570,6 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
         }
     }
     buildSpans();
-
-    tilesX_ = (width + kTileCells - 1) / kTileCells;
-    const int tilesY = (height + kTileCells - 1) / kTileCells;
-    tiles_.resize(static_cast<std::size_t>(tilesX_) * static_cast<std::size_t>(tilesY));
-    for (int ty = 0; ty < tilesY; ++ty) {
-        for (int tx = 0; tx < tilesX_; ++tx) {
-            Tile& tile = tiles_[static_cast<std::size_t>(ty * tilesX_ + tx)];
-            tile.left = tx * kTileCells;
-            tile.top = ty * kTileCells;
-            tile.width = std::min(kTileCells, width - tile.left);
-            tile.height = std::min(kTileCells, height - tile.top);
-            tile.minY = std::numeric_limits<float>::max();
-            tile.maxY = std::numeric_limits<float>::lowest();
-            for (int vy = tile.top; vy <= tile.top + tile.height; ++vy) {
-                for (int vx = tile.left; vx <= tile.left + tile.width; ++vx) {
-                    const std::size_t i = vertexIndex(vx, vy);
-                    tile.minY = std::min(tile.minY, ground_[i]);
-                    tile.maxY = std::max(tile.maxY, surface_[i]);
-                    tile.hasWater = tile.hasWater || water_[i] != kNoWater;
-                }
-            }
-            for (int level = kFirstEagerLevel; level < kLevels; ++level) {
-                build(tile, level);
-            }
-        }
-    }
 
     const std::string groundFs = std::string(kFieldGlsl) + kGroundFs;
     groundShader_ = SceneShading::loadShader(kGroundVs, groundFs.c_str());
@@ -605,22 +587,180 @@ Terrain3D::Terrain3D(const Map& map, MapRenderer& textures, const LandUse& land)
     waterMaterial_ = LoadMaterialDefault();
     waterMaterial_.shader = waterShader_;
 
-    // Высоты поверхности — текстурой из одного канала float, без фильтрации:
+    // Высоты поверхности — текстурами из одного канала float, без фильтрации:
     // шейдер читает углы клеток сам.
-    heights_.id = rlLoadTexture(surface_.data(), width + 1, height + 1, RL_PIXELFORMAT_UNCOMPRESSED_R32, 1);
-    heights_.width = width + 1;
-    heights_.height = height + 1;
-    heights_.mipmaps = 1;
-    heights_.format = PIXELFORMAT_UNCOMPRESSED_R32;
-    SetTextureFilter(heights_, TEXTURE_FILTER_POINT);
-    SetTextureWrap(heights_, TEXTURE_WRAP_CLAMP);
+    drapeCoarse_.id = rlLoadTexture(coarse.data(), coarseX, coarseZ, RL_PIXELFORMAT_UNCOMPRESSED_R32, 1);
+    drapeCoarse_.width = coarseX;
+    drapeCoarse_.height = coarseZ;
+    drapeCoarse_.mipmaps = 1;
+    drapeCoarse_.format = PIXELFORMAT_UNCOMPRESSED_R32;
+    SetTextureFilter(drapeCoarse_, TEXTURE_FILTER_POINT);
+    SetTextureWrap(drapeCoarse_, TEXTURE_WRAP_CLAMP);
 
     drapeShader_ = LoadShaderFromMemory(kDrapeVs, kDrapeFs);
     heightsLoc_ = GetShaderLocation(drapeShader_, "heights");
+    coarseLoc_ = GetShaderLocation(drapeShader_, "coarseHeights");
+    windowOriginLoc_ = GetShaderLocation(drapeShader_, "windowOrigin");
+    windowSizeLoc_ = GetShaderLocation(drapeShader_, "windowSize");
     const Vector2 gridSize = {static_cast<float>(width + 1), static_cast<float>(height + 1)};
+    const Vector2 coarseSize = {static_cast<float>(coarseX), static_cast<float>(coarseZ)};
+    const auto step = static_cast<float>(kDrapeStep);
     SetShaderValue(drapeShader_, GetShaderLocation(drapeShader_, "gridSize"), &gridSize, SHADER_UNIFORM_VEC2);
+    SetShaderValue(drapeShader_, GetShaderLocation(drapeShader_, "coarseSize"), &coarseSize, SHADER_UNIFORM_VEC2);
+    SetShaderValue(drapeShader_, GetShaderLocation(drapeShader_, "coarseStep"), &step, SHADER_UNIFORM_FLOAT);
     SetShaderValue(drapeShader_, GetShaderLocation(drapeShader_, "cellSize"), &kCell, SHADER_UNIFORM_FLOAT);
     SetShaderValue(drapeShader_, GetShaderLocation(drapeShader_, "lift"), &kDrapeLift, SHADER_UNIFORM_FLOAT);
+}
+
+void Terrain3D::computeHeights(const Tile& tile, Heights& out) const {
+    const int width = map_.width();
+    const int height = map_.height();
+    // Блок — углы [left − 1, left + width + 1]; подъём берега смотрит ещё на
+    // соседей в угол, поэтому первый проход — на угол шире.
+    out.x0 = tile.left - 1;
+    out.z0 = tile.top - 1;
+    out.width = tile.width + 3;
+    out.height = tile.height + 3;
+    const int px0 = tile.left - 2;
+    const int pz0 = tile.top - 2;
+    const int pw = tile.width + 5;
+    const int ph = tile.height + 5;
+    const auto pass = [&](int vx, int vz) {
+        return static_cast<std::size_t>(vz - pz0) * static_cast<std::size_t>(pw) + static_cast<std::size_t>(vx - px0);
+    };
+    const std::size_t passCount = static_cast<std::size_t>(pw) * static_cast<std::size_t>(ph);
+    std::vector<float> ground(passCount, 0.0f);
+    std::vector<float> water(passCount, kNoWater);
+    // Высота берега над водой у углов пресной воды (для откосов).
+    std::vector<float> bank(passCount, 0.0f);
+    for (int vz = std::max(pz0, 0); vz <= std::min(pz0 + ph - 1, height); ++vz) {
+        for (int vx = std::max(px0, 0); vx <= std::min(px0 + pw - 1, width); ++vx) {
+            // Угол делят до четырёх клеток. Среди воды высота — по дну. На границе
+            // воды и суши — чуть ниже поверхности воды: по среднему соседей узкая
+            // река оказалась бы выше своих берегов, а по дну берег проседал бы
+            // внутрь сухой клетки, и вода растекалась бы по нему. Даже если суша
+            // ниже реки (русло поперёк склона), угол не опускается: вдоль русла
+            // получается невысокий вал, и вода остаётся в своих клетках.
+            // С этапа 11.9 вода реки опущена глубже (русло врезано, LandUse::
+            // channelInset), а угол на границе с пресной водой — заметно ниже
+            // воды: кромка уходит в сухую клетку, выше — откос берега.
+            float landSum = 0.0f;
+            int lands = 0;
+            float bed = 0.0f;
+            float level = 0.0f;
+            float banks = 0.0f;
+            int wet = 0;
+            bool river = false;
+            bool lake = false;
+            for (int cy = vz - 1; cy <= vz; ++cy) {
+                for (int cx = vx - 1; cx <= vx; ++cx) {
+                    const Cell cell{cx, cy};
+                    if (!map_.contains(cell)) {
+                        continue;
+                    }
+                    const float elevation = map_.elevationMeters(cell);
+                    const Water kind = map_.water.at(cx, cy);
+                    if (kind != Water::None) {
+                        bed += elevation;
+                        level += waterLevel(map_, cell) - land_.channelInset(cell);
+                        banks = std::max(banks, land_.bankHeight(cell));
+                        river = river || kind == Water::River;
+                        lake = lake || kind == Water::Lake;
+                        ++wet;
+                    }
+                    landSum += elevation;
+                    ++lands;
+                }
+            }
+            const std::size_t i = pass(vx, vz);
+            if (wet == 0) {
+                ground[i] = landSum / static_cast<float>(lands);
+            } else {
+                water[i] = level / static_cast<float>(wet);
+                ground[i] = bed / static_cast<float>(wet);
+                bank[i] = banks;
+                if (wet < lands) {
+                    ground[i] = std::max(ground[i], water[i] - kShoreDepth);
+                    if (river || lake) {
+                        ground[i] = std::min(ground[i], water[i] - (river ? kRiverEdgeDepth : kLakeEdgeDepth));
+                    }
+                }
+            }
+        }
+    }
+
+    // Берег над пресной водой — не ниже своей высоты: у русла поперёк склона
+    // нижний берег поднимается валом, и откос есть с обеих сторон. За краем
+    // карты угол — копия ближайшего на карте.
+    const std::size_t count = static_cast<std::size_t>(out.width) * static_cast<std::size_t>(out.height);
+    out.ground.resize(count);
+    out.water.resize(count);
+    for (int bz = 0; bz < out.height; ++bz) {
+        for (int bx = 0; bx < out.width; ++bx) {
+            const int vx = std::clamp(out.x0 + bx, 0, width);
+            const int vz = std::clamp(out.z0 + bz, 0, height);
+            const std::size_t i = pass(vx, vz);
+            float g = ground[i];
+            if (water[i] == kNoWater) {
+                float wanted = std::numeric_limits<float>::lowest();
+                for (int dz = -1; dz <= 1; ++dz) {
+                    for (int dx = -1; dx <= 1; ++dx) {
+                        const int nx = vx + dx;
+                        const int nz = vz + dz;
+                        if (nx < 0 || nz < 0 || nx > width || nz > height) {
+                            continue;
+                        }
+                        const std::size_t n = pass(nx, nz);
+                        if (water[n] != kNoWater && bank[n] > 0.0f) {
+                            wanted = std::max(wanted, water[n] + bank[n]);
+                        }
+                    }
+                }
+                g = std::max(g, wanted);
+            }
+            const std::size_t o = static_cast<std::size_t>(bz) * static_cast<std::size_t>(out.width) +
+                                  static_cast<std::size_t>(bx);
+            out.ground[o] = g;
+            out.water[o] = water[i];
+        }
+    }
+}
+
+void Terrain3D::adopt(std::size_t tile, std::unique_ptr<Heights> block) const {
+    if (heightsLoaded_ >= kMaxHeightBlocks) {
+        // Вытеснить самый давно не нужный блок.
+        std::size_t oldest = heights_.size();
+        for (std::size_t i = 0; i < heights_.size(); ++i) {
+            if (i != tile && heights_[i] && (oldest == heights_.size() || heights_[i]->used < heights_[oldest]->used)) {
+                oldest = i;
+            }
+        }
+        if (oldest < heights_.size()) {
+            heights_[oldest].reset();
+            --heightsLoaded_;
+        }
+    }
+    block->used = ++heightsClock_;
+    heights_[tile] = std::move(block);
+    ++heightsLoaded_;
+}
+
+const Terrain3D::Heights& Terrain3D::heightsOf(std::size_t tile) const {
+    if (!heights_[tile]) {
+        auto block = std::make_unique<Heights>();
+        computeHeights(tiles_[tile], *block);
+        ++heightComputes_;
+        adopt(tile, std::move(block));
+    }
+    Heights& block = *heights_[tile];
+    block.used = ++heightsClock_;
+    return block;
+}
+
+std::size_t Terrain3D::tileOfCell(int x, int z) const {
+    const int tx = std::clamp(x / kTileCells, 0, tilesX_ - 1);
+    const int tz = std::clamp(z / kTileCells, 0, static_cast<int>(tiles_.size()) / tilesX_ - 1);
+    return static_cast<std::size_t>(tz * tilesX_ + tx);
 }
 
 Terrain3D::~Terrain3D() {
@@ -632,14 +772,17 @@ Terrain3D::~Terrain3D() {
     UnloadShader(groundShader_);
     UnloadShader(waterShader_);
     UnloadShader(drapeShader_);
-    UnloadTexture(heights_);
+    UnloadTexture(drapeCoarse_);
+    if (drapeWindow_.id != 0) {
+        UnloadTexture(drapeWindow_);
+    }
     // UnloadMaterial выгрузил бы и текстуры карты, а они не наши.
     MemFree(groundMaterial_.maps);
     MemFree(casterMaterial_.maps);
     MemFree(waterMaterial_.maps);
 }
 
-float Terrain3D::sample(const std::vector<float>& grid, float x, float y) const {
+float Terrain3D::sample(float x, float y, bool surface) const {
     const float width = static_cast<float>(map_.width());
     const float height = static_cast<float>(map_.height());
     const float gx = std::clamp(x / kCell, 0.0f, width);
@@ -648,10 +791,16 @@ float Terrain3D::sample(const std::vector<float>& grid, float x, float y) const 
     const int iy = std::min(static_cast<int>(gy), map_.height() - 1);
     const float u = gx - static_cast<float>(ix);
     const float w = gy - static_cast<float>(iy);
-    const float h00 = grid[vertexIndex(ix, iy)];
-    const float h10 = grid[vertexIndex(ix + 1, iy)];
-    const float h01 = grid[vertexIndex(ix, iy + 1)];
-    const float h11 = grid[vertexIndex(ix + 1, iy + 1)];
+    // Все четыре угла клетки — в блоке её плитки (у блока полоса в угол вокруг).
+    const Heights& block = heightsOf(tileOfCell(ix, iy));
+    const auto at = [&](int vx, int vz) {
+        const std::size_t i = block.index(vx, vz);
+        return surface ? std::max(block.ground[i], block.water[i]) : block.ground[i];
+    };
+    const float h00 = at(ix, iy);
+    const float h10 = at(ix + 1, iy);
+    const float h01 = at(ix, iy + 1);
+    const float h11 = at(ix + 1, iy + 1);
     // Клетка делится на треугольники по диагонали от (0, 0) к (1, 1), как в сетке.
     if (w >= u) {
         return h00 + (h11 - h01) * u + (h01 - h00) * w;
@@ -772,11 +921,11 @@ void Terrain3D::buildSpans() {
 }
 
 float Terrain3D::groundAt(float x, float y) const {
-    return sample(ground_, x, y);
+    return sample(x, y, false);
 }
 
 float Terrain3D::surfaceAt(float x, float y) const {
-    return sample(surface_, x, y);
+    return sample(x, y, true);
 }
 
 float Terrain3D::standAt(float x, float y) const {
@@ -891,6 +1040,8 @@ void Terrain3D::buildGround(Tile& tile, int level) {
     const int nx = (tile.width + step - 1) / step + 1;
     const int nz = (tile.height + step - 1) / step + 1;
     const MapRenderer::GroundChunk chunk = textures_.groundChunk(tile.left, tile.top);
+    // Все нужные углы (с соседями для нормали и воды) — в блоке плитки.
+    const Heights& block = heightsOf(tileIndex(tile));
     const int gridQuads = (nx - 1) * (nz - 1);
     const int skirtQuads = 2 * (nx - 1) + 2 * (nz - 1);
     Mesh mesh = allocateMesh(nx * nz + 2 * nx + 2 * nz, 2 * (gridQuads + skirtQuads), true, true);
@@ -908,7 +1059,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
         // с водой — средний уровень соседних мокрых, дальше от воды — «сухо».
         const int gx = std::clamp(cx, 0, map_.width());
         const int gz = std::clamp(cz, 0, map_.height());
-        float water = water_[vertexIndex(gx, gz)];
+        float water = block.waterAt(gx, gz);
         if (water == kNoWater) {
             float sum = 0.0f;
             int wet = 0;
@@ -917,8 +1068,8 @@ void Terrain3D::buildGround(Tile& tile, int level) {
                     const int nx = gx + dx;
                     const int nz = gz + dz;
                     if (nx >= 0 && nz >= 0 && nx <= map_.width() && nz <= map_.height() &&
-                        water_[vertexIndex(nx, nz)] != kNoWater) {
-                        sum += water_[vertexIndex(nx, nz)];
+                        block.waterAt(nx, nz) != kNoWater) {
+                        sum += block.waterAt(nx, nz);
                         ++wet;
                     }
                 }
@@ -930,7 +1081,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
         // Нормаль — по соседним углам самой подробной сетки: и на грубых уровнях
         // свет лепит мелкие склоны.
         const auto h = [&](int x, int z) {
-            return ground_[vertexIndex(std::clamp(x, 0, map_.width()), std::clamp(z, 0, map_.height()))];
+            return block.groundAt(std::clamp(x, 0, map_.width()), std::clamp(z, 0, map_.height()));
         };
         const Vector3 normal = Vector3Normalize(
             {(h(cx - 1, cz) - h(cx + 1, cz)) / (2.0f * kCell), 1.0f, (h(cx, cz - 1) - h(cx, cz + 1)) / (2.0f * kCell)});
@@ -943,7 +1094,7 @@ void Terrain3D::buildGround(Tile& tile, int level) {
     const auto cellZ = [&](int j) { return tile.top + std::min(j * step, tile.height); };
     for (int j = 0; j < nz; ++j) {
         for (int i = 0; i < nx; ++i) {
-            put(cellX(i), cellZ(j), ground_[vertexIndex(cellX(i), cellZ(j))]);
+            put(cellX(i), cellZ(j), block.groundAt(cellX(i), cellZ(j)));
         }
     }
 
@@ -1004,6 +1155,7 @@ void Terrain3D::buildWater(Tile& tile, int level) {
     const auto latticeIndex = [nx](int i, int j) { return static_cast<std::size_t>(j * nx + i); };
     const auto cellX = [&](int i) { return tile.left + std::min(i * step, tile.width); };
     const auto cellZ = [&](int j) { return tile.top + std::min(j * step, tile.height); };
+    const Heights& block = heightsOf(tileIndex(tile));
 
     // Уровень в узлах: у воды — свой, у суши рядом с водой — средний по
     // соседним мокрым узлам, но не выше земли: берег — край водных клеток,
@@ -1012,7 +1164,7 @@ void Terrain3D::buildWater(Tile& tile, int level) {
     std::vector<unsigned char> wet(levels.size(), 0);
     for (int j = 0; j < nz; ++j) {
         for (int i = 0; i < nx; ++i) {
-            const float w = water_[vertexIndex(cellX(i), cellZ(j))];
+            const float w = block.waterAt(cellX(i), cellZ(j));
             if (w != kNoWater) {
                 levels[latticeIndex(i, j)] = w;
                 wet[latticeIndex(i, j)] = 1;
@@ -1037,7 +1189,7 @@ void Terrain3D::buildWater(Tile& tile, int level) {
                 }
             }
             if (count > 0) {
-                const float ground = ground_[vertexIndex(cellX(i), cellZ(j))];
+                const float ground = block.groundAt(cellX(i), cellZ(j));
                 levels[latticeIndex(i, j)] = std::min(sum / static_cast<float>(count), ground - kShoreDepth);
             }
         }
@@ -1081,7 +1233,7 @@ void Terrain3D::buildWater(Tile& tile, int level) {
             mesh.vertices[3 * v + 1] = y;
             mesh.vertices[3 * v + 2] = static_cast<float>(cellZ(j)) * kCell;
             // Глубина в узле — для цвета и прозрачности в шейдере; у берега отрицательна.
-            mesh.texcoords[2 * v] = y - ground_[vertexIndex(cellX(i), cellZ(j))];
+            mesh.texcoords[2 * v] = y - block.groundAt(cellX(i), cellZ(j));
             mesh.texcoords[2 * v + 1] = 0.0f;
             // Течение в узле — среднее по четырём клеткам вокруг (LandUse::flowAt
             // уже сглажено): x и z — скорость, м/с; y — перекат.
@@ -1167,6 +1319,7 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 fol
     const Matrix viewProjection = MatrixMultiply(rlGetMatrixModelview(), rlGetMatrixProjection());
 
     visible_.clear();
+    pending_ = 0;
     int builds = 0;
     for (std::size_t index = 0; index < tiles_.size(); ++index) {
         Tile& tile = tiles_[index];
@@ -1179,14 +1332,27 @@ void Terrain3D::drawGround(const Camera3D& camera, float snowAmount, Vector3 fol
         }
         const int wanted = levelFor(tile, camera);
         tile.level = wanted;
-        if (!tile.built[wanted] && builds < kBuildsPerFrame) {
-            build(tile, wanted);
-            ++builds;
+        if (!tile.built[wanted]) {
+            if (builds < kBuildsPerFrame) {
+                build(tile, wanted);
+                ++builds;
+            } else {
+                ++pending_;
+            }
         }
         const int level = shownLevel(tile, camera);
         tile.lastUsed[level] = frame_;
         visible_.push_back({static_cast<int>(index), level});
+        // Клетка на экране крупнее пикселя — земле нужны подробные текстуры
+        // карты (этап 2а.2); ближние плитки — первыми.
+        if (wanted <= kFineTextureLevel) {
+            const float cx = (static_cast<float>(tile.left) + 0.5f * static_cast<float>(tile.width)) * kCell;
+            const float cz = (static_cast<float>(tile.top) + 0.5f * static_cast<float>(tile.height)) * kCell;
+            const float distance = std::hypot(cx - camera.position.x, cz - camera.position.z);
+            textures_.requestFine(tile.left, tile.top, static_cast<float>(wanted) * 1e5f + distance);
+        }
     }
+    textures_.commitFine();
 
     tilesDrawn_ = static_cast<int>(visible_.size());
     trianglesDrawn_ = 0;
@@ -1239,10 +1405,67 @@ void Terrain3D::drawWater(float time, Vector2 wind, const SceneShading& shading)
     }
 }
 
-void Terrain3D::beginDrape() const {
+void Terrain3D::updateDrapeWindow(Vector2 center) const {
+    const int width = map_.width();
+    const int height = map_.height();
+    const int sizeX = std::min(kDrapeWindow, width);
+    const int sizeZ = std::min(kDrapeWindow, height);
+    // Угол окна — шагом kDrapeShift, чтобы окно не переливалось каждый кадр.
+    const auto origin = [](float meters, int size, int limit) {
+        const float cells = meters / kCell - 0.5f * static_cast<float>(size);
+        const int snapped = static_cast<int>(std::lround(cells / kDrapeShift)) * kDrapeShift;
+        return std::clamp(snapped, 0, std::max(0, limit - size));
+    };
+    const int x0 = origin(center.x, sizeX, width);
+    const int z0 = origin(center.y, sizeZ, height);
+    if (drapeWindow_.id != 0 && x0 == drapeX_ && z0 == drapeZ_) {
+        return;
+    }
+    const int cornersX = sizeX + 1;
+    const int cornersZ = sizeZ + 1;
+    drapeScratch_.resize(static_cast<std::size_t>(cornersX) * static_cast<std::size_t>(cornersZ));
+    // По плиткам: углы плитки — из её блока.
+    for (int tz = z0 / kTileCells; tz * kTileCells <= z0 + sizeZ && tz * kTileCells < height; ++tz) {
+        for (int tx = x0 / kTileCells; tx * kTileCells <= x0 + sizeX && tx * kTileCells < width; ++tx) {
+            const std::size_t index = static_cast<std::size_t>(tz * tilesX_ + tx);
+            const Tile& tile = tiles_[index];
+            const Heights& block = heightsOf(index);
+            for (int vz = std::max(tile.top, z0); vz <= std::min(tile.top + tile.height, z0 + sizeZ); ++vz) {
+                for (int vx = std::max(tile.left, x0); vx <= std::min(tile.left + tile.width, x0 + sizeX); ++vx) {
+                    const std::size_t i = block.index(vx, vz);
+                    drapeScratch_[static_cast<std::size_t>(vz - z0) * static_cast<std::size_t>(cornersX) +
+                                  static_cast<std::size_t>(vx - x0)] = std::max(block.ground[i], block.water[i]);
+                }
+            }
+        }
+    }
+    if (drapeWindow_.id == 0) {
+        drapeWindow_.id =
+            rlLoadTexture(drapeScratch_.data(), cornersX, cornersZ, RL_PIXELFORMAT_UNCOMPRESSED_R32, 1);
+        drapeWindow_.width = cornersX;
+        drapeWindow_.height = cornersZ;
+        drapeWindow_.mipmaps = 1;
+        drapeWindow_.format = PIXELFORMAT_UNCOMPRESSED_R32;
+        SetTextureFilter(drapeWindow_, TEXTURE_FILTER_POINT);
+        SetTextureWrap(drapeWindow_, TEXTURE_WRAP_CLAMP);
+    } else {
+        rlUpdateTexture(drapeWindow_.id, 0, 0, cornersX, cornersZ, RL_PIXELFORMAT_UNCOMPRESSED_R32,
+                        drapeScratch_.data());
+    }
+    drapeX_ = x0;
+    drapeZ_ = z0;
+}
+
+void Terrain3D::beginDrape(Vector2 center) const {
+    updateDrapeWindow(center);
     BeginShaderMode(drapeShader_);
-    // После BeginShaderMode: текстура привязывается к текущему шейдеру батча.
-    SetShaderValueTexture(drapeShader_, heightsLoc_, heights_);
+    // После BeginShaderMode: текстуры привязываются к текущему шейдеру батча.
+    SetShaderValueTexture(drapeShader_, heightsLoc_, drapeWindow_);
+    SetShaderValueTexture(drapeShader_, coarseLoc_, drapeCoarse_);
+    const Vector2 origin = {static_cast<float>(drapeX_), static_cast<float>(drapeZ_)};
+    const Vector2 size = {static_cast<float>(drapeWindow_.width), static_cast<float>(drapeWindow_.height)};
+    SetShaderValue(drapeShader_, windowOriginLoc_, &origin, SHADER_UNIFORM_VEC2);
+    SetShaderValue(drapeShader_, windowSizeLoc_, &size, SHADER_UNIFORM_VEC2);
 }
 
 void Terrain3D::endDrape() const {

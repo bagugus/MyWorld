@@ -30,10 +30,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <type_traits>
 #include <utility>
 
 namespace lw {
+
+Population populationFor(int width, int height) {
+    const WorldConfig defaults;
+    const double share = static_cast<double>(width) * static_cast<double>(height) /
+                         (static_cast<double>(kDefaultMapCells) * static_cast<double>(kDefaultMapCells));
+    const auto scaled = [share](int count) { return static_cast<int>(std::lround(count * share)); };
+    return {scaled(defaults.people), scaled(defaults.animals), scaled(defaults.flocks)};
+}
 
 World::World(std::uint64_t seed, const WorldConfig& config)
     : seed_(seed),

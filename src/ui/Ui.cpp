@@ -647,6 +647,14 @@ void drawMeasurements(const World& world, const WorldRenderer& renderer, const W
                 props.meshesBuilt(), props.buildSeconds());
     ImGui::Text("В этом кадре: деревья %.1f мс, мелочи %.1f мс; в очереди %d", trees.buildMsLastFrame(),
                 props.buildMsLastFrame(), renderer3d.pending());
+    // Облик по требованию (этап 2а.2): что из карты сейчас в памяти.
+    const Buildings3D& buildings = renderer3d.buildings();
+    ImGui::Text("Здания: сеток чанков %d (%.2f с), в кадре чанков %d", buildings.meshesBuilt(),
+                buildings.buildSeconds(), buildings.chunksDrawn());
+    ImGui::Text("Подробных текстур карты: %d (испечено %d за %.2f с)", renderer.map().fineChunks(),
+                renderer.map().fineBaked(), renderer.map().fineSeconds());
+    ImGui::Text("Блоков высот: %d (считались %d раз), раскладка вне леса %.1f МБ", terrain.heightBlocks(),
+                terrain.heightComputes(), megabytes(renderer3d.land().memoryBytes()));
 }
 
 // Уровни детализации симуляции (этап 6а): сколько существ на каждом и флажок
@@ -842,8 +850,8 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
                 renderer3d.setDrawDistance(range);
             }
         } else {
-            ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
-                        renderer.map().chunkCount());
+            ImGui::Text("Чанков карты в кадре: %d из %d, подробных в памяти: %d", renderer.map().chunksDrawn(),
+                        renderer.map().chunkCount(), renderer.map().fineChunks());
         }
         drawLodControls(world);
         ImGui::Text("Зум: %.2f пикс/м", camera.zoom());

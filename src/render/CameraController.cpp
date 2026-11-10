@@ -469,7 +469,7 @@ void CameraController::beginOverlay() const {
     rlDisableBackfaceCulling();
     // Высоту вершинам слоя даёт рельеф.
     if (terrain_ != nullptr) {
-        terrain_->beginDrape();
+        terrain_->beginDrape({camera3d_.target.x, camera3d_.target.z});
     }
 }
 

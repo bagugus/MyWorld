@@ -4,7 +4,7 @@
 //   lw_headless --seed 42 --paths 500 замер поиска пути: пары дверей и пары случайных клеток суши
 //                                     (--optimal — сравнить каждый путь с оптимальным)
 //   lw_headless --seed 42 --people 3000 --ticks 144000   сутки мира с 3000 людей
-//   lw_headless --seed 42 --zombies 400 --no-peace       мир сразу после катастрофы, как до этапа 7.2
+//   lw_headless --seed 42 --zombies 1600 --no-peace      мир сразу после катастрофы, как до этапа 7.2
 //   lw_headless --seed 42 --animals 0 --flocks 0         мир без животных и птиц
 //   lw_headless --seed 42 --ticks 8640000 --daily         год мира, строка на каждые сутки
 //   lw_headless --seed 42 --ticks 1440000 --social        и список социальных событий (этап 6)
@@ -22,7 +22,8 @@
 //   lw_headless --seed 42 --outbreak 1 --ticks 1440000 --infections   вспышка: кто от кого заразился (этап 7.5)
 //   lw_headless --seed 1 --ticks 144000 --profile        время систем тика, шаги старта, память (этап 2а.1)
 //   lw_headless --seed 1 --ticks 144000 --sample         горячие функции (сэмплирующий профайлер, Windows)
-//   lw_headless --seed 1 --map-size 4096 --people 1200   карта 16 × 16 км (клетки по 4 м)
+//   lw_headless --seed 1 --map-size 2048                 карта 8 × 8 км (по умолчанию — 16 × 16 км,
+//                                                        клетки по 4 м); люди, звери и стаи — по площади
 //   lw_headless --seed 1 --threads 1                     без параллельных проходов (хеш тот же)
 
 #include "sim/Climate.h"
@@ -1906,6 +1907,10 @@ int main(int argc, char** argv) {
     // Фаза мира с самого начала (этап 7.4).
     std::optional<lw::WorldPhase> startPhase;
     lw::WorldConfig config;
+    // Заданы ли явно; иначе — по площади карты (этап 2а.2).
+    bool peopleSet = false;
+    bool animalsSet = false;
+    bool flocksSet = false;
 
     for (int i = 1; i < argc; ++i) {
         const bool hasValue = i + 1 < argc;
@@ -1961,12 +1966,15 @@ int main(int argc, char** argv) {
             config.mapWidth = config.mapHeight = std::max(64, std::atoi(argv[++i]));
         } else if (std::strcmp(argv[i], "--people") == 0 && hasValue) {
             config.people = std::atoi(argv[++i]);
+            peopleSet = true;
         } else if (std::strcmp(argv[i], "--zombies") == 0 && hasValue) {
             config.zombies = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--animals") == 0 && hasValue) {
             config.animals = std::atoi(argv[++i]);
+            animalsSet = true;
         } else if (std::strcmp(argv[i], "--flocks") == 0 && hasValue) {
             config.flocks = std::atoi(argv[++i]);
+            flocksSet = true;
         } else if (std::strcmp(argv[i], "--lod") == 0 && hasValue) {
             config.lod = std::strcmp(argv[++i], "off") != 0; // LOD симуляции (этап 6а)
         } else {
@@ -1980,6 +1988,13 @@ int main(int argc, char** argv) {
             return 2;
         }
     }
+
+    // Не заданные явно люди, звери и стаи — с той же плотностью, что на карте
+    // по умолчанию (этап 2а.2).
+    const lw::Population population = lw::populationFor(config.mapWidth, config.mapHeight);
+    config.people = peopleSet ? config.people : population.people;
+    config.animals = animalsSet ? config.animals : population.animals;
+    config.flocks = flocksSet ? config.flocks : population.flocks;
 
     if (climate) {
         printClimate(seed);

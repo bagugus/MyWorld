@@ -98,7 +98,10 @@ private:
         bool farOnly = false; // подробные ещё не готовы: все деревья — упрощённые
     };
 
+    // Какие чанки с деревьями и их высоты — обходом всей карты, параллельно по
+    // чанкам; один раз перед первой отрисовкой (и после reset).
     void scan();
+    bool scanned_ = false;
     void buildFar(Chunk& chunk);
     void buildNear(Chunk& chunk, int block);
     void unload(Part& part);

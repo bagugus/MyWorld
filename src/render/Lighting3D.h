@@ -5,6 +5,7 @@
 #include <raylib.h>
 
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace lw {
@@ -75,6 +76,9 @@ public:
     // (нормаль — rlNormal3f, свечение — rlTexCoord2f(1, 0)).
     void beginModels() const;
     void endModels() const;
+    // Шейдер моделей — для статичных сеток (здания вдали, render/Buildings3D):
+    // DrawMesh с ним между beginModels и endModels освещён так же, как батч.
+    const Shader& modelShader() const { return modelShader_; }
 
     // Привязать карту теней и детальную текстуру к их блокам; отвязать.
     void bindTextures() const;
@@ -84,6 +88,28 @@ public:
     static constexpr int kDetailUnit = 6;
 
 private:
+    // Места униформ света в шейдере (ищутся один раз: поиск по имени дорог).
+    struct Uniforms {
+        int viewPos = -1;
+        int lightDir = -1;
+        int lightColor = -1;
+        int ambientSky = -1;
+        int ambientGround = -1;
+        int fogColor = -1;
+        int fogDensity = -1;
+        int shadowMap = -1;
+        int detailMap = -1;
+        int shadowStrength = -1;
+        int shadowTexel = -1;
+        int shadowRange = -1;
+        int lightVP = -1;
+        int gradeTint = -1;
+        int gradeFrame = -1;
+    };
+    const Uniforms& uniformsOf(const Shader& shader) const;
+    // По номеру шейдера: шейдеры сцены живут, пока жив рендер.
+    mutable std::unordered_map<unsigned int, Uniforms> uniforms_;
+
     SceneLight light_{};
     Vector3 eye_{};
     float fogDensity_ = 0.0f;

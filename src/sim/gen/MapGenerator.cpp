@@ -19,7 +19,7 @@ GeneratedMap generateMap(Map& map, Rng& rng, Profiler* profiler) {
         const StartupScope scope(*profiler, name);
         step();
     };
-    run("world/map/context", [&] { ctx.emplace(map, rng, result); });
+    run("world/map/context", [&] { ctx.emplace(map, rng, result, profiler); });
 
     // Порядок важен: каждый шаг опирается на предыдущие и тянет числа из
     // одного rng. Перестановка шагов меняет карты всех seed.
