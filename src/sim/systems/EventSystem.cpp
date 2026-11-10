@@ -302,6 +302,26 @@ std::optional<Cell> pickEventSite(const World& world, EventKind kind, Rng& rng) 
             return aid;
         }
     }
+    // Военная колонна идёт большой дорогой (этап 2а.3): место — на оси шоссе,
+    // а без шоссе — трассы, за городом.
+    if (kind == EventKind::MilitaryConvoy) {
+        for (const RoadClass major : {RoadClass::Highway, RoadClass::Regional}) {
+            std::vector<const RoadLink*> links;
+            for (const RoadLink& link : world.roads().links) {
+                if (link.kind == major && !link.path.empty()) {
+                    links.push_back(&link);
+                }
+            }
+            for (int attempt = 0; !links.empty() && attempt < kSiteAttempts; ++attempt) {
+                const RoadLink& link = *links[rng.below(static_cast<std::uint32_t>(links.size()))];
+                const Cell axis = link.path[rng.below(static_cast<std::uint32_t>(link.path.size()))];
+                const Cell cell = Map::cellAt(link.axisX(axis), link.axisY(axis));
+                if (suits(cell)) {
+                    return cell;
+                }
+            }
+        }
+    }
     for (int attempt = 0; attempt < kSiteAttempts; ++attempt) {
         if (const Cell cell = randomCell(); suits(cell)) {
             return cell;

@@ -850,9 +850,7 @@ void Terrain3D::buildSpans() {
         span.deck = std::numeric_limits<float>::lowest();
         for (const std::size_t i : cells) {
             span.deck = std::max(span.deck, bridges_[i].deck);
-            if (bridges_[i].road == Road::Asphalt) {
-                span.road = Road::Asphalt;
-            }
+            span.road = std::max(span.road, bridges_[i].road);
         }
         // Прямой пролёт: дорога на суше у моста — ровно два связных куска, по
         // берегу с каждой стороны; ось — от середины одного до середины другого,
@@ -903,7 +901,7 @@ void Terrain3D::buildSpans() {
                 }
                 // Настил закрывает клетки дороги над водой: середины клеток — не
                 // дальше 1,5 м от края.
-                span.halfWidth = std::max(span.road == Road::Asphalt ? 3.0f : 2.0f, widest + 1.5f);
+                span.halfWidth = std::max(span.road >= Road::Asphalt ? 3.0f : 2.0f, widest + 1.5f);
             }
         }
         if (span.straight) {

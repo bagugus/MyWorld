@@ -14,8 +14,10 @@ enum class Ground : std::uint8_t { Grass, Sand, Rock, Field };
 enum class Water : std::uint8_t { None, Sea, Lake, River };
 // Растительность: влияет на обзор, скорость движения, укрытие.
 enum class Cover : std::uint8_t { None, Forest };
-// Дорога на клетке с водой — мост. Значения упорядочены по качеству покрытия.
-enum class Road : std::uint8_t { None, Dirt, Asphalt };
+// Дорога на клетке с водой — мост. Значения упорядочены по качеству покрытия:
+// Highway — полотно шоссе (этап 2а.3), асфальт шире и с разметкой. Класс
+// дороги (трасса, просёлок) — у участка сети, sim/Roads.h.
+enum class Road : std::uint8_t { None, Dirt, Asphalt, Highway };
 
 // Координаты клетки. Клетка (x, y) занимает в мире квадрат
 // [x * kCellSize, (x + 1) * kCellSize) по обеим осям; ось y направлена вниз (на юг).

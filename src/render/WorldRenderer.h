@@ -1,6 +1,7 @@
 #pragma once
 
 #include "render/MapRenderer.h"
+#include "render/RoadRenderer.h"
 
 #include <raylib.h>
 
@@ -25,6 +26,8 @@ public:
 
 private:
     MapRenderer map_;
+    // Дороги по классам на общем плане и разметка вблизи (этап 2а.3).
+    RoadRenderer roads_;
 };
 
 } // namespace lw

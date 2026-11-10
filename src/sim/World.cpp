@@ -126,6 +126,19 @@ void World::generate() {
                                         site.door,
                                         settlementIds[static_cast<std::size_t>(site.settlement)]);
         }
+        // Сеть дорог (этап 2а.3) — с id поселений вместо индексов.
+        roads_.links.reserve(generated.roads.size());
+        for (RoadSite& site : generated.roads) {
+            RoadLink link;
+            link.kind = site.kind;
+            link.from = settlementIds[static_cast<std::size_t>(site.from)];
+            link.to = settlementIds[static_cast<std::size_t>(site.to)];
+            link.path = std::move(site.path);
+            link.lengthMeters = site.lengthMeters;
+            roads_.links.push_back(std::move(link));
+        }
+        roads_.junctions = std::move(generated.junctions);
+        roads_.bridges = std::move(generated.bridges);
     }
     {
         const StartupScope step(profiler_, "world/nav grid");

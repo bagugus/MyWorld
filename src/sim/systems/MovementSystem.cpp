@@ -1,7 +1,9 @@
 #include "sim/systems/MovementSystem.h"
 
+#include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Parallel.h"
+#include "sim/Roads.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 
@@ -76,7 +78,22 @@ bool startWalkDirect(World& world, entt::entity entity, Cell goal) {
 namespace {
 
 // Шаг одного идущего за тик: меняет только его позицию, скорость и путь.
-void advance(const NavGrid& nav, float dt, Position& position, Velocity& velocity, Walker& walker) {
+// Грязь (этап 2а.3): грунтовка и пашня в дождь медленнее; wetness — из
+// mudWetness, ноль — сухо, и карту не читаем.
+struct Mud {
+    const Map& map;
+    float wetness = 0.0f;
+
+    float factor(Cell cell) const {
+        if (wetness <= 0.0f || !map.contains(cell)) {
+            return 1.0f;
+        }
+        return mudSpeedFactor(map.road.at(cell.x, cell.y), map.ground.at(cell.x, cell.y), wetness);
+    }
+};
+
+void advance(const NavGrid& nav, const Mud& mud, float dt, Position& position, Velocity& velocity,
+             Walker& walker) {
     const Position before = position;
     float remaining = dt;
     while (remaining > 0.0f && walker.moving()) {
@@ -89,10 +106,12 @@ void advance(const NavGrid& nav, float dt, Position& position, Velocity& velocit
 
         // Скорость — по клетке, где сущность сейчас; сойти с непроходимой
         // клетки (не бывает, но на всякий случай) можно со скоростью вплавь.
-        float factor = walkSpeedFactor(nav.cost(Map::cellAt(position.x, position.y)));
+        const Cell here = Map::cellAt(position.x, position.y);
+        float factor = walkSpeedFactor(nav.cost(here));
         if (factor <= 0.0f) {
             factor = kSwimFactor;
         }
+        factor *= mud.factor(here);
         const float speed = walker.speed * walker.pace * factor;
         const float step = speed * remaining;
         if (step >= distance) {
@@ -117,6 +136,9 @@ void advance(const NavGrid& nav, float dt, Position& position, Velocity& velocit
 
 void updateMovement(World& world, float dt) {
     const NavGrid& nav = world.nav();
+    const Weather& weather = world.weather();
+    const Mud mud{world.map(), mudWetness(weather.precipitation,
+                                          isSnowing(seaLevelTemperature(calendarAt(world.tick()), weather)))};
     // Каждый идущий меняет только свои компоненты, а читает неизменную сетку
     // навигации — шаги не зависят друг от друга и порядка, поэтому идут
     // параллельно (sim/Parallel.h, этап 2а.1). Куски — по ведущему хранилищу
@@ -136,7 +158,7 @@ void updateMovement(World& world, float dt) {
                 velocity = {};
                 continue;
             }
-            advance(nav, dt, position, velocity, walker);
+            advance(nav, mud, dt, position, velocity, walker);
         }
         return;
     }
@@ -151,7 +173,7 @@ void updateMovement(World& world, float dt) {
                 velocity = {};
                 continue;
             }
-            advance(nav, dt, position, velocity, walker);
+            advance(nav, mud, dt, position, velocity, walker);
         }
     });
 }

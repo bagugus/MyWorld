@@ -2,6 +2,7 @@
 
 #include "sim/Components.h"
 #include "sim/Map.h"
+#include "sim/Roads.h"
 
 #include <string>
 #include <vector>
@@ -30,9 +31,22 @@ struct BuildingSite {
     int settlement = 0; // индекс в GeneratedMap::settlements
 };
 
+// Участок дороги между поселениями (этап 2а.3); from и to — индексы в
+// GeneratedMap::settlements.
+struct RoadSite {
+    RoadClass kind = RoadClass::Track;
+    int from = 0;
+    int to = 0;
+    std::vector<Cell> path;
+    float lengthMeters = 0.0f;
+};
+
 struct GeneratedMap {
     std::vector<SettlementSite> settlements;
     std::vector<BuildingSite> buildings;
+    std::vector<RoadSite> roads;
+    std::vector<RoadJunction> junctions;
+    std::vector<RoadBridge> bridges;
 };
 
 // Заполняет все слои карты и размещает поселения, дороги и дома.

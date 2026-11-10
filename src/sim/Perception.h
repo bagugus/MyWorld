@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Components.h"
+#include "sim/Map.h"
 #include "sim/Sound.h"
 #include "sim/TimeScale.h"
 
@@ -169,7 +170,9 @@ struct Noise {
     SoundKind kind = SoundKind::None;
     float loudness = 0.0f; // метры в тихую погоду
 };
-Noise noiseOf(const SenseLookup& lookup, entt::entity entity);
-Noise noiseOf(const entt::registry& registry, entt::entity entity);
+// surface — покрытие под существом: по асфальту шаги звонче (этап 2а.3,
+// footstepLoudness), шаги не громче kMaxNoiseLoudness.
+Noise noiseOf(const SenseLookup& lookup, entt::entity entity, Road surface = Road::None);
+Noise noiseOf(const entt::registry& registry, entt::entity entity, Road surface = Road::None);
 
 } // namespace lw
