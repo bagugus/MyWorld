@@ -25,6 +25,8 @@ constexpr Color kField = {176, 164, 96, 255};
 constexpr Color kForest = {46, 86, 50, 255};
 constexpr Color kDirtRoad = {150, 122, 88, 255};
 constexpr Color kAsphalt = {72, 72, 78, 255};
+// Шоссе темнее и холоднее трассы: на общем плане главные дороги читаются сразу.
+constexpr Color kHighway = {56, 58, 70, 255};
 constexpr Color kShallowSea = {72, 144, 178, 255};
 constexpr Color kDeepSea = {24, 62, 112, 255};
 constexpr Color kLake = {58, 122, 170, 255};
@@ -84,6 +86,8 @@ float hillshade(const Map& map, int x, int y) {
 Color cellColor(const Map& map, int x, int y, bool shade, float relief) {
     // Дорога поверх всего, включая воду (мост).
     switch (map.road.at(x, y)) {
+    case Road::Highway:
+        return kHighway;
     case Road::Asphalt:
         return kAsphalt;
     case Road::Dirt:

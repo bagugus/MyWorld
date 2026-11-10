@@ -62,7 +62,7 @@ void drawFlock(const Flock& flock, EntityId id, Vector2 at, float zoom) {
 
 } // namespace
 
-WorldRenderer::WorldRenderer(const World& world) : map_(world.map()) {}
+WorldRenderer::WorldRenderer(const World& world) : map_(world.map()), roads_(world) {}
 
 void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha) {
     const float zoom = camera.zoom;
@@ -78,6 +78,7 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
     map_.draw(visible, zoom);
     // Даже полный покров оставляет карту читаемой.
     map_.drawSnow(visible, world.weather().snowCover * 0.85f);
+    roads_.draw(world.map(), visible, zoom);
     DrawRectangleLinesEx(bounds, 2.0f / zoom, kBorderColor);
 
     for (const auto [entity, building] : world.registry().view<const Building>().each()) {

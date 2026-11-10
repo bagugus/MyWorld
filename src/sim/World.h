@@ -5,6 +5,7 @@
 #include "sim/Lod.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
+#include "sim/Roads.h"
 #include "sim/Profiler.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
@@ -165,6 +166,9 @@ public:
     Pathfinder& pathfinder() { return pathfinder_; }
     // Поселения, здания, места для питья и сбора — справочник для решений людей.
     const Places& places() const { return places_; }
+    // Сеть дорог между поселениями (этап 2а.3): шоссе, трассы, просёлки,
+    // развязки, мосты. Производные данные генерации, в хеш не входят.
+    const RoadNetwork& roads() const { return roads_; }
     // Возобновляемые ресурсы: ягоды и грибы в лесу, дождевая вода.
     Resources& resources() { return resources_; }
     const Resources& resources() const { return resources_; }
@@ -214,6 +218,7 @@ private:
     NavGraph graph_;
     Pathfinder pathfinder_{nav_, graph_};
     Places places_;
+    RoadNetwork roads_;
     Resources resources_;
     ActivityMap activity_;
 

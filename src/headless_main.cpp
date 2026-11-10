@@ -114,10 +114,25 @@ void printMapSummary(const lw::World& world, double seconds) {
                 100.0 * static_cast<double>(forest) / landCells,
                 100.0 * static_cast<double>(field) / landCells,
                 highest * lw::Map::kElevationStep);
-    std::printf("  lake cells %zu, river cells %zu, roads %.1f km\n", lake, river,
+    std::printf("  lake cells %zu, river cells %zu, road cells %.1f km\n", lake, river,
                 static_cast<double>(road) * cellKm);
     std::printf("  towns %zu, villages %zu, buildings %zu\n", towns, villages,
                 world.registry().view<const lw::Building>().size());
+    // Иерархия дорог (этап 2а.3): участки сети по классам, развязки, мосты.
+    const lw::RoadNetwork& network = world.roads();
+    int bridges[3] = {};
+    int bridgeCells[3] = {};
+    for (const lw::RoadBridge& bridge : network.bridges) {
+        bridges[static_cast<int>(bridge.kind)] += 1;
+        bridgeCells[static_cast<int>(bridge.kind)] += bridge.cells;
+    }
+    std::printf("  road network: highways %d (%.1f km), regional %d (%.1f km), tracks %d (%.1f km); "
+                "junctions %zu; bridges: highway %d (%d cells), regional %d (%d), track %d (%d)\n",
+                network.count(lw::RoadClass::Highway), network.kilometers(lw::RoadClass::Highway),
+                network.count(lw::RoadClass::Regional), network.kilometers(lw::RoadClass::Regional),
+                network.count(lw::RoadClass::Track), network.kilometers(lw::RoadClass::Track),
+                network.junctions.size(), bridges[2], bridgeCells[2], bridges[1], bridgeCells[1], bridges[0],
+                bridgeCells[0]);
     if (largest != nullptr) {
         std::printf("  largest: %s at %.0f, %.0f m\n", largest->name.c_str(),
                     lw::Map::cellCenter(largest->center.x), lw::Map::cellCenter(largest->center.y));

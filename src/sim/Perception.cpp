@@ -2,6 +2,7 @@
 
 #include "sim/Climate.h"
 #include "sim/Map.h"
+#include "sim/Roads.h"
 #include "sim/Weather.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
@@ -129,7 +130,7 @@ float visibilityOf(const World& world, entt::entity target, float x, float y) {
     return bodyVisibility(SenseLookup(world.registry()), target) * coverVisibility(world.map(), x, y);
 }
 
-Noise noiseOf(const SenseLookup& lookup, entt::entity entity) {
+Noise noiseOf(const SenseLookup& lookup, entt::entity entity, Road surface) {
     Noise noise;
     const auto louder = [&noise](SoundKind kind, float loudness) {
         if (loudness > noise.loudness) {
@@ -140,7 +141,8 @@ Noise noiseOf(const SenseLookup& lookup, entt::entity entity) {
         const float speedSq = velocity->x * velocity->x + velocity->y * velocity->y;
         if (speedSq >= kMovingSpeed * kMovingSpeed) {
             louder(SoundKind::Footsteps,
-                   std::min(kMaxNoiseLoudness, kFootstepsLoudness * std::sqrt(speedSq) / kWalkSpeed));
+                   std::min(kMaxNoiseLoudness, kFootstepsLoudness * footstepLoudness(surface) *
+                                                   std::sqrt(speedSq) / kWalkSpeed));
         }
     }
     if (const Zombie* zombie = lookup.zombie(entity)) {
@@ -172,8 +174,8 @@ Interest interestOf(const SenseLookup& lookup, entt::entity observer, entt::enti
     return targetZombie ? Interest::Threat : Interest::Ordinary;
 }
 
-Noise noiseOf(const entt::registry& registry, entt::entity entity) {
-    return noiseOf(SenseLookup(registry), entity);
+Noise noiseOf(const entt::registry& registry, entt::entity entity, Road surface) {
+    return noiseOf(SenseLookup(registry), entity, surface);
 }
 
 } // namespace lw

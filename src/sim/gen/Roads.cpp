@@ -1,8 +1,11 @@
-// Дороги между поселениями: граф соседства и прокладка A* по стоимости рельефа.
+// Дороги между поселениями по иерархии (этап 2а.3): шоссе между городами,
+// трассы между районами, просёлки к деревням. Граф соседства и прокладка A*
+// по стоимости рельефа; правила прокладки — у класса дороги.
 
 #include "sim/gen/GenContext.h"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <functional>
 #include <queue>
@@ -21,6 +24,9 @@ constexpr int kCostSand = 22;
 constexpr int kCostForest = 24;
 constexpr int kCostRock = 48;
 constexpr int kCostRiver = 192; // мост: короткий и только там, где иначе никак
+// Шоссе строят с размахом: мост ему не помеха — реку оно пересекает прямо, а
+// не ищет брод за километр.
+constexpr int kHighwayRiver = 56;
 // Длина шага между узлами: по стороне и по диагонали.
 constexpr int kStraight = 10;
 constexpr int kDiagonal = 14;
@@ -31,12 +37,38 @@ constexpr int kMaxClimb = 100;
 // огибает холмы, а не лезет в лоб. Число — квадрат перепада высот между
 // соседними узлами при таком уклоне: (0,08 · 16 м / 0,1 м)².
 constexpr int kClimbSq = 164;
+// Шоссе положе: стоимость удваивает уже уклон 6 % — (0,06 · 16 / 0,1)².
+constexpr int kHighwayClimbSq = 92;
 // Оценка остатка пути — доля от стоимости по ровному лугу. Выше — поиск
 // быстрее, но хуже замечает готовые дороги в стороне от прямой.
 constexpr int kHeuristicNum = 1;
 constexpr int kHeuristicDen = 2;
 
 constexpr std::uint32_t kUnreached = 0xFFFFFFFFu;
+
+// Кольца шоссе: связь двух соседних городов, которой нет в остовном дереве,
+// тоже шоссе, если по дереву между ними дальше прямой больше чем во столько раз.
+constexpr float kLoopDetour = 1.6f;
+// Деревня с таким радиусом (клетки) и больше — село, центр района: к нему и
+// между такими ведут трассы.
+constexpr int kDistrictRadius = 29;
+// Развязка: вокруг места примыкания полотно шире — съезд без острого угла.
+constexpr int kJunctionApron = 2; // клетки, ромб |dx| + |dy| ≤ этого
+// Развязки ближе этого к краю поселения — уже перекрёстки улиц.
+constexpr int kJunctionTownMargin = 8; // клетки
+
+// Как прокладывать дорогу класса.
+struct RouteRules {
+    int river = kCostRiver;
+    int climbSq = kClimbSq;
+};
+
+RouteRules rulesOf(RoadClass kind) {
+    if (kind == RoadClass::Highway) {
+        return {kHighwayRiver, kHighwayClimbSq};
+    }
+    return {};
+}
 
 // Поиск пути по сетке узлов с шагом kRoadStep клеток: на полной сетке он шёл
 // бы на порядок дольше, а дороге такая точность не нужна.
@@ -47,6 +79,7 @@ public:
           width_(ctx.width / kRoadStep),
           height_(ctx.height / kRoadStep),
           terrain_(width_, height_),
+          river_(width_, height_),
           elevation_(width_, height_),
           paved_(width_, height_) {
         const auto count = static_cast<std::size_t>(width_) * static_cast<std::size_t>(height_);
@@ -56,18 +89,22 @@ public:
         const Map& map = ctx.map;
         for (int ny = 0; ny < height_; ++ny) {
             for (int nx = 0; nx < width_; ++nx) {
-                // Узел стоит столько, сколько худшая клетка его блока.
+                // Узел стоит столько, сколько худшая клетка его блока; река —
+                // отдельно: её цена у каждого класса своя.
                 int worst = kCostOpen;
+                bool river = false;
                 int elevationSum = 0;
                 for (int y = ny * kRoadStep; y < (ny + 1) * kRoadStep; ++y) {
                     for (int x = nx * kRoadStep; x < (nx + 1) * kRoadStep; ++x) {
                         elevationSum += map.elevation.at(x, y);
                         worst = std::max(worst, cellCost(x, y));
+                        river = river || map.water.at(x, y) == Water::River;
                     }
                 }
                 // Вне главной суши (вода, острова) дорог нет.
                 const bool passable = ctx.mainland.at(nx * kRoadStep, ny * kRoadStep) != 0;
                 terrain_.at(nx, ny) = static_cast<std::uint8_t>(passable ? worst : 0);
+                river_.at(nx, ny) = river ? 1 : 0;
                 elevation_.at(nx, ny) =
                     static_cast<std::int16_t>(elevationSum / (kRoadStep * kRoadStep));
             }
@@ -76,7 +113,7 @@ public:
 
     // Путь по клеткам от start до goal включительно; пусто, если пути нет.
     // Обе клетки должны быть узлами. Найденный путь считается замощённым.
-    std::vector<Cell> route(Cell start, Cell goal) {
+    std::vector<Cell> route(Cell start, Cell goal, const RouteRules& rules) {
         for (const std::uint32_t i : touched_) {
             cost_[i] = kUnreached;
         }
@@ -130,11 +167,14 @@ public:
                 if (diagonal && (terrain_.at(nx, y) == 0 || terrain_.at(x, ny) == 0)) {
                     continue;
                 }
-                const int terrain = paved_.at(nx, ny) ? kCostRoad : terrain_.at(nx, ny);
+                const int ground = river_.at(nx, ny) ? std::max<int>(terrain_.at(nx, ny), rules.river)
+                                                     : terrain_.at(nx, ny);
+                const int terrain = paved_.at(nx, ny) ? kCostRoad : ground;
                 const int climb = std::min(std::abs(elevation_.at(nx, ny) - elevation), kMaxClimb);
+                const int climbSq = rules.climbSq;
                 const int step =
-                    diagonal ? kDiagonal * terrain * (2 * kClimbSq + climb * climb) / (32 * kClimbSq)
-                             : kStraight * terrain * (kClimbSq + climb * climb) / (16 * kClimbSq);
+                    diagonal ? kDiagonal * terrain * (2 * climbSq + climb * climb) / (32 * climbSq)
+                             : kStraight * terrain * (climbSq + climb * climb) / (16 * climbSq);
                 const std::uint32_t next = cost + static_cast<std::uint32_t>(std::max(step, 1));
                 const std::uint32_t n = index(nx, ny);
                 if (next < cost_[n]) {
@@ -175,11 +215,9 @@ private:
                static_cast<std::uint32_t>(x);
     }
 
+    // Стоимость клетки без реки (реку учитывает river_).
     int cellCost(int x, int y) const {
         const Map& map = ctx_.map;
-        if (map.water.at(x, y) == Water::River) {
-            return kCostRiver;
-        }
         if (map.ground.at(x, y) == Ground::Rock) {
             return kCostRock;
         }
@@ -192,7 +230,8 @@ private:
     const Context& ctx_;
     int width_; // узлы
     int height_;
-    Grid<std::uint8_t> terrain_;   // стоимость узла; ноль — непроходим
+    Grid<std::uint8_t> terrain_;   // стоимость узла без реки; ноль — непроходим
+    Grid<std::uint8_t> river_;     // в блоке узла есть река
     Grid<std::int16_t> elevation_; // средняя высота блока
     Grid<std::uint8_t> paved_;     // через узел уже идёт дорога
     std::vector<std::uint32_t> cost_;
@@ -238,6 +277,10 @@ int distanceSq(const SettlementSite& a, const SettlementSite& b) {
     return dx * dx + dy * dy;
 }
 
+float distance(const SettlementSite& a, const SettlementSite& b) {
+    return std::sqrt(static_cast<float>(distanceSq(a, b)));
+}
+
 bool shorter(const Link& l, const Link& r) {
     if (l.lengthSq != r.lengthSq) {
         return l.lengthSq < r.lengthSq;
@@ -245,20 +288,19 @@ bool shorter(const Link& l, const Link& r) {
     return l.a != r.a ? l.a < r.a : l.b < r.b;
 }
 
-// Трассы между городами: минимальное остовное дерево (алгоритм Прима).
-std::vector<Link> townHighways(const std::vector<SettlementSite>& sites) {
-    std::vector<int> towns;
-    for (int i = 0; i < static_cast<int>(sites.size()); ++i) {
-        if (sites[static_cast<std::size_t>(i)].kind == SettlementKind::Town) {
-            towns.push_back(i);
-        }
-    }
+bool samePair(const Link& l, const Link& r) {
+    return l.a == r.a && l.b == r.b;
+}
+
+// Остовное дерево по набору поселений (алгоритм Прима): кратчайшая сеть,
+// связывающая всех.
+std::vector<Link> spanningTree(const std::vector<SettlementSite>& sites, const std::vector<int>& members) {
     std::vector<Link> links;
-    if (towns.size() < 2) {
+    if (members.size() < 2) {
         return links;
     }
-    std::vector<int> connected = {towns.front()};
-    std::vector<int> rest(towns.begin() + 1, towns.end());
+    std::vector<int> connected = {members.front()};
+    std::vector<int> rest(members.begin() + 1, members.end());
     while (!rest.empty()) {
         Link best;
         std::size_t bestSlot = 0;
@@ -282,19 +324,21 @@ std::vector<Link> townHighways(const std::vector<SettlementSite>& sites) {
     return links;
 }
 
-// Граф Габриэля: два поселения — соседи, если в круге, построенном на отрезке
-// между ними как на диаметре, нет третьего. Связен и даёт кольца, а не одно
-// дерево: между поселениями бывает несколько путей.
-std::vector<Link> neighborLinks(const std::vector<SettlementSite>& sites) {
+// Граф Габриэля по набору поселений: два — соседи, если в круге, построенном
+// на отрезке между ними как на диаметре, нет третьего из набора. Связен и даёт
+// кольца, а не одно дерево: между поселениями бывает несколько путей.
+std::vector<Link> neighborLinks(const std::vector<SettlementSite>& sites, const std::vector<int>& members) {
     std::vector<Link> links;
-    const int count = static_cast<int>(sites.size());
-    for (int a = 0; a < count; ++a) {
-        for (int b = a + 1; b < count; ++b) {
+    for (std::size_t i = 0; i < members.size(); ++i) {
+        for (std::size_t j = i + 1; j < members.size(); ++j) {
+            const int a = std::min(members[i], members[j]);
+            const int b = std::max(members[i], members[j]);
             const SettlementSite& sa = sites[static_cast<std::size_t>(a)];
             const SettlementSite& sb = sites[static_cast<std::size_t>(b)];
             const int lengthSq = distanceSq(sa, sb);
             bool neighbors = true;
-            for (int c = 0; c < count && neighbors; ++c) {
+            for (std::size_t k = 0; k < members.size() && neighbors; ++k) {
+                const int c = members[k];
                 if (c == a || c == b) {
                     continue;
                 }
@@ -311,34 +355,210 @@ std::vector<Link> neighborLinks(const std::vector<SettlementSite>& sites) {
     return links;
 }
 
+// Длина пути между a и b по дереву (сумма прямых отрезков); дерево связно.
+float treeDistance(const std::vector<SettlementSite>& sites, const std::vector<Link>& tree, int a, int b) {
+    // Поиск в глубину: узлов мало (города).
+    struct Visit {
+        int site;
+        float length;
+    };
+    std::vector<Visit> stack = {{a, 0.0f}};
+    std::vector<int> seen = {a};
+    while (!stack.empty()) {
+        const Visit visit = stack.back();
+        stack.pop_back();
+        if (visit.site == b) {
+            return visit.length;
+        }
+        for (const Link& link : tree) {
+            const int next = link.a == visit.site ? link.b : link.b == visit.site ? link.a : -1;
+            if (next < 0 || std::find(seen.begin(), seen.end(), next) != seen.end()) {
+                continue;
+            }
+            seen.push_back(next);
+            stack.push_back({next, visit.length + distance(sites[static_cast<std::size_t>(visit.site)],
+                                                           sites[static_cast<std::size_t>(next)])});
+        }
+    }
+    return 0.0f;
+}
+
+// Шоссе: остовное дерево городов и кольца там, где по дереву большой крюк.
+std::vector<Link> highwayLinks(const std::vector<SettlementSite>& sites, const std::vector<int>& towns) {
+    std::vector<Link> links = spanningTree(sites, towns);
+    const std::vector<Link> tree = links;
+    for (const Link& link : neighborLinks(sites, towns)) {
+        if (std::any_of(tree.begin(), tree.end(), [&](const Link& t) { return samePair(t, link); })) {
+            continue;
+        }
+        const SettlementSite& a = sites[static_cast<std::size_t>(link.a)];
+        const SettlementSite& b = sites[static_cast<std::size_t>(link.b)];
+        if (treeDistance(sites, tree, link.a, link.b) > kLoopDetour * distance(a, b)) {
+            links.push_back(link);
+        }
+    }
+    return links;
+}
+
+// Длина пути по клеткам, метры.
+float pathMeters(const std::vector<Cell>& path) {
+    float meters = 0.0f;
+    for (std::size_t k = 1; k < path.size(); ++k) {
+        const bool diagonal = path[k].x != path[k - 1].x && path[k].y != path[k - 1].y;
+        meters += diagonal ? Map::kCellSize * 1.41421356f : Map::kCellSize;
+    }
+    return meters;
+}
+
+// Номер шага kDx/kDy от a к соседней b.
+int headingOf(Cell a, Cell b) {
+    const int dx = (b.x > a.x) - (b.x < a.x);
+    const int dy = (b.y > a.y) - (b.y < a.y);
+    for (int d = 0; d < 8; ++d) {
+        if (kDx[d] == dx && kDy[d] == dy) {
+            return d;
+        }
+    }
+    return 0;
+}
+
+// Мосты участка: клетки реки на оси подряд.
+void findBridges(const Map& map, const RoadSite& road, std::vector<RoadBridge>& out) {
+    RoadBridge bridge;
+    bridge.kind = road.kind;
+    for (const Cell& cell : road.path) {
+        if (map.water.at(cell.x, cell.y) == Water::River) {
+            if (bridge.cells == 0) {
+                bridge.first = cell;
+            }
+            bridge.last = cell;
+            ++bridge.cells;
+        } else if (bridge.cells > 0) {
+            out.push_back(bridge);
+            bridge.cells = 0;
+        }
+    }
+    if (bridge.cells > 0) {
+        out.push_back(bridge);
+    }
+}
+
+bool nearSettlement(const std::vector<SettlementSite>& sites, Cell cell) {
+    return std::any_of(sites.begin(), sites.end(), [&](const SettlementSite& site) {
+        const int reach = site.radius + kJunctionTownMargin;
+        const int dx = cell.x - site.center.x;
+        const int dy = cell.y - site.center.y;
+        return dx * dx + dy * dy <= reach * reach;
+    });
+}
+
+RoadClass classOfSurface(Road road) {
+    return road == Road::Highway   ? RoadClass::Highway
+           : road == Road::Asphalt ? RoadClass::Regional
+                                   : RoadClass::Track;
+}
+
+// Развязки: где ось дороги ниже классом входит на полотно дороги выше классом
+// (или сходит с него) вне поселений. Вокруг — асфальтовый съезд.
+void placeJunctions(Context& ctx) {
+    Map& map = ctx.map;
+    const std::vector<SettlementSite>& sites = ctx.out.settlements;
+    std::vector<RoadJunction>& junctions = ctx.out.junctions;
+    const auto add = [&](Cell at, RoadClass minor, int heading) {
+        if (nearSettlement(sites, at)) {
+            return;
+        }
+        const bool known = std::any_of(junctions.begin(), junctions.end(), [&](const RoadJunction& j) {
+            return std::abs(j.at.x - at.x) <= kRoadStep && std::abs(j.at.y - at.y) <= kRoadStep;
+        });
+        if (!known) {
+            junctions.push_back({at, classOfSurface(map.road.at(at.x, at.y)), minor, heading});
+        }
+    };
+    for (const RoadSite& road : ctx.out.roads) {
+        if (road.kind == RoadClass::Highway) {
+            continue;
+        }
+        const Road own = surfaceOf(road.kind);
+        for (std::size_t k = 1; k < road.path.size(); ++k) {
+            const Cell before = road.path[k - 1];
+            const Cell cell = road.path[k];
+            const Road was = map.road.at(before.x, before.y);
+            const Road is = map.road.at(cell.x, cell.y);
+            if (was == own && is > own) {
+                add(cell, road.kind, headingOf(before, cell));
+            } else if (was > own && is == own) {
+                add(before, road.kind, headingOf(cell, before));
+            }
+        }
+    }
+    for (const RoadJunction& junction : junctions) {
+        for (int dy = -kJunctionApron; dy <= kJunctionApron; ++dy) {
+            for (int dx = -kJunctionApron; dx <= kJunctionApron; ++dx) {
+                const Cell cell{junction.at.x + dx, junction.at.y + dy};
+                if (std::abs(dx) + std::abs(dy) > kJunctionApron || !map.contains(cell) ||
+                    map.water.at(cell.x, cell.y) != Water::None) {
+                    continue;
+                }
+                setRoad(map, cell.x, cell.y, Road::Asphalt);
+            }
+        }
+    }
+}
+
 } // namespace
 
 void buildRoads(Context& ctx) {
     const std::vector<SettlementSite>& sites = ctx.out.settlements;
     Router router(ctx);
 
-    const auto connect = [&](const Link& link, Road type, int width) {
-        const std::vector<Cell> path = router.route(sites[static_cast<std::size_t>(link.a)].center,
-                                                    sites[static_cast<std::size_t>(link.b)].center);
-        pavePath(ctx, path, type, width);
+    std::vector<int> all;
+    std::vector<int> towns;
+    std::vector<int> districts; // города и сёла
+    for (int i = 0; i < static_cast<int>(sites.size()); ++i) {
+        const SettlementSite& site = sites[static_cast<std::size_t>(i)];
+        all.push_back(i);
+        if (site.kind == SettlementKind::Town) {
+            towns.push_back(i);
+            districts.push_back(i);
+        } else if (site.radius >= kDistrictRadius) {
+            districts.push_back(i);
+        }
+    }
+
+    std::vector<Link> built;
+    const auto connect = [&](const Link& link, RoadClass kind) {
+        if (std::any_of(built.begin(), built.end(), [&](const Link& b) { return samePair(b, link); })) {
+            return;
+        }
+        built.push_back(link);
+        RoadSite road;
+        road.kind = kind;
+        road.from = link.a;
+        road.to = link.b;
+        road.path = router.route(sites[static_cast<std::size_t>(link.a)].center,
+                                 sites[static_cast<std::size_t>(link.b)].center, rulesOf(kind));
+        if (road.path.empty()) {
+            return;
+        }
+        road.lengthMeters = pathMeters(road.path);
+        pavePath(ctx, road.path, surfaceOf(kind), widthOf(kind));
+        findBridges(ctx.map, road, ctx.out.bridges);
+        ctx.out.roads.push_back(std::move(road));
     };
 
-    // Сначала трассы: остальные дороги к ним примыкают.
-    const std::vector<Link> highways = townHighways(sites);
-    for (const Link& link : highways) {
-        connect(link, Road::Asphalt, 2);
+    // Сверху вниз по иерархии: дороги ниже классом вливаются в уже
+    // проложенные, а не идут рядом.
+    for (const Link& link : highwayLinks(sites, towns)) {
+        connect(link, RoadClass::Highway);
     }
-    for (const Link& link : neighborLinks(sites)) {
-        const bool paved = std::any_of(highways.begin(), highways.end(), [&](const Link& highway) {
-            return highway.a == link.a && highway.b == link.b;
-        });
-        if (paved) {
-            continue;
-        }
-        const bool toTown = sites[static_cast<std::size_t>(link.a)].kind == SettlementKind::Town ||
-                            sites[static_cast<std::size_t>(link.b)].kind == SettlementKind::Town;
-        connect(link, toTown ? Road::Asphalt : Road::Dirt, 1);
+    for (const Link& link : neighborLinks(sites, districts)) {
+        connect(link, RoadClass::Regional);
     }
+    for (const Link& link : neighborLinks(sites, all)) {
+        connect(link, RoadClass::Track);
+    }
+    placeJunctions(ctx);
 
     // Центр поселения лежит на дороге, даже если соседей у него нет.
     for (const SettlementSite& site : sites) {

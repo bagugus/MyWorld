@@ -130,7 +130,9 @@ public:
                 candidate.reach = range * bodyVisibility(lookup_, hit.entity);
             }
             if (inEarshot) {
-                const Noise noise = noiseOf(lookup_, hit.entity);
+                const Cell under = Map::cellAt(hit.x, hit.y);
+                const Road surface = map_.contains(under) ? map_.road.at(under.x, under.y) : Road::None;
+                const Noise noise = noiseOf(lookup_, hit.entity, surface);
                 if (noise.kind != SoundKind::None && candidate.distance <= noise.loudness * hearing) {
                     candidate.heard = noise.kind;
                 }

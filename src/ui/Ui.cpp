@@ -113,7 +113,9 @@ void drawCellInfo(const World& world, Cell cell) {
 
     const Road road = map.road.at(cell.x, cell.y);
     if (road != Road::None) {
-        ImGui::Text("Дорога: %s%s", road == Road::Asphalt ? "асфальт" : "грунтовая",
+        // Класс — по сети дорог (этап 2а.3): асфальт бывает и трассой, и улицей.
+        const std::optional<RoadClass> kind = roadClassAt(world.roads(), cell);
+        ImGui::Text("Дорога: %s%s%s%s", surfaceName(road), kind ? ", " : "", kind ? nameOf(*kind) : "",
                     water != Water::None ? " (мост)" : "");
     }
 

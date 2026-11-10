@@ -28,6 +28,7 @@
 #include "sim/Places.h"
 #include "sim/Relations.h"
 #include "sim/Resources.h"
+#include "sim/Roads.h"
 #include "sim/Rng.h"
 #include "sim/Scenario.h"
 #include "sim/Society.h"
@@ -321,6 +322,106 @@ void testMapGeneration() {
     }
     for (const lw::Cell center : centers) {
         CHECK(reached.at(center.x, center.y) == 1);
+    }
+}
+
+// Иерархия дорог (этап 2а.3): шоссе связывают все города, у участков —
+// своё покрытие, развязки — вне поселений, свойства покрытий.
+void testRoadHierarchy() {
+    lw::WorldConfig config = regionConfig();
+    config.mapWidth = 2048;
+    config.mapHeight = 2048;
+    const lw::World world(5, config);
+    const lw::Map& map = world.map();
+    const entt::registry& registry = world.registry();
+    const lw::RoadNetwork& network = world.roads();
+
+    std::vector<lw::Cell> towns;
+    std::vector<lw::EntityId> townIds;
+    for (const auto [entity, id, settlement] : registry.view<const lw::Id, const lw::Settlement>().each()) {
+        if (settlement.kind == lw::SettlementKind::Town) {
+            towns.push_back(settlement.center);
+            townIds.push_back(id.value);
+        }
+    }
+    CHECK(towns.size() >= 2);
+    CHECK(network.count(lw::RoadClass::Highway) >= static_cast<int>(towns.size()) - 1);
+    CHECK(network.count(lw::RoadClass::Track) > 0);
+
+    // Участки: шоссе — между городами; полотно не хуже своего класса.
+    for (const lw::RoadLink& link : network.links) {
+        CHECK(link.path.size() >= 2 && link.lengthMeters > 0.0f && link.from != link.to);
+        if (link.kind == lw::RoadClass::Highway) {
+            CHECK(std::find(townIds.begin(), townIds.end(), link.from) != townIds.end());
+            CHECK(std::find(townIds.begin(), townIds.end(), link.to) != townIds.end());
+        }
+        bool paved = true;
+        for (const lw::Cell& cell : link.path) {
+            paved = paved && map.road.at(cell.x, cell.y) >= lw::surfaceOf(link.kind);
+        }
+        CHECK(paved);
+    }
+
+    // Только по полотну шоссе — из любого города в любой.
+    lw::Grid<std::uint8_t> reached(map.width(), map.height());
+    std::vector<lw::Cell> queue = {towns.front()};
+    CHECK(map.road.at(towns.front().x, towns.front().y) == lw::Road::Highway);
+    reached.at(towns.front().x, towns.front().y) = 1;
+    for (std::size_t i = 0; i < queue.size(); ++i) {
+        const lw::Cell cell = queue[i];
+        const lw::Cell neighbors[4] = {{cell.x + 1, cell.y}, {cell.x - 1, cell.y},
+                                       {cell.x, cell.y + 1}, {cell.x, cell.y - 1}};
+        for (const lw::Cell next : neighbors) {
+            if (map.contains(next) && !reached.at(next.x, next.y) &&
+                map.road.at(next.x, next.y) == lw::Road::Highway) {
+                reached.at(next.x, next.y) = 1;
+                queue.push_back(next);
+            }
+        }
+    }
+    for (const lw::Cell town : towns) {
+        CHECK(reached.at(town.x, town.y) == 1);
+    }
+
+    // Развязки: на полотне дороги выше классом, чем примыкающая, вне поселений.
+    for (const lw::RoadJunction& junction : network.junctions) {
+        CHECK(junction.major > junction.minor);
+        CHECK(map.road.at(junction.at.x, junction.at.y) >= lw::surfaceOf(junction.major));
+        for (const auto [entity, settlement] : registry.view<const lw::Settlement>().each()) {
+            const int dx = junction.at.x - settlement.center.x;
+            const int dy = junction.at.y - settlement.center.y;
+            CHECK(dx * dx + dy * dy > settlement.radius * settlement.radius);
+        }
+    }
+    // Класс клетки по сети: середина шоссе между городами — шоссе.
+    for (const lw::RoadLink& link : network.links) {
+        if (link.kind == lw::RoadClass::Highway) {
+            const lw::Cell middle = link.path[link.path.size() / 2];
+            CHECK(lw::roadClassAt(network, middle) == lw::RoadClass::Highway);
+            break;
+        }
+    }
+
+    // Покрытие: по асфальту шаги звонче, грунтовка и пашня в дождь — грязь,
+    // асфальт не раскисает, в мороз и сушь грязи нет.
+    CHECK(lw::footstepLoudness(lw::Road::Highway) > lw::footstepLoudness(lw::Road::Dirt));
+    CHECK(lw::footstepLoudness(lw::Road::Asphalt) > lw::footstepLoudness(lw::Road::None));
+    const float wet = lw::mudWetness(0.8f, false);
+    CHECK(wet > 0.5f && lw::mudWetness(0.8f, true) == 0.0f && lw::mudWetness(0.05f, false) == 0.0f);
+    CHECK(lw::mudSpeedFactor(lw::Road::Dirt, lw::Ground::Grass, wet) < 1.0f);
+    CHECK(lw::mudSpeedFactor(lw::Road::None, lw::Ground::Field, wet) < 1.0f);
+    CHECK(lw::mudSpeedFactor(lw::Road::Asphalt, lw::Ground::Grass, wet) == 1.0f);
+    CHECK(lw::mudSpeedFactor(lw::Road::Highway, lw::Ground::Field, wet) == 1.0f);
+    CHECK(lw::mudSpeedFactor(lw::Road::Dirt, lw::Ground::Grass, 0.0f) == 1.0f);
+
+    // Военная колонна встаёт на большой дороге.
+    lw::World convoyWorld(5, config);
+    const lw::EntityId convoy = lw::startEvent(convoyWorld, lw::EventKind::MilitaryConvoy);
+    if (const entt::entity entity = convoyWorld.find(convoy); entity != entt::null) {
+        const lw::WorldEvent& event = convoyWorld.registry().get<lw::WorldEvent>(entity);
+        CHECK(map.road.at(event.site.x, event.site.y) >= lw::Road::Asphalt);
+    } else {
+        CHECK(false);
     }
 }
 
@@ -6249,7 +6350,9 @@ void testPhaseTransitions() {
     // Кто работал, бросил работу — каждый по разу.
     std::size_t employed = 0;
     for (const auto [entity, person, job] : registry.view<const lw::Person, const lw::Job>().each()) {
-        employed += lw::isEmployed(&job) ? 1 : 0; // школа закрылась — дети работу не бросают
+        // Школа закрылась — дети работу не бросают; солдаты пункта эвакуации
+        // (этап 7.6) уходят с армией или остаются — это не «бросил работу».
+        employed += lw::isEmployed(&job) && job.profession != lw::Profession::Soldier ? 1 : 0;
     }
     CHECK(employed > 0);
     CHECK(world.chronicle().countOf(lw::ChronicleKind::LeftWork) == employed);
@@ -7337,7 +7440,18 @@ void testAlarmFromEvidence() {
         r.get<lw::Person>(person).asleep = false;
         r.get<lw::Person>(person).indoors = false;
         const lw::Position at = r.get<lw::Position>(person);
-        const auto near = w->nav().nearestPassable(lw::Map::cellAt(at.x + 8.0f, at.y), 4);
+        // В 8 м, на виду: не за углом дома.
+        std::optional<lw::Cell> near;
+        const float offsets[4][2] = {{8.0f, 0.0f}, {-8.0f, 0.0f}, {0.0f, 8.0f}, {0.0f, -8.0f}};
+        for (const auto& offset : offsets) {
+            const auto spot = w->nav().nearestPassable(lw::Map::cellAt(at.x + offset[0], at.y + offset[1]), 4);
+            if (spot && lw::sightCost(w->map(), w->nav(), at.x, at.y, lw::Map::cellCenter(spot->x),
+                                      lw::Map::cellCenter(spot->y)) < lw::kNoSight) {
+                near = spot;
+                break;
+            }
+        }
+        CHECK(near.has_value());
         lw::Rng rng(99);
         if (near) {
             lw::createZombie(*w, *near, rng);
@@ -8317,6 +8431,7 @@ int main() {
     testStableIds();
     testMap();
     testMapGeneration();
+    testRoadHierarchy();
     testDeterminism();
     testEntitiesStayInWorld();
     testSimDriver();

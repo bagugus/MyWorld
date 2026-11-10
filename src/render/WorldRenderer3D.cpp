@@ -243,7 +243,7 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
         if (!span.straight) {
             continue;
         }
-        const bool asphalt = span.road == Road::Asphalt;
+        const bool asphalt = span.road >= Road::Asphalt;
         const Color rail = asphalt ? kConcreteColor : kTimberColor;
         const float deck = span.deck;
         const Vector2 delta = Vector2Subtract(span.b, span.a);
@@ -307,7 +307,7 @@ WorldRenderer3D::WorldRenderer3D(MapRenderer& textures, const Map& map)
         if (terrain_.spans()[static_cast<std::size_t>(bridge.span)].straight) {
             continue;
         }
-        const bool asphalt = bridge.road == Road::Asphalt;
+        const bool asphalt = bridge.road >= Road::Asphalt;
         const float x0 = static_cast<float>(bridge.cell.x) * Map::kCellSize;
         const float z0 = static_cast<float>(bridge.cell.y) * Map::kCellSize;
         const float x1 = x0 + Map::kCellSize;

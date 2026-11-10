@@ -78,6 +78,8 @@ add_library(lw_sim STATIC
     src/sim/Relations.h
     src/sim/Resources.cpp
     src/sim/Resources.h
+    src/sim/Roads.cpp
+    src/sim/Roads.h
     src/sim/Rng.cpp
     src/sim/Rng.h
     src/sim/Scenario.cpp
@@ -207,6 +209,8 @@ if(LW_BUILD_APP)
         src/render/Poses.h
         src/render/Props3D.cpp
         src/render/Props3D.h
+        src/render/RoadRenderer.cpp
+        src/render/RoadRenderer.h
         src/render/Terrain3D.cpp
         src/render/Terrain3D.h
         src/render/TreeLayout.cpp
