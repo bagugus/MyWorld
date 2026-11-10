@@ -1,6 +1,7 @@
 #include "sim/systems/PerceptionSystem.h"
 
 #include "sim/Components.h"
+#include "sim/Lod.h"
 #include "sim/Parallel.h"
 #include "sim/World.h"
 
@@ -166,9 +167,17 @@ public:
         }
 
         // Разовые звуки: услышанный источник — контакт там, где прозвучало, если
-        // самого его не видно.
+        // самого его не видно. Слушатель берёт звуки с прошлого своего
+        // обновления (этап 6а): редко смотрящий слышит и то, что прозвучало
+        // между его обновлениями, а при смене уровня — когда окно между
+        // обновлениями меняется — ни один звук не теряется и не слышится
+        // дважды. Первое обновление — за окно. Без LOD это ровно звуки последних
+        // kPerceptionIntervalTicks тиков: других в мире и нет.
+        const std::uint64_t since =
+            awareness.updated != 0 ? awareness.updated
+                                   : (tick_ > awareness.window ? tick_ - awareness.window : 0);
         for (const Sound& sound : world_.sounds()) {
-            if (sound.source == self || sound.source == kInvalidId) {
+            if (sound.source == self || sound.source == kInvalidId || sound.tick < since) {
                 continue;
             }
             const float dx = sound.x - position.x;
@@ -195,6 +204,7 @@ public:
         }
 
         merge(awareness, fresh_, tick_);
+        awareness.updated = tick_;
     }
 
 private:
@@ -220,7 +230,8 @@ void perceive(World& world, entt::entity entity, const SenseConditions& conditio
 
 void updatePerception(World& world) {
     const std::uint64_t tick = world.tick();
-    world.forgetSounds(tick > kSoundLifetimeTicks ? tick - kSoundLifetimeTicks : 0);
+    const std::uint64_t lifetime = soundLifetime(world);
+    world.forgetSounds(tick > lifetime ? tick - lifetime : 0);
 
     entt::registry& registry = world.registry();
     // Чья очередь в этом тике. Обход — по одному хранилищу Awareness: за тик
@@ -242,13 +253,31 @@ void updatePerception(World& world) {
     const auto& ids = registry.storage<Id>();
     const auto& senses = registry.storage<Senses>();
     const auto& positions = registry.storage<Position>();
-    for (const auto [entity, awareness] : registry.view<Awareness>().each()) {
-        const EntityId id = ids.get(entity).value;
-        if ((tick + id) % kPerceptionIntervalTicks != 0 || !senses.contains(entity) ||
-            !positions.contains(entity)) {
-            continue;
+    if (world.config().lod) {
+        // Уровень детализации (этап 6а): спокойный и дремлющий смотрят в 4 и
+        // 16 раз реже. У каждого, кто воспринимает мир, есть Lod (attachLod) с
+        // копией id: очередь — обходом этого плотного хранилища, без поиска Id.
+        // Расписания вложены: сначала — ритм полного уровня (деление на
+        // константу), потом свой. Порядок очереди на результат не влияет.
+        auto& awarenesses = registry.storage<Awareness>();
+        for (const auto [entity, lod] : registry.view<const Lod>().each()) {
+            if ((tick + lod.id) % kPerceptionIntervalTicks != 0 ||
+                !due(tick, lod.id, kPerceptionIntervalTicks, lod.level) || !awarenesses.contains(entity) ||
+                !senses.contains(entity) || !positions.contains(entity)) {
+                continue;
+            }
+            turns.push_back({entity, lod.id, &senses.get(entity), &positions.get(entity),
+                             &awarenesses.get(entity)});
         }
-        turns.push_back({entity, id, &senses.get(entity), &positions.get(entity), &awareness});
+    } else {
+        for (const auto [entity, awareness] : registry.view<Awareness>().each()) {
+            const EntityId id = ids.get(entity).value;
+            if ((tick + id) % kPerceptionIntervalTicks != 0 || !senses.contains(entity) ||
+                !positions.contains(entity)) {
+                continue;
+            }
+            turns.push_back({entity, id, &senses.get(entity), &positions.get(entity), &awareness});
+        }
     }
     if (turns.empty()) {
         return;

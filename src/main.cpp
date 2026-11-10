@@ -62,6 +62,7 @@
 #include "ui/Director.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
+#include "ui/LodOverlay.h"
 #include "ui/CinemaCamera.h"
 #include "ui/Composition.h"
 #include "ui/PathTool.h"
@@ -417,6 +418,10 @@ int main(int argc, char** argv) {
             config.outbreakDays = std::strtod(argv[++i], nullptr);
         } else if (std::strcmp(argv[i], "--phase") == 0 && i + 1 < argc) {
             phase = lw::phaseByName(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lod") == 0 && i + 1 < argc) {
+            config.lod = std::strcmp(argv[++i], "off") != 0; // LOD симуляции (этап 6а)
+        } else if (std::strcmp(argv[i], "--lod-map") == 0) {
+            lw::ui::setLodOverlay(true); // слой детализации в виде сверху
         }
     }
 
@@ -585,6 +590,7 @@ int main(int argc, char** argv) {
             if (!series) {
                 // Отладочные слои — поверх погоды, чтобы их было видно и ночью.
                 camera.beginOverlay();
+                lw::ui::drawLodOverlay(world, camera); // детализация (этап 6а), под остальными
                 pathTool.drawOverlay(camera.camera());
                 inspector.drawOverlay(camera.camera(), alpha);
                 camera.endOverlay();

@@ -121,7 +121,7 @@ void noticeEvidence(World& world) {
             if (const auto* awareness = registry.try_get<Awareness>(entity)) {
                 for (std::size_t i = 0; i < awareness->count; ++i) {
                     const Contact& contact = awareness->contacts[i];
-                    if (!contact.seen || !isFresh(contact, tick)) {
+                    if (!contact.seen || !isFresh(contact, *awareness, tick)) {
                         continue;
                     }
                     const entt::entity other = world.find(contact.id);

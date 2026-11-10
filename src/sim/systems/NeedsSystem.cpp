@@ -231,8 +231,12 @@ void updateNeeds(World& world, float minutes) {
         if (const auto* awareness = registry.try_get<Awareness>(entity)) {
             for (std::size_t i = 0; i < awareness->count; ++i) {
                 const Contact& contact = awareness->contacts[i];
+                // Выстрел и взрыв — разовые звуки: слышны в одном обновлении
+                // восприятия, а судят о них здесь раз в минуту. Окно — полного
+                // уровня, не своё: у редко смотрящего (LOD, этап 6а) окно
+                // длиннее, и тот же выстрел пугал бы его вчетверо чаще.
                 if ((contact.heard == SoundKind::Gunshot || contact.heard == SoundKind::Explosion) &&
-                    isFresh(contact, world.tick())) {
+                    contact.tick + kPerceptionIntervalTicks >= world.tick()) {
                     fearTarget += kGunshotFear * timidity;
                     break;
                 }

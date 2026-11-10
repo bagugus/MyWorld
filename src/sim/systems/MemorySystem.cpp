@@ -58,7 +58,7 @@ void updateMemories(World& world, float minutes) {
         if (const auto* awareness = registry.try_get<Awareness>(entity)) {
             for (std::size_t i = 0; i < awareness->count; ++i) {
                 const Contact& contact = awareness->contacts[i];
-                if (!contact.seen || !isFresh(contact, tick) || !close(contact.id) ||
+                if (!contact.seen || !isFresh(contact, *awareness, tick) || !close(contact.id) ||
                     memories.find(MemoryKind::Turned, contact.id) != nullptr) {
                     continue;
                 }

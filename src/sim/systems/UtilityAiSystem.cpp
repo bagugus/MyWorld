@@ -5,6 +5,7 @@
 #include "sim/Family.h"
 #include "sim/Infection.h"
 #include "sim/Items.h"
+#include "sim/Lod.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Places.h"
@@ -23,6 +24,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <utility>
 #include <vector>
 
 namespace lw {
@@ -2381,15 +2383,17 @@ std::optional<Cell> pickWanderTarget(const Context& ctx, Rng& rng) {
 class Brain {
 public:
     // Компоненты — из обхода view: искать хранилище по типу для каждого
-    // человека каждый тик заметно дорого (этап 2а.1).
+    // человека каждый тик заметно дорого (этап 2а.1). level — уровень
+    // детализации (этап 6а): по нему — такт восприятия.
     Brain(World& world, entt::entity entity, Rng& rng, EntityId id, Mind& mind, Person& person,
-          Needs& needs)
+          Needs& needs, Detail level)
         : world_(world),
           registry_(world.registry()),
           entity_(entity),
           rng_(rng),
           tick_(world.tick()),
           id_(id),
+          level_(level),
           mind_(mind),
           person_(person),
           needs_(needs) {}
@@ -2397,7 +2401,7 @@ public:
     void update() {
         // Восприятие обновилось — не появился ли рядом зомби. Ждать пересмотра
         // через 10 минут нельзя: за это время зомби проходит сотню метров.
-        if ((tick_ + id_) % kPerceptionIntervalTicks == 0) {
+        if (perceived()) {
             const Threat threat = threatOf(world_, entity_);
             if (threat.nearest != kInvalidId) {
                 rememberDanger(mind_, Map::cellAt(threat.nearestX, threat.nearestY), tick_,
@@ -2424,13 +2428,12 @@ public:
         const Walker& walker = registry_.get<Walker>(entity_);
         if (mind_.phase == ActionPhase::Travel) {
             // К человеку (поделиться, обменяться): он может уйти — идти за ним.
-            if ((mind_.action == Action::Share || mind_.action == Action::Trade) &&
-                (tick_ + id_) % kPerceptionIntervalTicks == 0 && follow()) {
+            if ((mind_.action == Action::Share || mind_.action == Action::Trade) && perceived() &&
+                follow()) {
                 return;
             }
             // За ребёнком (этап 7.6): он тоже ходит — догнать.
-            if (mind_.action == Action::Reunite && (tick_ + id_) % kPerceptionIntervalTicks == 0 &&
-                trackWard()) {
+            if (mind_.action == Action::Reunite && perceived() && trackWard()) {
                 return;
             }
             if (!walker.moving()) {
@@ -2475,6 +2478,10 @@ public:
     }
 
 private:
+    // Восприятие этого человека обновилось в этом тике (оно идёт раньше
+    // решений): ритм — по уровню детализации (этап 6а).
+    bool perceived() const { return due(tick_, id_, kPerceptionIntervalTicks, level_); }
+
     // Выбрать лучшее действие и начать его. Не начинается (некуда идти, нет
     // пути) — следующее по оценке; ничего не вышло — отдых.
     void think() {
@@ -2520,7 +2527,7 @@ private:
     // бить (стрелять); не бежать ли. Угрозы нет — бой кончился.
     void updateFight() {
         Combat& combat = registry_.get<Combat>(entity_);
-        if ((tick_ + id_) % kPerceptionIntervalTicks != 0 && tick_ < mind_.until) {
+        if (!perceived() && tick_ < mind_.until) {
             return;
         }
         const Context ctx = makeContext(world_, entity_);
@@ -2540,7 +2547,7 @@ private:
         EntityId target = combat.target;
         const Contact* contact = target != kInvalidId ? awareness.find(target) : nullptr;
         const entt::entity foe = world_.find(target);
-        if (contact == nullptr || !isFresh(*contact, tick_) || !isFoe(foe)) {
+        if (contact == nullptr || !isFresh(*contact, awareness, tick_) || !isFoe(foe)) {
             target = ctx.threat.nearest;
             contact = awareness.find(target);
         }
@@ -2587,7 +2594,7 @@ private:
             }
             return;
         }
-        const bool look = (tick_ + id_) % kPerceptionIntervalTicks == 0;
+        const bool look = perceived();
         if (!look && walker.moving()) {
             return;
         }
@@ -2634,8 +2641,9 @@ private:
         }
         const AttackSpec& spec = attackSpec(*weapon);
         const float d = distance(self.x, self.y, at.x, at.y);
-        const Contact* contact = registry_.get<Awareness>(entity_).find(mind_.target);
-        if (contact != nullptr && isFresh(*contact, tick_) && contact->seen && d <= spec.reach) {
+        const Awareness& awareness = registry_.get<Awareness>(entity_);
+        const Contact* contact = awareness.find(mind_.target);
+        if (contact != nullptr && isFresh(*contact, awareness, tick_) && contact->seen && d <= spec.reach) {
             stopWalking();
             combat.target = mind_.target; // целится и стреляет
             return;
@@ -2707,7 +2715,7 @@ private:
     void updateAvenge() {
         Combat& combat = registry_.get<Combat>(entity_);
         Walker& walker = registry_.get<Walker>(entity_);
-        const bool look = (tick_ + id_) % kPerceptionIntervalTicks == 0;
+        const bool look = perceived();
         if (!look && walker.moving()) {
             return;
         }
@@ -2740,8 +2748,9 @@ private:
             return;
         }
         const AttackSpec& spec = attackSpec(registry_.get<Weapon>(entity_));
-        const Contact* contact = registry_.get<Awareness>(entity_).find(mind_.target);
-        const bool seen = contact != nullptr && isFresh(*contact, tick_) && contact->seen;
+        const Awareness& awareness = registry_.get<Awareness>(entity_);
+        const Contact* contact = awareness.find(mind_.target);
+        const bool seen = contact != nullptr && isFresh(*contact, awareness, tick_) && contact->seen;
         // Вплотную бьют и того, кого не видно: дома от мстителя не спрятаться.
         // Стрелять в того, кто заперся, нельзя — уйти ни с чем.
         if (spec.ranged && !seen && d <= kMeetRange) {
@@ -2994,6 +3003,11 @@ private:
                                                                                     : 1.0f;
         registry_.get<Combat>(entity_).target =
             action == Action::Fight ? option.target : kInvalidId;
+        // Бегство, бой, охота, месть — полный уровень детализации сразу, не
+        // дожидаясь пересчёта (этап 6а).
+        if (keepsFull(action)) {
+            wake(world_, entity_);
+        }
         person_.asleep = false;
         mind_.action = action;
         mind_.score = option.score;
@@ -3928,6 +3942,7 @@ private:
     Rng& rng_;
     std::uint64_t tick_;
     EntityId id_;
+    Detail level_;
     Mind& mind_;
     Person& person_;
     Needs& needs_;
@@ -3959,8 +3974,14 @@ void updateUtilityAi(World& world) {
     entt::registry& registry = world.registry();
     auto view = registry.view<Person, Mind, Needs, const Walker, const Position>();
     const auto& ids = registry.storage<Id>();
+    // Уровень детализации (этап 6а) у человека меняет только ритм восприятия
+    // (perceived): решает он каждый тик на любом уровне. Решения раз в
+    // strideOf(Calm) тиков проверяли: при той же статистике нужд, сна и
+    // обысков краж, свидетелей, неприязни и мести становилось почти вдвое
+    // меньше — где-то решение ждёт события тик в тик; найти — этап 6а.4.
+    const DetailLookup detail(std::as_const(registry));
     for (const auto [entity, person, mind, needs, walker, position] : view.each()) {
-        Brain(world, entity, rng, ids.get(entity).value, mind, person, needs).update();
+        Brain(world, entity, rng, ids.get(entity).value, mind, person, needs, detail.of(entity)).update();
     }
 }
 

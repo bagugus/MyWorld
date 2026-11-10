@@ -64,7 +64,8 @@ void die(World& world, entt::entity entity, DeathCause cause, EntityId killer) {
     // Поведение снимается; позиция, черты, ноша и оружие остаются при теле.
     registry.remove<Person, Mind, Needs, Wounds, Zombie, Animal>(entity);
     // Отношения, память и вести — тоже: память о погибшем хранят живые, а не он сам.
-    registry.remove<Walker, Senses, Awareness, Combat, Relations, Memories, Leads>(entity);
+    // Уровня детализации у тела нет (этап 6а); вставший зомби — на полном до пересчёта.
+    registry.remove<Walker, Senses, Awareness, Lod, Combat, Relations, Memories, Leads>(entity);
     if (auto* velocity = registry.try_get<Velocity>(entity)) {
         *velocity = {};
     }

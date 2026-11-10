@@ -2376,7 +2376,10 @@ void testSightCost() {
     CHECK(lw::sightCost(map, nav, at(2), at(2), at(30), at(2), 150.0f) == lw::kNoSight);
 }
 
-// Мир из двух человек на открытом месте: A смотрит, B — цель.
+// Мир из двух человек на открытом месте: A смотрит, B — цель. Проверяются
+// правила восприятия на полном уровне детализации, поэтому LOD выключен:
+// без зомби двое были бы спокойными и смотрели вчетверо реже (LOD — в своих
+// тестах, этап 6а).
 struct Pair {
     static constexpr int kRowLength = 30;
 
@@ -2391,6 +2394,7 @@ struct Pair {
     Pair() : world(7, [] {
                  lw::WorldConfig config = regionConfig();
                  config.people = 2;
+                 config.lod = false;
                  return config;
              }()) {
         entt::registry& registry = world.registry();
@@ -2529,7 +2533,8 @@ void testPerceptionInWorld() {
     }
     const lw::Contact* seen = pair.contact();
     const lw::Contact* back = registry.get<lw::Awareness>(pair.b).find(pair.idA);
-    CHECK(seen != nullptr && seen->seen && lw::isFresh(*seen, pair.world.tick()));
+    CHECK(seen != nullptr && seen->seen &&
+          lw::isFresh(*seen, registry.get<lw::Awareness>(pair.a), pair.world.tick()));
     CHECK(back != nullptr && back->seen);
     for (std::uint64_t i = 0; i < lw::kSoundLifetimeTicks; ++i) {
         pair.world.step();
@@ -2544,7 +2549,8 @@ void testPerceptionInWorld() {
         pair.world.step();
     }
     seen = pair.contact();
-    CHECK(seen != nullptr && seen->x == where.x && !lw::isFresh(*seen, pair.world.tick()));
+    CHECK(seen != nullptr && seen->x == where.x &&
+          !lw::isFresh(*seen, registry.get<lw::Awareness>(pair.a), pair.world.tick()));
     for (std::uint64_t i = 0; i < lw::kContactMemoryTicks; ++i) {
         pair.world.step();
     }
@@ -2565,9 +2571,14 @@ struct Field {
     lw::Rng rng{99};
     std::vector<entt::entity> people;
 
+    // Поле проверяет правила поведения тик в тик («решил — в этом же тике»,
+    // «услышал — через секунду»), поэтому на полном уровне детализации: LOD
+    // выключен (он — в своих тестах, этап 6а; полный уровень — тот же мир,
+    // что без LOD).
     explicit Field(int peopleCount) : world(7, [peopleCount] {
                                           lw::WorldConfig config = regionConfig();
                                           config.people = peopleCount;
+                                          config.lod = false;
                                           return config;
                                       }()) {
         const lw::Map& map = world.map();
@@ -5482,6 +5493,9 @@ lw::WorldConfig peaceConfig(int people) {
     config.people = people;
     config.peacetime = true;
     config.outbreakDays = 0.0; // вспышку (этап 7.4) начинают тесты сценария
+    // Правила мирной жизни и фаз — тик в тик («решил сейчас»): на полном
+    // уровне детализации (LOD — в своих тестах, этап 6а).
+    config.lod = false;
     return config;
 }
 
@@ -7739,6 +7753,537 @@ void testPhaseEvents() {
     CHECK(near >= kTries / 3);
 }
 
+// --- LOD симуляции (этап 6а) ----------------------------------------------
+
+// Мир для проверок LOD: карта 4 × 4 км, несколько людей, LOD включён.
+lw::WorldConfig lodConfig(int people) {
+    lw::WorldConfig config = regionConfig();
+    config.people = people;
+    config.lod = true;
+    return config;
+}
+
+// Шагать, пока последним не прошёл тик пересчёта уровней.
+void stepPastLodRecompute(lw::World& world) {
+    do {
+        world.step();
+    } while ((world.tick() - 1) % lw::kLodPeriodTicks != 0);
+}
+
+// Люди стоят на месте и ничего не затевают долгое время.
+void lodFreezePeople(lw::World& world) {
+    entt::registry& registry = world.registry();
+    for (const auto [entity, mind, walker] : registry.view<lw::Mind, lw::Walker>().each()) {
+        mind.action = lw::Action::Idle;
+        mind.phase = lw::ActionPhase::Perform;
+        mind.until = world.tick() + 10 * lw::kTicksPerGameHour;
+        mind.nextThink = mind.until;
+        walker.waypoints.clear();
+        walker.next = 0;
+    }
+}
+
+// Проходимая клетка суши дальше minChebyshev метров (по какой-нибудь оси) от
+// всех людей; nullopt — такой нет.
+std::optional<lw::Cell> lodWildCell(const lw::World& world, float minChebyshev) {
+    const lw::Map& map = world.map();
+    const lw::NavGrid& nav = world.nav();
+    std::vector<lw::Position> people;
+    for (const auto [entity, person, position] :
+         world.registry().view<const lw::Person, const lw::Position>().each()) {
+        people.push_back(position);
+    }
+    for (int y = 16; y < map.height() - 16; y += 4) {
+        for (int x = 16; x < map.width() - 16; x += 4) {
+            if (!nav.passable({x, y}) || map.water.at(x, y) != lw::Water::None) {
+                continue;
+            }
+            const float cx = lw::Map::cellCenter(x);
+            const float cy = lw::Map::cellCenter(y);
+            const bool far = std::all_of(people.begin(), people.end(), [&](const lw::Position& p) {
+                return std::max(std::abs(p.x - cx), std::abs(p.y - cy)) > minChebyshev;
+            });
+            if (far) {
+                return lw::Cell{x, y};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+// Проходимая клетка не дальше radius клеток от точки; nullopt — нет.
+std::optional<lw::Cell> lodCellNear(const lw::World& world, float x, float y, int offset) {
+    const lw::Cell center = lw::Map::cellAt(x, y);
+    return world.nav().nearestPassable({center.x + offset, center.y}, 6);
+}
+
+lw::Detail lodLevel(const lw::World& world, entt::entity entity) {
+    return lw::detailOf(world.registry(), entity);
+}
+
+// Расписания вложены: редкое — подмножество частого; окно восприятия — от
+// обновления до обновления; повышение уровня — следующее обновление не позже
+// интервала полного уровня.
+void testLodSchedulesNested() {
+    using lw::Detail;
+    static_assert(lw::strideOf(Detail::Full) == 1 && lw::strideOf(Detail::Calm) == 4 &&
+                  lw::strideOf(Detail::Dormant) == 16);
+    bool nested = true;
+    for (lw::EntityId id = 1; id < 40; id += 3) {
+        for (const std::uint64_t base : {std::uint64_t{1}, lw::kPerceptionIntervalTicks, lw::kZombieThinkTicks}) {
+            for (std::uint64_t tick = 0; tick < 2000; ++tick) {
+                const bool dormant = lw::due(tick, id, base, Detail::Dormant);
+                const bool calm = lw::due(tick, id, base, Detail::Calm);
+                const bool full = lw::due(tick, id, base, Detail::Full);
+                nested = nested && (!dormant || calm) && (!calm || full);
+            }
+        }
+    }
+    CHECK(nested);
+    CHECK(lw::senseWindow(Detail::Full) == lw::kPerceptionIntervalTicks);
+    CHECK(lw::senseWindow(Detail::Dormant) == 16 * lw::kPerceptionIntervalTicks);
+
+    // Уровень скачет как попало: перерыв между обновлениями не длиннее
+    // интервала самого редкого уровня за этот перерыв, и обновление всегда
+    // приходится на тик ритма полного уровня.
+    lw::Rng rng(3);
+    const lw::EntityId id = 17;
+    const std::uint64_t base = lw::kPerceptionIntervalTicks;
+    Detail level = Detail::Dormant;
+    std::uint64_t last = 0;
+    bool seen = false;
+    std::uint64_t coarsest = 1;
+    bool gapsOk = true;
+    bool onFullRhythm = true;
+    for (std::uint64_t tick = 0; tick < 50000; ++tick) {
+        if (rng.chance(0.01f)) {
+            level = static_cast<Detail>(rng.below(3));
+        }
+        coarsest = std::max(coarsest, lw::strideOf(level));
+        if (lw::due(tick, id, base, level)) {
+            onFullRhythm = onFullRhythm && lw::due(tick, id, base, Detail::Full);
+            if (seen) {
+                gapsOk = gapsOk && tick - last <= base * coarsest;
+            }
+            last = tick;
+            seen = true;
+            coarsest = lw::strideOf(level);
+        }
+    }
+    CHECK(gapsOk);
+    CHECK(onFullRhythm);
+}
+
+// Карта активности: люди и зомби ближе 192 м всегда видят друг друга как
+// встречу, дальше 362 м — никогда; люди ближе 448 м — «недалеко». Карта шире
+// 64 районов — проверяется перенос битов между словами строки и хвост строки.
+void testLodActivityMapGeometry() {
+    lw::ActivityMap map;
+    map.reset(8000.0f, 8000.0f); // 125 × 125 районов: два слова на строку
+    CHECK(map.width() == 125 && map.height() == 125);
+    lw::Rng rng(21);
+    bool guaranteed = true;
+    bool bounded = true;
+    bool populated = true;
+    for (int trial = 0; trial < 4000; ++trial) {
+        map.clear();
+        const float px = rng.range(100.0f, 7900.0f);
+        const float py = rng.range(100.0f, 7900.0f);
+        const float zx = std::clamp(px + rng.range(-520.0f, 520.0f), 0.0f, 7999.0f);
+        const float zy = std::clamp(py + rng.range(-520.0f, 520.0f), 0.0f, 7999.0f);
+        map.mark(lw::ActivityMap::People, px, py);
+        map.mark(lw::ActivityMap::Undead, zx, zy);
+        map.dilate(lw::ActivityMap::People, lw::ActivityMap::PeopleNear, lw::ActivityMap::kEncounterRegions);
+        map.dilate(lw::ActivityMap::Undead, lw::ActivityMap::UndeadNear, lw::ActivityMap::kEncounterRegions);
+        map.dilate(lw::ActivityMap::People, lw::ActivityMap::PeopleFar, lw::ActivityMap::kPopulatedRegions);
+        const float d = std::hypot(zx - px, zy - py);
+        const bool meet = map.around(px, py).undeadNear && map.around(zx, zy).peopleNear;
+        if (d < 192.0f) {
+            guaranteed = guaranteed && meet;
+        }
+        if (d > 363.0f) {
+            bounded = bounded && !meet;
+        }
+        if (d < 448.0f) {
+            populated = populated && map.around(zx, zy).peopleFar;
+        }
+    }
+    CHECK(guaranteed);
+    CHECK(bounded);
+    CHECK(populated);
+    // Край карты: точка за краем — крайний район, ничего не выходит за карту.
+    map.clear();
+    map.mark(lw::ActivityMap::People, 7999.0f, 10.0f);
+    map.dilate(lw::ActivityMap::People, lw::ActivityMap::PeopleNear, lw::ActivityMap::kEncounterRegions);
+    CHECK(map.testRegion(lw::ActivityMap::PeopleNear, 124, 0));
+    CHECK(map.testRegion(lw::ActivityMap::PeopleNear, 121, 3));
+    CHECK(!map.testRegion(lw::ActivityMap::PeopleNear, 120, 0));
+    CHECK(!map.testRegion(lw::ActivityMap::PeopleNear, 124, 4));
+    CHECK(!map.testRegion(lw::ActivityMap::PeopleNear, 125, 0));
+}
+
+// Без LOD компонентов нет, окно восприятия и жизнь звуков прежние, карта
+// активности не считается.
+void testLodOffIsPlain() {
+    lw::WorldConfig config = lodConfig(8);
+    config.lod = false;
+    config.zombies = 20;
+    lw::World world(5, config);
+    for (int i = 0; i < 300; ++i) {
+        world.step();
+    }
+    CHECK(world.registry().view<const lw::Lod>().size() == 0);
+    bool windows = true;
+    for (const auto [entity, awareness] : world.registry().view<const lw::Awareness>().each()) {
+        windows = windows && awareness.window == lw::kPerceptionIntervalTicks;
+    }
+    CHECK(windows);
+    CHECK(lw::soundLifetime(world) == lw::kSoundLifetimeTicks);
+    CHECK(!world.activityMap().computed());
+}
+
+// Уровни — по состоянию мира: в мирное время все люди спокойные; зомби у
+// человека — встреча, оба на полном; зомби вдали от людей дремлет; люди вдали
+// от зомби остаются спокойными.
+void testLodLevelsFromState() {
+    lw::World world(11, lodConfig(8));
+    entt::registry& registry = world.registry();
+    world.step(); // пересчёт в тик 0
+    lodFreezePeople(world);
+    bool calm = true;
+    std::size_t people = 0;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        const lw::Lod* lod = registry.try_get<lw::Lod>(entity);
+        calm = calm && lod != nullptr && lod->level == lw::Detail::Calm && lod->cause == lw::LodCause::People;
+        ++people;
+    }
+    CHECK(people == 8 && calm);
+    CHECK(world.activityMap().computed() && world.activityMap().updated() == 0);
+
+    // Зомби в 40 м от первого человека и зомби в глуши.
+    std::vector<std::pair<lw::EntityId, entt::entity>> sorted;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        sorted.emplace_back(id.value, entity);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    const entt::entity target = sorted.front().second;
+    const lw::Position at = registry.get<lw::Position>(target);
+    const auto near = lodCellNear(world, at.x, at.y, 10);
+    const auto wild = lodWildCell(world, 600.0f);
+    CHECK(near.has_value() && wild.has_value());
+    if (!near || !wild) {
+        return;
+    }
+    lw::Rng rng(4);
+    const entt::entity hunter = lw::createZombie(world, *near, rng);
+    const entt::entity loner = lw::createZombie(world, *wild, rng);
+    world.syncSpatial();
+    // До пересчёта новые — на полном уровне.
+    CHECK(lodLevel(world, hunter) == lw::Detail::Full && lodLevel(world, loner) == lw::Detail::Full);
+    stepPastLodRecompute(world);
+    CHECK(lodLevel(world, target) == lw::Detail::Full);
+    CHECK(lodLevel(world, hunter) == lw::Detail::Full);
+    const lw::Lod* far = registry.try_get<lw::Lod>(loner);
+    CHECK(far != nullptr && far->level == lw::Detail::Dormant && far->cause == lw::LodCause::Wilderness);
+    CHECK(registry.get<lw::Awareness>(loner).window == lw::senseWindow(lw::Detail::Dormant));
+    // Кто далеко от зомби и от того, к кому он подошёл (дальше 4 районов по
+    // оси и от возможной погони), тот спокойный.
+    const lw::Position& z = registry.get<lw::Position>(hunter);
+    bool distantCalm = true;
+    for (const auto [entity, person, position] : registry.view<const lw::Person, const lw::Position>().each()) {
+        if (std::max(std::abs(position.x - z.x), std::abs(position.y - z.y)) > 330.0f) {
+            distantCalm = distantCalm && lodLevel(world, entity) == lw::Detail::Calm;
+        }
+    }
+    CHECK(distantCalm);
+}
+
+// «Будущий зомби» — больной в жару и тело, которое встанет, — для встречи как
+// зомби: люди рядом на полном уровне заранее.
+void testLodSickAndBodiesCount() {
+    lw::World world(13, lodConfig(8));
+    entt::registry& registry = world.registry();
+    world.step();
+    lodFreezePeople(world);
+    std::vector<std::pair<lw::EntityId, entt::entity>> sorted;
+    for (const auto [entity, id, person] : registry.view<const lw::Id, const lw::Person>().each()) {
+        sorted.emplace_back(id.value, entity);
+    }
+    std::sort(sorted.begin(), sorted.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    // Больной в жару — рядом со вторым человеком.
+    const entt::entity sick = sorted[0].second;
+    const entt::entity neighbour = sorted[1].second;
+    lw::Position& place = registry.get<lw::Position>(neighbour);
+    place = registry.get<lw::Position>(sick);
+    place.x += 30.0f;
+    lw::Wounds& wounds = registry.get_or_emplace<lw::Wounds>(sick);
+    wounds.infection = lw::kFeverStart + 0.05f;
+    wounds.route = lw::InfectionRoute::Bite;
+    world.syncSpatial();
+    stepPastLodRecompute(world);
+    const lw::Lod* lod = registry.try_get<lw::Lod>(neighbour);
+    CHECK(lod != nullptr && lod->level == lw::Detail::Full && lod->cause == lw::LodCause::Encounter);
+
+    // Тело, которое встанет, — у третьего человека.
+    const entt::entity mourner = sorted[2].second;
+    const lw::Position by = registry.get<lw::Position>(mourner);
+    const entt::entity body = world.create();
+    registry.emplace<lw::Position>(body, by.x + 20.0f, by.y);
+    lw::Corpse corpse;
+    corpse.diedAt = world.tick();
+    corpse.turnsAt = world.tick() + 100 * lw::kTicksPerGameHour;
+    registry.emplace<lw::Corpse>(body, corpse);
+    world.syncSpatial();
+    stepPastLodRecompute(world);
+    CHECK(lodLevel(world, mourner) == lw::Detail::Full);
+}
+
+// Событие поднимает до полного сразу и держит kFullHoldTicks; потом уровень
+// возвращается по карте.
+void testLodWakeAndHoldover() {
+    lw::World world(17, lodConfig(4));
+    entt::registry& registry = world.registry();
+    world.step();
+    lodFreezePeople(world);
+    entt::entity person = entt::null;
+    for (const auto [entity, p] : registry.view<const lw::Person>().each()) {
+        person = entity;
+        break;
+    }
+    CHECK(person != entt::null && lodLevel(world, person) == lw::Detail::Calm);
+    if (person == entt::null) {
+        return;
+    }
+    lw::wake(world, person);
+    const lw::Lod& lod = registry.get<lw::Lod>(person);
+    CHECK(lod.level == lw::Detail::Full && lod.cause == lw::LodCause::Woken);
+    CHECK(lod.fullUntil == world.tick() + lw::kFullHoldTicks);
+    CHECK(registry.get<lw::Awareness>(person).window == lw::kPerceptionIntervalTicks);
+    const std::uint64_t until = lod.fullUntil;
+    bool held = true;
+    while (world.tick() <= until) {
+        stepPastLodRecompute(world);
+        const std::uint64_t recompute = world.tick() - 1;
+        if (recompute < until) {
+            held = held && registry.get<lw::Lod>(person).level == lw::Detail::Full &&
+                   registry.get<lw::Lod>(person).cause == lw::LodCause::Holdover;
+        }
+    }
+    CHECK(held);
+    CHECK(registry.get<lw::Lod>(person).level == lw::Detail::Calm);
+}
+
+// Редко смотрящий слышит и то, что прозвучало между его обновлениями: звук
+// живёт до самого редкого обновления.
+void testLodDormantHearsSounds() {
+    lw::World world(19, lodConfig(0));
+    entt::registry& registry = world.registry();
+    world.step();
+    const auto wild = lodWildCell(world, 600.0f);
+    CHECK(wild.has_value());
+    if (!wild) {
+        return;
+    }
+    lw::Rng rng(8);
+    const entt::entity zombie = lw::createZombie(world, *wild, rng);
+    world.syncSpatial();
+    stepPastLodRecompute(world);
+    CHECK(lodLevel(world, zombie) == lw::Detail::Dormant);
+    CHECK(lw::soundLifetime(world) == 2 * lw::kSoundLifetimeTicks * lw::kMaxDetailStride);
+    // Звук — в тик, когда зомби не смотрит, — и ждать его обновления.
+    const lw::EntityId id = registry.get<lw::Id>(zombie).value;
+    while (lw::due(world.tick(), id, lw::kPerceptionIntervalTicks, lw::Detail::Dormant)) {
+        world.step();
+    }
+    const lw::Position& at = registry.get<lw::Position>(zombie);
+    const auto spot = lodCellNear(world, at.x, at.y, 6); // туда можно дойти
+    CHECK(spot.has_value());
+    if (!spot) {
+        return;
+    }
+    constexpr lw::EntityId kNobody = 999999;
+    world.emitSound(lw::Map::cellCenter(spot->x), lw::Map::cellCenter(spot->y), 100.0f,
+                    lw::SoundKind::Gunshot, kNobody);
+    bool heard = false;
+    for (std::uint64_t i = 0; i < lw::senseWindow(lw::Detail::Dormant) && !heard; ++i) {
+        world.step();
+        const lw::Contact* contact = registry.get<lw::Awareness>(zombie).find(kNobody);
+        heard = contact != nullptr && contact->heard == lw::SoundKind::Gunshot;
+    }
+    CHECK(heard);
+    // Пошёл на шум — сразу на полном уровне: сроки на месте шума и сбор в орду
+    // мерятся от решений, их нельзя мерить шагом дремлющего.
+    bool investigating = false;
+    for (std::uint64_t i = 0; i < 2 * lw::senseWindow(lw::Detail::Dormant) && !investigating; ++i) {
+        world.step();
+        investigating = registry.get<lw::Zombie>(zombie).state == lw::ZombieState::Investigate;
+    }
+    CHECK(investigating);
+    CHECK(lodLevel(world, zombie) == lw::Detail::Full);
+}
+
+// Звуки при смене уровня: слушатель берёт звуки с прошлого своего обновления,
+// а не за окно нового уровня. Поднятый до полного слышит звук, прозвучавший
+// между редкими обновлениями до подъёма; опущенный до дремлющего не слышит
+// второй раз то, что уже слышал (иначе зомби снова шёл бы проверять место).
+void testLodSoundsOnceAcrossLevels() {
+    lw::World world(19, lodConfig(0));
+    entt::registry& registry = world.registry();
+    world.step();
+    const auto wild = lodWildCell(world, 600.0f);
+    CHECK(wild.has_value());
+    if (!wild) {
+        return;
+    }
+    lw::Rng rng(8);
+    const entt::entity zombie = lw::createZombie(world, *wild, rng);
+    // Источник звуков — другой зомби в 400 м: на «свой» выстрел слушатель не
+    // идёт, поэтому уровень меняет только тест.
+    const lw::Position start = registry.get<lw::Position>(zombie);
+    std::optional<lw::Cell> elsewhere = lodCellNear(world, start.x, start.y, 100);
+    if (!elsewhere) {
+        elsewhere = lodCellNear(world, start.x, start.y, -100);
+    }
+    CHECK(elsewhere.has_value());
+    if (!elsewhere) {
+        return;
+    }
+    const entt::entity source = lw::createZombie(world, *elsewhere, rng);
+    const lw::EntityId sourceId = registry.get<lw::Id>(source).value;
+    world.syncSpatial();
+    stepPastLodRecompute(world);
+    CHECK(lodLevel(world, zombie) == lw::Detail::Dormant);
+
+    // Звук — сразу после редкого обновления; три интервала полного уровня
+    // слушатель не смотрит, потом событие поднимает его до полного.
+    const lw::EntityId id = registry.get<lw::Id>(zombie).value;
+    while (!lw::due(world.tick(), id, lw::kPerceptionIntervalTicks, lw::Detail::Dormant)) {
+        world.step();
+    }
+    world.step();
+    const lw::Position here = registry.get<lw::Position>(zombie);
+    world.emitSound(here.x + 20.0f, here.y, 100.0f, lw::SoundKind::Gunshot, sourceId);
+    for (std::uint64_t i = 0; i < 3 * lw::kPerceptionIntervalTicks; ++i) {
+        world.step();
+    }
+    CHECK(registry.get<lw::Awareness>(zombie).find(sourceId) == nullptr);
+    lw::wake(world, zombie);
+    CHECK(lodLevel(world, zombie) == lw::Detail::Full);
+    for (std::uint64_t i = 0; i < lw::kPerceptionIntervalTicks; ++i) {
+        world.step();
+    }
+    const lw::Contact* heard = registry.get<lw::Awareness>(zombie).find(sourceId);
+    CHECK(heard != nullptr && heard->heard == lw::SoundKind::Gunshot);
+    if (heard == nullptr) {
+        return;
+    }
+    const std::uint64_t heardAt = heard->tick;
+
+    // Опустить до дремлющего: окно следующего, редкого обновления накрывает
+    // уже услышанный звук, но второй раз он не слышен — контакт только помнится.
+    lw::setDetail(registry, zombie, lw::Detail::Dormant, lw::LodCause::Wilderness, 0);
+    while (!lw::due(world.tick(), id, lw::kPerceptionIntervalTicks, lw::Detail::Dormant)) {
+        world.step();
+    }
+    world.step();
+    CHECK(lodLevel(world, zombie) == lw::Detail::Dormant);
+    // Звук ещё жив — значит, его не услышали, а не просто забыли.
+    CHECK(std::any_of(world.sounds().begin(), world.sounds().end(),
+                      [&](const lw::Sound& sound) { return sound.source == sourceId; }));
+    const lw::Contact* again = registry.get<lw::Awareness>(zombie).find(sourceId);
+    CHECK(again != nullptr && again->tick == heardAt);
+}
+
+// Мир с LOD при 1, 3 и 8 потоках один и тот же; в нём есть все три уровня.
+void testLodThreadsSameHash() {
+    lw::WorldConfig config = lodConfig(150);
+    config.zombies = 400;
+    config.animals = 80;
+    config.flocks = 6;
+    const int threads = lw::parallelThreads();
+    std::vector<std::uint64_t> hashes;
+    std::size_t levels[3] = {};
+    for (const int count : {1, 3, 8}) {
+        lw::setParallelThreads(count);
+        lw::World world(23, config);
+        for (int i = 0; i < 1500; ++i) {
+            world.step();
+        }
+        hashes.push_back(world.stateHash());
+        if (count == 1) {
+            for (const auto [entity, lod] : world.registry().view<const lw::Lod>().each()) {
+                ++levels[static_cast<std::size_t>(lod.level)];
+            }
+        }
+    }
+    lw::setParallelThreads(threads);
+    CHECK(hashes[0] == hashes[1]);
+    CHECK(hashes[0] == hashes[2]);
+    CHECK(levels[1] > 0 && levels[2] > 0); // в мире есть и спокойные, и дремлющие
+    // Тот же мир без LOD — другой (уровни меняют ритм), но тоже детерминирован.
+    config.lod = false;
+    lw::World plain(23, config);
+    lw::World again(23, config);
+    for (int i = 0; i < 1500; ++i) {
+        plain.step();
+        again.step();
+    }
+    CHECK(plain.stateHash() == again.stateHash());
+    CHECK(plain.stateHash() != hashes[0]);
+}
+
+// У тела и у уехавшего уровня нет; вставший зомби — на полном до пересчёта.
+void testLodRemovedOnDeath() {
+    lw::World world(29, lodConfig(4));
+    entt::registry& registry = world.registry();
+    world.step();
+    std::vector<entt::entity> people;
+    for (const auto [entity, person] : registry.view<const lw::Person>().each()) {
+        people.push_back(entity);
+    }
+    CHECK(people.size() == 4);
+    if (people.size() < 2) {
+        return;
+    }
+    CHECK(registry.all_of<lw::Lod>(people[0]) && registry.all_of<lw::Lod>(people[1]));
+    lw::die(world, people[0], lw::DeathCause::Wounds, lw::kInvalidId);
+    CHECK(!registry.all_of<lw::Lod>(people[0]));
+    lw::evacuate(world, people[1], lw::kInvalidId, false);
+    CHECK(!registry.all_of<lw::Lod>(people[1]));
+}
+
+// Наблюдение мир не меняет: то, что читают интерфейс, режиссёр и инспектор
+// (предвестия, линии, герои, угрозы, оценки решений, карта активности), не
+// сдвигает ни одного бита.
+void testObservationDoesNotChangeWorld() {
+    lw::WorldConfig config = lodConfig(60);
+    config.zombies = 120;
+    config.animals = 20;
+    lw::World plain(31, config);
+    lw::World watched(31, config);
+    lw::StoryTracker stories;
+    lw::CastTracker cast;
+    for (int i = 0; i < 2400; ++i) {
+        plain.step();
+        watched.step();
+        if (i % 25 != 0) {
+            continue;
+        }
+        const lw::World& view = watched;
+        stories.update(view);
+        cast.update(view);
+        (void)lw::foresee(view);
+        (void)lw::scenarioStats(view);
+        for (const auto [entity, person] : view.registry().view<const lw::Person>().each()) {
+            (void)lw::threatOf(view, entity);
+            (void)lw::evaluateActions(view, entity);
+            (void)lw::detailOf(view.registry(), entity);
+        }
+        (void)view.activityMap().around(1000.0f, 1000.0f);
+    }
+    CHECK(plain.stateHash() == watched.stateHash());
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -7889,6 +8434,17 @@ int main() {
     testCordon();
     testMilitaryEvents();
     testPhaseEvents();
+    testLodSchedulesNested();
+    testLodActivityMapGeometry();
+    testLodOffIsPlain();
+    testLodLevelsFromState();
+    testLodSickAndBodiesCount();
+    testLodWakeAndHoldover();
+    testLodDormantHearsSounds();
+    testLodSoundsOnceAcrossLevels();
+    testLodThreadsSameHash();
+    testLodRemovedOnDeath();
+    testObservationDoesNotChangeWorld();
 
     if (failures == 0) {
         std::printf("all tests passed\n");
