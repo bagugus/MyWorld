@@ -50,6 +50,15 @@ public:
     // следующего кадра, между тиками. Фазы идут только вперёд (enterPhase).
     void requestPhase(WorldPhase phase) { phaseRequest_ = phase; }
 
+    // Вставать перед сменой фазы (автосохранение, этап С.2): если в следующем
+    // тике фаза сменится (phaseChangeDue) или ждёт фаза, заказанная
+    // requestPhase, кадр кончается раньше — на границе тика со старой фазой.
+    // Следующий advance идёт дальше как ни в чём не бывало: ход мира от
+    // остановки не меняется, только то, сколько тиков успело пройти в кадре.
+    void setHoldBeforePhase(bool hold) { holdBeforePhase_ = hold; }
+    // Фаза, перед которой мир встал в последнем advance; nullopt — не вставал.
+    std::optional<WorldPhase> heldBeforePhase() const { return heldPhase_; }
+
     // Сколько реального времени за кадр можно потратить на симуляцию.
     // Если тики не укладываются, отставание отбрасывается: мир идёт медленнее
     // заданной скорости, но окно не зависает. На состояние мира на данном тике
@@ -69,6 +78,9 @@ public:
 
 private:
     void updateStats(double realDt);
+    // Встать перед следующим тиком: в нём сменится фаза, а перед этим тиком
+    // ещё не вставали.
+    bool holdHere();
 
     World& world_;
     int speed_ = 1;
@@ -85,6 +97,10 @@ private:
     };
     std::optional<EventRequest> eventRequest_;
     std::optional<WorldPhase> phaseRequest_;
+    bool holdBeforePhase_ = false;
+    std::optional<WorldPhase> heldPhase_;
+    std::uint64_t heldTick_ = ~std::uint64_t{0}; // тик, перед которым уже стояли
+    bool requestHeld_ = false;                    // перед фазой из requestPhase уже стояли
     EntityId lastEvent_ = kInvalidId;
     std::uint64_t skipTotal_ = 0;
 

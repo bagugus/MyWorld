@@ -152,6 +152,9 @@ public:
     // Направление орбиты: yaw — с какой стороны смотрим (0 — с юга, север вверху
     // экрана, как на карте; 90 — с востока), pitch — наклон над горизонтом.
     void setOrbitAngles(float yawDegrees, float pitchDegrees);
+    // Курс и наклон орбиты 3D, градусы (сохранение вида, этап С.2).
+    float orbitYaw() const { return orbit_.yaw; }
+    float orbitPitch() const { return orbit_.pitch; }
     // За кем смотреть из-за плеча; нет — вид из-за плеча сменяется орбитой.
     // Сменился выбранный — камера перелетает к новому плавно.
     void setSubject(std::optional<CameraSubject> subject);

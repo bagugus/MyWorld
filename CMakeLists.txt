@@ -248,6 +248,8 @@ if(LW_BUILD_APP)
         src/ui/Narrator.h
         src/ui/PathTool.cpp
         src/ui/PathTool.h
+        src/ui/Saves.cpp
+        src/ui/Saves.h
         src/ui/SeriesFrame.cpp
         src/ui/SeriesFrame.h
         src/ui/Showrunner.cpp

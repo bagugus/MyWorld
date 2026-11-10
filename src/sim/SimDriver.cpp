@@ -1,5 +1,6 @@
 #include "sim/SimDriver.h"
 
+#include "sim/Scenario.h"
 #include "sim/World.h"
 #include "sim/systems/EventSystem.h"
 #include "sim/systems/ScenarioSystem.h"
@@ -51,15 +52,34 @@ void SimDriver::requestEvent(EventKind kind, std::optional<Cell> near) {
     eventRequest_ = EventRequest{kind, near};
 }
 
+bool SimDriver::holdHere() {
+    if (!holdBeforePhase_ || world_.tick() == heldTick_ || !phaseChangeDue(world_)) {
+        return false;
+    }
+    heldTick_ = world_.tick();
+    heldPhase_ = nextPhase(worldPhase(world_));
+    return true;
+}
+
 void SimDriver::advance(double realDt) {
     using Clock = std::chrono::steady_clock;
 
     ticksLastFrame_ = 0;
     behind_ = false;
+    heldPhase_.reset();
 
     if (phaseRequest_) {
+        // Фаза по кнопке — тоже после остановки: сначала сохранить старую.
+        if (holdBeforePhase_ && !requestHeld_ && scenarioOf(world_) != nullptr &&
+            worldPhase(world_) < *phaseRequest_) {
+            requestHeld_ = true;
+            heldPhase_ = nextPhase(worldPhase(world_));
+            updateStats(realDt);
+            return;
+        }
         enterPhase(world_, *phaseRequest_);
         phaseRequest_.reset();
+        requestHeld_ = false;
     }
     if (eventRequest_) {
         lastEvent_ = startEvent(world_, eventRequest_->kind, eventRequest_->near);
@@ -71,6 +91,9 @@ void SimDriver::advance(double realDt) {
         stepRequested_ = false;
         const Clock::time_point start = Clock::now();
         while (skipRemaining_ > 0) {
+            if (holdHere()) {
+                break;
+            }
             world_.step();
             --skipRemaining_;
             ++ticksLastFrame_;
@@ -90,9 +113,14 @@ void SimDriver::advance(double realDt) {
 
     if (paused_) {
         accumulator_ = 0.0;
-        if (stepRequested_) {
+        if (stepRequested_ && !holdHere()) {
             world_.step();
             ticksLastFrame_ = 1;
+            stepRequested_ = false;
+        }
+        if (heldPhase_) {
+            updateStats(realDt);
+            return; // шаг — в следующем кадре, после сохранения
         }
         stepRequested_ = false;
         updateStats(realDt);
@@ -105,6 +133,9 @@ void SimDriver::advance(double realDt) {
 
     const Clock::time_point start = Clock::now();
     while (accumulator_ >= tickDt) {
+        if (holdHere()) {
+            break; // накопленное время остаётся следующему кадру
+        }
         world_.step();
         accumulator_ -= tickDt;
         ++ticksLastFrame_;

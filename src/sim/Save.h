@@ -36,13 +36,27 @@ namespace lw {
 // Версия формата. Состав компонентов и вид полей сверяются сами (отпечаток
 // схемы, saveSchemaFingerprint); версию поднимать, когда меняется смысл
 // полей или устройство файла.
-inline constexpr std::uint32_t kSaveFormatVersion = 1;
+// 2 — точка взгляда камеры в сведениях (этап С.2).
+inline constexpr std::uint32_t kSaveFormatVersion = 2;
 
 // Миниатюра для меню (С.2, С.3): RGB по строкам сверху вниз.
 struct SaveThumbnail {
     int width = 0;
     int height = 0;
     std::vector<std::uint8_t> rgb; // width × height × 3
+};
+
+// Откуда смотрел наблюдатель, когда сохранял (этап С.2): окно после загрузки
+// ставит камеру туда же. Не часть мира и в хеш не входит; смысл чисел знает
+// только интерфейс (render/CameraController).
+struct SaveView {
+    bool valid = false;
+    std::uint8_t mode = 0; // 0 — сверху, 1 — 3D
+    float x = 0.0f;        // точка в центре кадра, метры
+    float y = 0.0f;
+    float zoom = 1.0f;     // пикселей на метр
+    float yaw = 0.0f;      // курс и наклон 3D, градусы
+    float pitch = 0.0f;
 };
 
 // Сведения о сохранении — для меню, без загрузки мира.
@@ -59,6 +73,7 @@ struct SaveInfo {
     std::int64_t savedAt = 0; // когда записано, секунды Unix — не часть мира
     std::string title;        // подпись слота (С.2)
     SaveThumbnail thumbnail;
+    SaveView view;
     // Сверка при загрузке: карта и участки этой сборки из того же seed и
     // хеш мира после загрузки.
     std::uint64_t mapHash = 0;

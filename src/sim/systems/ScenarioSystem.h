@@ -36,4 +36,10 @@ void enterPhase(World& world, WorldPhase phase);
 // RngStream::Scenario).
 void updateScenario(World& world);
 
+// Сменится ли фаза в следующем тике (World::step): срок или порог беды —
+// то же, что проверит updateScenario. Сценарий в тике идёт раньше всего, что
+// может кого-то погубить, поэтому ответ на границе тика точен. Ничего не
+// меняет: так окно успевает сохранить мир перед сменой фазы (этап С.2).
+bool phaseChangeDue(const World& world);
+
 } // namespace lw

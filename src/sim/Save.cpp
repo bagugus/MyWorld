@@ -51,6 +51,17 @@ void visit(Ar& ar, SaveThumbnail& c) {
 }
 
 template <typename Ar>
+void visit(Ar& ar, SaveView& c) {
+    io(ar, c.valid);
+    io(ar, c.mode);
+    io(ar, c.x);
+    io(ar, c.y);
+    io(ar, c.zoom);
+    io(ar, c.yaw);
+    io(ar, c.pitch);
+}
+
+template <typename Ar>
 void visit(Ar& ar, SaveInfo& c) {
     io(ar, c.seed);
     io(ar, c.config);
@@ -62,6 +73,7 @@ void visit(Ar& ar, SaveInfo& c) {
     io(ar, c.savedAt);
     ar.text(c.title);
     io(ar, c.thumbnail);
+    io(ar, c.view);
     io(ar, c.mapHash);
     io(ar, c.sitesHash);
     io(ar, c.stateHash);

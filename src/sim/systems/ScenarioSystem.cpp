@@ -149,6 +149,31 @@ void enterPhase(World& world, WorldPhase phase) {
     }
 }
 
+bool phaseChangeDue(const World& world) {
+    const std::uint64_t tick = world.tick();
+    if (tick % kTicksPerGameMinute != 0) {
+        return false;
+    }
+    const entt::entity entity = scenarioEntity(world);
+    if (entity == entt::null) {
+        return false;
+    }
+    const Scenario& scenario = world.registry().get<Scenario>(entity);
+    if (scenario.phase == WorldPhase::Survival) {
+        return false;
+    }
+    // Срок вышел (у мира — расписание вспышки).
+    if (tick >= phaseDeadline(scenario)) {
+        return true;
+    }
+    if (calendarAt(tick).minute != 0) {
+        return false;
+    }
+    // Беда дошла до порога — раз в час.
+    const int trigger = phaseTrigger(scenario);
+    return trigger > 0 && tick >= phaseEarliest(scenario) && scenarioStats(world).casualties() >= trigger;
+}
+
 void updateScenario(World& world) {
     const std::uint64_t tick = world.tick();
     if (tick % kTicksPerGameMinute != 0) {
@@ -158,22 +183,11 @@ void updateScenario(World& world) {
     if (entity == entt::null) {
         return;
     }
-    const Scenario& scenario = world.registry().get<Scenario>(entity);
-    if (scenario.phase == WorldPhase::Survival) {
-        return;
-    }
-    // Срок вышел (у мира — расписание вспышки).
-    if (tick >= phaseDeadline(scenario)) {
+    if (phaseChangeDue(world)) {
         beginNextPhase(world, entity);
         return;
     }
-    if (calendarAt(tick).minute != 0) {
-        return;
-    }
-    // Беда дошла до порога — раз в час.
-    const int trigger = phaseTrigger(scenario);
-    if (trigger > 0 && tick >= phaseEarliest(scenario) && scenarioStats(world).casualties() >= trigger) {
-        beginNextPhase(world, entity);
+    if (world.registry().get<Scenario>(entity).phase == WorldPhase::Survival || calendarAt(tick).minute != 0) {
         return;
     }
     // Вирус пришёл снова (этап 7.5).
