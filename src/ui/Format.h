@@ -1,16 +1,35 @@
 #pragma once
 
 #include "sim/Components.h"
+#include "sim/Society.h"
 #include "sim/Id.h"
 
 #include <cstddef>
 #include <cstdint>
+#include <string>
+
+namespace lw {
+class World;
+}
 
 namespace lw::ui {
 
 // Подписи и мелкие виджеты, общие для панелей.
 
 const char* buildingName(BuildingKind kind);
+// Профессия: «продавец», «без работы».
+const char* professionName(Profession profession);
+
+// Родство (этап 7.3) — кем приходится, по полу родственника: «сын» и «дочь».
+// Падежи: именительный («сын»), родительный («о гибели сына»), винительный
+// («узнал в зомби сына»), творительный («был его сыном»).
+enum class Case : std::uint8_t { Nominative, Genitive, Accusative, Instrumental };
+const char* kinWord(KinKind kind, bool female, Case grammaticalCase = Case::Nominative);
+// Откуда знакомы: «коллега», «давняя подруга», «бывший муж»; пусто — ничего
+// особенного (познакомились в мире). female — пол того, о ком речь.
+const char* bondOriginName(BondOrigin origin, bool female);
+// «34 года», «1 год», «5 лет».
+std::string ageText(int years);
 const char* settlementKindName(SettlementKind kind);
 // Занятие человека: «спит», «ищет припасы».
 const char* actionName(Action action);
@@ -25,20 +44,44 @@ const char* animalStateName(AnimalState state);
 const char* weaponName(WeaponKind kind);
 const char* deathCauseName(DeathCause cause);
 const char* corpseKindName(CorpseKind kind);
+// Как заразился (этап 7.5): «под одной крышей», «в больнице», «укус зомби».
+const char* infectionRouteText(InfectionRoute route);
 // Воспоминание о ком-то: «спас», «бросил в беде», «погиб».
 const char* memoryKindName(MemoryKind kind);
+// Ивент: «падение припасов».
+const char* eventKindName(EventKind kind);
+// Сценарий и фаза мира (этап 7.4): «зомби-вирус», «паника».
+const char* scenarioKindName(ScenarioKind kind);
+const char* phaseName(WorldPhase phase);
+// Реакция общества (этап 7.6): стадия тревоги «ходит странная болезнь»,
+// откуда узнал «видел зомби», официальное сообщение «эвакуация из городов».
+const char* alarmStageText(AlarmStage stage);
+const char* alarmClueText(AlarmClue clue);
+const char* broadcastText(BroadcastKind kind);
 // Предмет: «бинт», «патроны к винтовке».
 const char* itemName(ItemKind kind);
+// Уровень детализации симуляции (этап 6а): «полная», «спокойная»,
+// «дремлющая»; почему такой: «рядом встреча людей и зомби».
+const char* detailName(Detail level);
+const char* lodCauseText(LodCause cause);
 // Строка «еда 3, вода 2, бинт 1» — непустые позиции инвентаря; «пусто».
 void formatInventory(char* buffer, std::size_t size, const Inventory& inventory);
 
 // Полоска-индикатор 0..1 с подписью.
 void meter(const char* label, float value);
 
-// Ссылка на объект: кнопка «#id»; true — по ней щёлкнули.
+// Ссылка на объект: кнопка «#id», у людей — «John Miller #id»; true — по ней
+// щёлкнули. Имена берутся из мира, заданного setNameSource (раз за кадр).
 bool idLink(EntityId id);
+void setNameSource(const World* world);
+// Подпись объекта: «John Miller #1745» или «#1745».
+std::string idLabel(EntityId id);
 
-// Длительность в тиках — как игровое время: «2 ч 05 мин», «35 мин».
+// Длительность в тиках — как игровое время: «3 сут 4 ч», «2 ч 05 мин», «35 мин».
 void formatGameDuration(char* buffer, std::size_t size, std::uint64_t ticks);
+
+// Когда наступит следующая фаза мира (этап 7.4): «паника — при 3 пострадавших
+// (сейчас 1), иначе через 2 сут 4 ч». Пусто — фаза последняя.
+void formatNextPhase(char* buffer, std::size_t size, const World& world, const Scenario& scenario);
 
 } // namespace lw::ui

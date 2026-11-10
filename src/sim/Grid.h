@@ -24,6 +24,9 @@ public:
     T& at(int x, int y) { return cells_[index(x, y)]; }
     const T& at(int x, int y) const { return cells_[index(x, y)]; }
 
+    // Память слоя, байты (для замеров).
+    std::size_t memoryBytes() const { return cells_.capacity() * sizeof(T); }
+
     // Все клетки подряд — для обхода, хеша и сохранения.
     std::vector<T>& cells() { return cells_; }
     const std::vector<T>& cells() const { return cells_; }

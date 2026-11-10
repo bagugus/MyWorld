@@ -1,8 +1,10 @@
 #include "sim/systems/SocialSystem.h"
 
 #include "sim/Components.h"
+#include "sim/Events.h"
 #include "sim/Memory.h"
 #include "sim/Relations.h"
+#include "sim/Society.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -68,7 +70,8 @@ struct Talk {
     bool conversation;
 };
 
-// Что рассказано: воспоминание (слух) и мнение о третьем.
+// Что рассказано: воспоминание (слух), мнение о третьем и весть об ивенте
+// (этап 7.1).
 struct Told {
     EntityId listener;
     EntityId teller;
@@ -78,6 +81,9 @@ struct Told {
     EntityId subject = kInvalidId; // о ком мнение
     float opinion = 0.0f;          // симпатия рассказчика к нему
     float weight = 1.0f;           // в разговоре — 1, просто рядом — kNearShare
+    bool news = false;
+    Lead lead{};                   // весть об ивенте
+    float alarm = 0.0f;            // о беде (этап 7.6): до какого уровня поверит слушатель
 };
 
 // О ком teller скажет listener: самое сильное чувство (|симпатия| × знакомство)
@@ -132,7 +138,8 @@ void updateRelations(World& world, float minutes) {
             kGrudgeHours * (0.5f + mine.aggression) * (1.5f - mine.altruism);
         for (std::size_t i = 0; i < relations.count; ++i) {
             Bond& bond = relations.bonds[i];
-            if (tick > bond.seen + kForgetAfterTicks) {
+            // Родню не забывают, даже если давно не виделись (этап 7.3).
+            if (tick > bond.seen + kForgetAfterTicks && bond.origin != BondOrigin::Kin) {
                 bond.familiarity = std::max(0.0f, bond.familiarity - hours / kForgetHours);
             }
             if (bond.debt > 0.0f) {
@@ -219,6 +226,22 @@ void updateRelations(World& world, float minutes) {
             item.memory = *rumor;
             told.push_back(item);
         }
+        // Где упал груз (этап 7.1) — тем же порядком, что и слухи.
+        const Lead* lead =
+            rumorTime ? leadToShare(world, talk.tellerEntity, talk.listenerEntity) : nullptr;
+        if (lead != nullptr) {
+            Told item{talk.listener, talk.teller, talk.listenerEntity};
+            item.news = true;
+            item.lead = *lead;
+            told.push_back(item);
+        }
+        // О беде (этап 7.6): кто знает — рассказывает всем, тем же порядком.
+        if (const float alarm = rumorTime ? alarmToShare(world, talk.tellerEntity, talk.listenerEntity) : 0.0f;
+            alarm > 0.0f) {
+            Told item{talk.listener, talk.teller, talk.listenerEntity};
+            item.alarm = alarm;
+            told.push_back(item);
+        }
         const Relations& tellers = registry.get<Relations>(talk.tellerEntity);
         const Relations& listeners = registry.get<Relations>(talk.listenerEntity);
         const EntityId subject = opinionSubject(world, tellers, talk.listener, listeners);
@@ -231,13 +254,27 @@ void updateRelations(World& world, float minutes) {
         }
     }
     // Услышанное — по слушателю и рассказчику (от одного рассказчика сначала
-    // слух, потом мнение — так они и собраны): не зависит от порядка реестра.
+    // слух, потом весть, потом тревога, потом мнение — так они и собраны): не
+    // зависит от порядка реестра.
     std::stable_sort(told.begin(), told.end(), [](const Told& a, const Told& b) {
         return std::tie(a.listener, a.teller) < std::tie(b.listener, b.teller);
     });
     for (const Told& item : told) {
         if (item.rumor) {
             hearRumor(world, item.listenerEntity, item.teller, item.memory);
+            continue;
+        }
+        if (item.alarm > 0.0f) {
+            raiseAlarm(world, item.listenerEntity, item.alarm, AlarmClue::Told, item.teller);
+            continue;
+        }
+        if (item.news) {
+            if (item.lead.empty) {
+                hearEmpty(registry.get<Leads>(item.listenerEntity), item.lead.event);
+            } else {
+                learnOf(world, item.listenerEntity, item.lead.event, item.lead.site,
+                        EventClue::Told, item.teller, item.lead.since);
+            }
             continue;
         }
         // Враг моего друга — и мне не мил: к неприятному не прислушиваются.

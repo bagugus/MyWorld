@@ -14,8 +14,10 @@ enum class Ground : std::uint8_t { Grass, Sand, Rock, Field };
 enum class Water : std::uint8_t { None, Sea, Lake, River };
 // Растительность: влияет на обзор, скорость движения, укрытие.
 enum class Cover : std::uint8_t { None, Forest };
-// Дорога на клетке с водой — мост. Значения упорядочены по качеству покрытия.
-enum class Road : std::uint8_t { None, Dirt, Asphalt };
+// Дорога на клетке с водой — мост. Значения упорядочены по качеству покрытия:
+// Highway — полотно шоссе (этап 2а.3), асфальт шире и с разметкой. Класс
+// дороги (трасса, просёлок) — у участка сети, sim/Roads.h.
+enum class Road : std::uint8_t { None, Dirt, Asphalt, Highway };
 
 // Координаты клетки. Клетка (x, y) занимает в мире квадрат
 // [x * kCellSize, (x + 1) * kCellSize) по обеим осям; ось y направлена вниз (на юг).
@@ -67,6 +69,11 @@ public:
 
     // Хеш всех слоёв. Считается долго (вся карта), результат стоит запомнить.
     std::uint64_t hash() const;
+    // Память всех слоёв, байты (для замеров).
+    std::size_t memoryBytes() const {
+        return elevation.memoryBytes() + ground.memoryBytes() + water.memoryBytes() +
+               depth.memoryBytes() + cover.memoryBytes() + road.memoryBytes();
+    }
 
     // Высота твёрдой поверхности над уровнем моря в единицах kElevationStep;
     // под водой — высота дна, у моря она отрицательная.

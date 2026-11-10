@@ -1,6 +1,9 @@
 #include "ui/Format.h"
 
+#include "sim/Names.h"
+#include "sim/Scenario.h"
 #include "sim/TimeScale.h"
+#include "sim/World.h"
 
 #include <imgui.h>
 
@@ -16,13 +19,75 @@ const char* buildingName(BuildingKind kind) {
     case BuildingKind::House:
         return "дом";
     case BuildingKind::Barn:
-        return "сарай";
+        return "ферма";
     case BuildingKind::Apartment:
         return "многоэтажка";
     case BuildingKind::Shop:
         return "магазин";
+    case BuildingKind::Hospital:
+        return "больница";
+    case BuildingKind::PoliceStation:
+        return "полиция";
+    case BuildingKind::School:
+        return "школа";
     }
     return "здание";
+}
+
+const char* professionName(Profession profession) {
+    constexpr const char* kNames[] = {"без работы", "продавец", "фермер", "врач", "полицейский",
+                                      "учитель", "школьник", "солдат"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(Profession::Count));
+    const auto index = static_cast<std::size_t>(profession);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* kinWord(KinKind kind, bool female, Case grammaticalCase) {
+    // По KinKind: мужской и женский род в четырёх падежах.
+    static constexpr const char* kWords[][2][4] = {
+        {{"муж", "мужа", "мужа", "мужем"}, {"жена", "жены", "жену", "женой"}},
+        {{"отец", "отца", "отца", "отцом"}, {"мать", "матери", "мать", "матерью"}},
+        {{"сын", "сына", "сына", "сыном"}, {"дочь", "дочери", "дочь", "дочерью"}},
+        {{"брат", "брата", "брата", "братом"}, {"сестра", "сестры", "сестру", "сестрой"}},
+        {{"дед", "деда", "деда", "дедом"}, {"бабушка", "бабушки", "бабушку", "бабушкой"}},
+        {{"внук", "внука", "внука", "внуком"}, {"внучка", "внучки", "внучку", "внучкой"}},
+    };
+    static_assert(std::size(kWords) == static_cast<std::size_t>(KinKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    if (index >= std::size(kWords)) {
+        return "родственник";
+    }
+    return kWords[index][female ? 1 : 0][static_cast<std::size_t>(grammaticalCase)];
+}
+
+const char* bondOriginName(BondOrigin origin, bool female) {
+    switch (origin) {
+    case BondOrigin::Housemate:
+        return female ? "соседка по дому" : "сосед по дому";
+    case BondOrigin::Neighbour:
+        return female ? "соседка" : "сосед";
+    case BondOrigin::Kin:
+        return "родня";
+    case BondOrigin::Colleague:
+        return "коллега";
+    case BondOrigin::Classmate:
+        return "по школе";
+    case BondOrigin::OldFriend:
+        return female ? "давняя подруга" : "давний друг";
+    case BondOrigin::OldFeud:
+        return "давняя вражда";
+    case BondOrigin::ExPartner:
+        return female ? "бывшая жена" : "бывший муж";
+    default:
+        return "";
+    }
+}
+
+std::string ageText(int years) {
+    const int last = years % 10;
+    const int lastTwo = years % 100;
+    const char* word = lastTwo >= 11 && lastTwo <= 14 ? "лет" : last == 1 ? "год" : last >= 2 && last <= 4 ? "года" : "лет";
+    return std::to_string(years) + " " + word;
 }
 
 const char* settlementKindName(SettlementKind kind) {
@@ -34,14 +99,17 @@ const char* actionName(Action action) {
                                       "ищет припасы", "собирает в лесу", "общается",
                                       "гуляет",   "уходит домой", "убегает", "дерётся",
                                       "охотится", "перевязывается", "делится", "меняется",
-                                      "крадёт",   "мстит"};
+                                      "крадёт",   "мстит",    "идёт к месту ивента",
+                                      "на работе", "за покупками", "у врача",
+                                      "идёт к пункту эвакуации", "спешит к своим"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(Action::Count));
     const auto index = static_cast<std::size_t>(action);
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
 const char* soundName(SoundKind kind) {
-    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы", "выстрел", "крик"};
+    constexpr const char* kNames[] = {"тишина", "шаги", "обыск", "голос", "стон", "птицы", "выстрел", "крик",
+                                      "гул самолёта", "взрыв"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(SoundKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
@@ -78,9 +146,19 @@ const char* weaponName(WeaponKind kind) {
 
 const char* deathCauseName(DeathCause cause) {
     constexpr const char* kNames[] = {"убит в схватке", "истёк кровью",   "умер от голода",
-                                      "умер от жажды",  "умер от изнеможения", "сгорел от заражения"};
+                                      "умер от жажды",  "умер от изнеможения", "сгорел от заражения",
+                                      "разбился при крушении"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(DeathCause::Count));
     const auto index = static_cast<std::size_t>(cause);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* infectionRouteText(InfectionRoute route) {
+    constexpr const char* kNames[] = {"не заражён",     "неизвестно где", "укус зомби",
+                                      "под одной крышей", "в больнице",   "лицом к лицу",
+                                      "рядом",           "у тела"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(InfectionRoute::Count));
+    const auto index = static_cast<std::size_t>(route);
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
@@ -101,6 +179,52 @@ const char* memoryKindName(MemoryKind kind) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* eventKindName(EventKind kind) {
+    constexpr const char* kNames[] = {"падение припасов", "крушение вертолёта", "застрявший конвой"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(EventKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* scenarioKindName(ScenarioKind kind) {
+    constexpr const char* kNames[] = {"зомби-вирус"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(ScenarioKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* phaseName(WorldPhase phase) {
+    constexpr const char* kNames[] = {"мир", "вспышка", "паника", "коллапс", "выживание"};
+    static_assert(std::size(kNames) == kWorldPhases);
+    const auto index = static_cast<std::size_t>(phase);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* alarmStageText(AlarmStage stage) {
+    constexpr const char* kNames[] = {"ничего не знает", "ходит странная болезнь",
+                                      "больные нападают, это заразно", "мёртвые встают"};
+    const auto index = static_cast<std::size_t>(stage);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* alarmClueText(AlarmClue clue) {
+    constexpr const char* kNames[] = {"—", "сам слёг в жару", "видел больного в жару",
+                                      "видел тело умершего от заразы", "видел укус",
+                                      "видел зомби", "рассказали", "по радио и телевизору"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(AlarmClue::Count));
+    const auto index = static_cast<std::size_t>(clue);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* broadcastText(BroadcastKind kind) {
+    constexpr const char* kNames[] = {"—", "эпидемия неизвестной болезни: оставайтесь дома",
+                                      "больные нападают на людей: эвакуация из городов",
+                                      "последняя передача: армия уходит, спасайтесь сами"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(BroadcastKind::Count));
+    const auto index = static_cast<std::size_t>(kind);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
 const char* itemName(ItemKind kind) {
     constexpr const char* kNames[] = {"еда",      "вода",       "мясо",     "бинты",
                                       "лекарства", "патроны к пистолету", "патроны к дробовику",
@@ -109,6 +233,28 @@ const char* itemName(ItemKind kind) {
     static_assert(std::size(kNames) == kItemKinds);
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* detailName(Detail level) {
+    constexpr const char* kNames[] = {"полная", "спокойная", "дремлющая"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(Detail::Count));
+    const auto index = static_cast<std::size_t>(level);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* lodCauseText(LodCause cause) {
+    constexpr const char* kTexts[] = {"появилось недавно, до пересчёта",
+                                      "рядом люди и зомби",
+                                      "само в бою, бежит, преследует, охотится или идёт на шум",
+                                      "рядом бой, бегство или погоня",
+                                      "разбужено: удар, начало боя или бегства",
+                                      "недавно было горячо",
+                                      "рядом люди, встречи с зомби нет",
+                                      "людей далеко",
+                                      "людей нет, рядом зомби — уходит от них"};
+    static_assert(std::size(kTexts) == static_cast<std::size_t>(LodCause::Count));
+    const auto index = static_cast<std::size_t>(cause);
+    return index < std::size(kTexts) ? kTexts[index] : "—";
 }
 
 void formatInventory(char* buffer, std::size_t size, const Inventory& inventory) {
@@ -137,24 +283,73 @@ void meter(const char* label, float value) {
     ImGui::ProgressBar(std::clamp(value, 0.0f, 1.0f), {-FLT_MIN, 0.0f}, overlay);
 }
 
+namespace {
+const World* nameSource = nullptr;
+} // namespace
+
+void setNameSource(const World* world) {
+    nameSource = world;
+}
+
+std::string idLabel(EntityId id) {
+    if (nameSource == nullptr) {
+        return "#" + std::to_string(id);
+    }
+    return labelOf(nameSource->registry(), nameSource->find(id), id);
+}
+
 bool idLink(EntityId id) {
-    char label[32];
-    std::snprintf(label, sizeof(label), "#%llu", static_cast<unsigned long long>(id));
+    const std::string label = idLabel(id);
     ImGui::PushID(static_cast<int>(id));
-    const bool clicked = ImGui::SmallButton(label);
+    const bool clicked = ImGui::SmallButton(label.c_str());
     ImGui::PopID();
     return clicked;
 }
 
 void formatGameDuration(char* buffer, std::size_t size, std::uint64_t ticks) {
     const std::uint64_t minutes = ticks / kTicksPerGameMinute;
-    if (minutes >= 60) {
+    if (minutes >= 24 * 60) {
+        std::snprintf(buffer, size, "%llu сут %llu ч",
+                      static_cast<unsigned long long>(minutes / (24 * 60)),
+                      static_cast<unsigned long long>(minutes / 60 % 24));
+    } else if (minutes >= 60) {
         std::snprintf(buffer, size, "%llu ч %02llu мин",
                       static_cast<unsigned long long>(minutes / 60),
                       static_cast<unsigned long long>(minutes % 60));
     } else {
         std::snprintf(buffer, size, "%llu мин", static_cast<unsigned long long>(minutes));
     }
+}
+
+void formatNextPhase(char* buffer, std::size_t size, const World& world, const Scenario& scenario) {
+    buffer[0] = '\0';
+    if (scenario.phase == WorldPhase::Survival) {
+        return;
+    }
+    const WorldPhase next = nextPhase(scenario.phase);
+    const std::uint64_t tick = world.tick();
+    const auto until = [tick](std::uint64_t at, char* text, std::size_t length) {
+        char duration[32];
+        formatGameDuration(duration, sizeof(duration), at > tick ? at - tick : 0);
+        std::snprintf(text, length, "через %s", duration);
+    };
+    char deadline[96] = "не по расписанию";
+    if (const std::uint64_t at = phaseDeadline(scenario); at != Scenario::kNever) {
+        until(at, deadline, sizeof(deadline));
+    }
+    const int trigger = phaseTrigger(scenario);
+    if (trigger == 0) {
+        std::snprintf(buffer, size, "%s — %s", phaseName(next), deadline);
+        return;
+    }
+    char earliest[128] = "";
+    if (const std::uint64_t at = phaseEarliest(scenario); at > tick) {
+        char text[96];
+        until(at, text, sizeof(text));
+        std::snprintf(earliest, sizeof(earliest), ", но не раньше чем %s", text);
+    }
+    std::snprintf(buffer, size, "%s — при %d пострадавших (сейчас %d)%s, иначе %s", phaseName(next),
+                  trigger, scenarioStats(world).casualties(), earliest, deadline);
 }
 
 } // namespace lw::ui

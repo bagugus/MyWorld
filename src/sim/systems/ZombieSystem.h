@@ -70,7 +70,9 @@ EntityId formHorde(World& world, std::vector<EntityId> members, HordeOrigin orig
 
 // Приток (этап 5.7): каждую полночь, если зомби меньше kArrivalBelow от
 // WorldConfig::zombies, издалека приходит орда из kArrivalMin..kArrivalMax —
-// вдали от людей и поселений.
+// вдали от людей и поселений. Со сценарием (этап 7.4) — сколько их держать и
+// сколько раз в сутки приходить, задаёт фаза мира (zombieTarget,
+// arrivalsPerDay в sim/Scenario.h).
 inline constexpr int kArrivalMin = 4;
 inline constexpr int kArrivalMax = 8;
 inline constexpr float kArrivalBelow = 0.9f;

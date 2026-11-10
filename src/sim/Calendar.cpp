@@ -15,6 +15,7 @@ CalendarTime calendarAt(std::uint64_t worldTick) {
     time.season = static_cast<Season>(time.dayOfYear / kGameDaysPerSeason);
     time.dayOfSeason = time.dayOfYear % kGameDaysPerSeason;
     time.day = static_cast<int>(dayIndex) + 1;
+    time.dayOfWeek = static_cast<int>(dayIndex % kDaysPerWeek);
     time.minuteOfDay = static_cast<int>(tickOfDay / kTicksPerGameMinute);
     time.hour = time.minuteOfDay / 60;
     time.minute = time.minuteOfDay % 60;

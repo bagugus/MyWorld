@@ -1,5 +1,6 @@
 #include "sim/nav/NavGraph.h"
 
+#include "sim/Parallel.h"
 #include "sim/nav/SearchSpace.h"
 
 #include <algorithm>
@@ -66,45 +67,76 @@ void NavGraph::build(const NavGrid& nav) {
                      static_cast<std::size_t>(cell.x)];
     };
 
-    // Узлы: куски клеток одного вида внутри секторов.
-    std::vector<Cell> piece;
-    sectorFirst_.reserve(static_cast<std::size_t>(sectorsX_) * static_cast<std::size_t>(sectorsY_) + 1);
-    for (int sy = 0; sy < sectorsY_; ++sy) {
-        for (int sx = 0; sx < sectorsX_; ++sx) {
-            sectorFirst_.push_back(static_cast<std::uint32_t>(nodes_.size()));
-            int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-            sectorBounds(sx, sy, x0, y0, x1, y1);
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    const NavClass kind = NavGrid::classOf(nav.cost(x, y));
-                    if (kind == NavClass::Blocked || labelAt({x, y}) != kNoNode) {
-                        continue;
-                    }
-                    const auto node = static_cast<std::uint32_t>(nodes_.size());
-                    labelAt({x, y}) = node;
-                    piece.assign(1, Cell{x, y});
-                    std::uint64_t costSum = 0;
-                    for (std::size_t k = 0; k < piece.size(); ++k) {
-                        const Cell cell = piece[k];
-                        costSum += nav.cost(cell);
-                        for (int d = 0; d < 4; ++d) {
-                            const Cell next{cell.x + kNavDx[d], cell.y + kNavDy[d]};
-                            if (next.x < x0 || next.y < y0 || next.x >= x1 || next.y >= y1 ||
-                                NavGrid::classOf(nav.cost(next)) != kind || labelAt(next) != kNoNode) {
-                                continue;
-                            }
-                            labelAt(next) = node;
-                            piece.push_back(next);
+    // Узлы: куски клеток одного вида внутри секторов. Секторы независимы —
+    // рядами секторов параллельно (этап 2а.2): сначала номера кусков внутри
+    // сектора, затем — сдвиг на число узлов секторов раньше. Порядок узлов тот
+    // же, что у обхода секторов по одному.
+    const std::size_t sectorCount = static_cast<std::size_t>(sectorsX_) * static_cast<std::size_t>(sectorsY_);
+    std::vector<std::vector<Node>> sectorNodes(sectorCount);
+    const auto forSectorRows = [&](auto&& body) {
+        parallelFor(static_cast<std::size_t>(sectorsY_), 1, 2, [&](std::size_t begin, std::size_t end, int) {
+            for (std::size_t sy = begin; sy < end; ++sy) {
+                for (int sx = 0; sx < sectorsX_; ++sx) {
+                    body(sx, static_cast<int>(sy));
+                }
+            }
+        });
+    };
+    forSectorRows([&](int sx, int sy) {
+        std::vector<Node>& local = sectorNodes[static_cast<std::size_t>(sy * sectorsX_ + sx)];
+        std::vector<Cell> piece;
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        sectorBounds(sx, sy, x0, y0, x1, y1);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                const NavClass kind = NavGrid::classOf(nav.cost(x, y));
+                if (kind == NavClass::Blocked || labelAt({x, y}) != kNoNode) {
+                    continue;
+                }
+                const auto node = static_cast<std::uint32_t>(local.size()); // номер в секторе
+                labelAt({x, y}) = node;
+                piece.assign(1, Cell{x, y});
+                std::uint64_t costSum = 0;
+                for (std::size_t k = 0; k < piece.size(); ++k) {
+                    const Cell cell = piece[k];
+                    costSum += nav.cost(cell);
+                    for (int d = 0; d < 4; ++d) {
+                        const Cell next{cell.x + kNavDx[d], cell.y + kNavDy[d]};
+                        if (next.x < x0 || next.y < y0 || next.x >= x1 || next.y >= y1 ||
+                            NavGrid::classOf(nav.cost(next)) != kind || labelAt(next) != kNoNode) {
+                            continue;
                         }
+                        labelAt(next) = node;
+                        piece.push_back(next);
                     }
-                    const std::uint64_t count = piece.size();
-                    const auto meanCost = static_cast<std::uint8_t>((costSum + count / 2) / count);
-                    nodes_.push_back({centralCell(piece), kind, meanCost});
+                }
+                const std::uint64_t count = piece.size();
+                const auto meanCost = static_cast<std::uint8_t>((costSum + count / 2) / count);
+                local.push_back({centralCell(piece), kind, meanCost});
+            }
+        }
+    });
+    sectorFirst_.reserve(sectorCount + 1);
+    for (const std::vector<Node>& local : sectorNodes) {
+        sectorFirst_.push_back(static_cast<std::uint32_t>(nodes_.size()));
+        nodes_.insert(nodes_.end(), local.begin(), local.end());
+    }
+    sectorFirst_.push_back(static_cast<std::uint32_t>(nodes_.size()));
+    sectorNodes = {};
+    // Номера в секторе — в номера графа.
+    forSectorRows([&](int sx, int sy) {
+        const std::uint32_t first = sectorFirst_[static_cast<std::size_t>(sy * sectorsX_ + sx)];
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        sectorBounds(sx, sy, x0, y0, x1, y1);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                std::uint32_t& label = labelAt({x, y});
+                if (label != kNoNode) {
+                    label += first;
                 }
             }
         }
-    }
-    sectorFirst_.push_back(static_cast<std::uint32_t>(nodes_.size()));
+    });
 
     // Рёбра. Пара кусков находится ровно в одном секторе: соседи справа и снизу
     // принадлежат тому, чьи клетки обходим, а диагональ через угол четырёх секторов —
@@ -114,9 +146,8 @@ void NavGraph::build(const NavGrid& nav) {
         std::uint32_t b;
         std::uint32_t cost;
     };
-    std::vector<Link> local;
-    std::vector<Link> links;
-    const auto consider = [&](Cell from, Cell to) {
+    std::vector<std::vector<Link>> sectorLinks(sectorCount);
+    const auto consider = [&](std::vector<Link>& local, Cell from, Cell to) {
         if (!nav.contains(from) || !nav.contains(to)) {
             return;
         }
@@ -132,29 +163,33 @@ void NavGraph::build(const NavGrid& nav) {
         const std::uint32_t cost = partCost(nodes_[a], from) + step + partCost(nodes_[b], to);
         local.push_back({std::min(a, b), std::max(a, b), cost});
     };
-    for (int sy = 0; sy < sectorsY_; ++sy) {
-        for (int sx = 0; sx < sectorsX_; ++sx) {
-            int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
-            sectorBounds(sx, sy, x0, y0, x1, y1);
-            local.clear();
-            for (int y = y0; y < y1; ++y) {
-                for (int x = x0; x < x1; ++x) {
-                    consider({x, y}, {x + 1, y});
-                    consider({x, y}, {x, y + 1});
-                }
-            }
-            // Угол справа снизу: обе диагонали между четырьмя секторами.
-            consider({x1 - 1, y1 - 1}, {x1, y1});
-            consider({x1, y1 - 1}, {x1 - 1, y1});
-            std::sort(local.begin(), local.end(), [](const Link& l, const Link& r) {
-                return l.a != r.a ? l.a < r.a : l.b != r.b ? l.b < r.b : l.cost < r.cost;
-            });
-            for (std::size_t i = 0; i < local.size(); ++i) {
-                if (i == 0 || local[i].a != local[i - 1].a || local[i].b != local[i - 1].b) {
-                    links.push_back(local[i]); // самая дешёвая точка касания пары
-                }
+    // Секторы независимы (узлы и метки уже готовы): параллельно, затем — по порядку секторов.
+    forSectorRows([&](int sx, int sy) {
+        std::vector<Link> local;
+        int x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+        sectorBounds(sx, sy, x0, y0, x1, y1);
+        for (int y = y0; y < y1; ++y) {
+            for (int x = x0; x < x1; ++x) {
+                consider(local, {x, y}, {x + 1, y});
+                consider(local, {x, y}, {x, y + 1});
             }
         }
+        // Угол справа снизу: обе диагонали между четырьмя секторами.
+        consider(local, {x1 - 1, y1 - 1}, {x1, y1});
+        consider(local, {x1, y1 - 1}, {x1 - 1, y1});
+        std::sort(local.begin(), local.end(), [](const Link& l, const Link& r) {
+            return l.a != r.a ? l.a < r.a : l.b != r.b ? l.b < r.b : l.cost < r.cost;
+        });
+        std::vector<Link>& kept = sectorLinks[static_cast<std::size_t>(sy * sectorsX_ + sx)];
+        for (std::size_t i = 0; i < local.size(); ++i) {
+            if (i == 0 || local[i].a != local[i - 1].a || local[i].b != local[i - 1].b) {
+                kept.push_back(local[i]); // самая дешёвая точка касания пары
+            }
+        }
+    });
+    std::vector<Link> links;
+    for (const std::vector<Link>& kept : sectorLinks) {
+        links.insert(links.end(), kept.begin(), kept.end());
     }
 
     std::vector<Link> directed;

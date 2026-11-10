@@ -3,7 +3,9 @@
 #include "sim/Climate.h"
 #include "sim/Components.h"
 #include "sim/Death.h"
+#include "sim/Infection.h"
 #include "sim/Perception.h"
+#include "sim/Society.h"
 #include "sim/World.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -44,17 +46,19 @@ constexpr float kWoundFear = 0.5f;
 constexpr float kThreatFear = 0.8f;
 constexpr float kThreatResponseHours = 0.1f;
 
+// Тревога о беде (этап 7.6): к ужасу — столько к уровню страха (alarmWorry).
+constexpr float kAlarmFear = 0.2f;
+
 // Выстрел, услышанный недавно, пугает: столько к уровню страха.
 constexpr float kGunshotFear = 0.3f;
 // Кровотечение (Wounds) за столько часов уменьшается на всю свою величину
 // (по чуть-чуть каждую минуту — примерно вдвое за час); слабее этого — остановилось.
 constexpr float kClotHours = 1.5f;
 constexpr float kBleedingStopped = 0.005f;
-// Заражение от укуса (этап 5.5) доходит до предела за столько часов; с
-// kFeverStart начинается лихорадка: здоровье уходит со скоростью до
-// 1 / kFeverHours в час на пределе. На пределе заражения — смерть.
-constexpr float kInfectionHours = 30.0f;
-constexpr float kFeverStart = 0.5f;
+// Заражение (этапы 5.5, 7.5) доходит до предела за infectionHours: после укуса
+// быстрее, от больного медленнее (sim/Infection.h); с kFeverStart начинается
+// лихорадка: здоровье уходит со скоростью до 1 / kFeverHours в час на пределе.
+// На пределе заражения — смерть.
 constexpr float kFeverHours = 12.0f;
 // Тело человека ближе этого пугает (этап 5.5).
 constexpr float kBodyRadius = 15.0f;
@@ -189,10 +193,10 @@ void updateNeeds(World& world, float minutes) {
             }
         }
         // Заражение растёт само; с середины — лихорадка.
-        const bool infected = wounds != nullptr && wounds->infection > 0.0f;
+        const bool infected = wounds != nullptr && isInfected(*wounds);
         if (infected) {
             const float was = wounds->infection;
-            wounds->infection = clamp01(wounds->infection + hours / kInfectionHours);
+            wounds->infection = clamp01(wounds->infection + hours / infectionHours(*wounds));
             if (wounds->infection > kFeverStart) {
                 damage += hours / kFeverHours * (wounds->infection - kFeverStart) /
                           (1.0f - kFeverStart);
@@ -218,13 +222,21 @@ void updateNeeds(World& world, float minutes) {
         if (body) {
             fearTarget += kBodyFear * timidity;
         }
+        if (const auto* alarm = registry.try_get<Alarm>(entity)) {
+            fearTarget += kAlarmFear * alarmWorry(alarm->level) * timidity;
+        }
         // Зомби рядом пугают сразу, а не за час.
         const Threat threat = threatOf(world, entity);
         fearTarget += kThreatFear * threat.level * timidity;
         if (const auto* awareness = registry.try_get<Awareness>(entity)) {
             for (std::size_t i = 0; i < awareness->count; ++i) {
                 const Contact& contact = awareness->contacts[i];
-                if (contact.heard == SoundKind::Gunshot && isFresh(contact, world.tick())) {
+                // Выстрел и взрыв — разовые звуки: слышны в одном обновлении
+                // восприятия, а судят о них здесь раз в минуту. Окно — полного
+                // уровня, не своё: у редко смотрящего (LOD, этап 6а) окно
+                // длиннее, и тот же выстрел пугал бы его вчетверо чаще.
+                if ((contact.heard == SoundKind::Gunshot || contact.heard == SoundKind::Explosion) &&
+                    contact.tick + kPerceptionIntervalTicks >= world.tick()) {
                     fearTarget += kGunshotFear * timidity;
                     break;
                 }
@@ -246,7 +258,9 @@ void updateNeeds(World& world, float minutes) {
                 killer = wounds->hurtBy;
             } else if (infected && wounds->infection > kFeverStart) {
                 cause = DeathCause::Infection;
-                killer = wounds->hurtBy;
+                // Убийца — укусивший зомби; заразившийся от больного убийцы не
+                // имеет: больной и сам не знал (этап 7.5).
+                killer = wounds->bites > 0 ? wounds->hurtBy : kInvalidId;
             } else if (needs.thirst >= 1.0f) {
                 cause = DeathCause::Dehydration;
             } else if (needs.hunger >= 1.0f) {

@@ -2,10 +2,13 @@
 
 #include "sim/Hash.h"
 #include "sim/Calendar.h"
+#include "sim/Lod.h"
+#include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Population.h"
 #include "sim/Places.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 #include "sim/systems/MovementSystem.h"
@@ -192,7 +195,7 @@ public:
             if (zombie.checked != 0 && contact.tick <= zombie.checked) {
                 continue; // уже проверено
             }
-            const bool fresh = isFresh(contact, tick_);
+            const bool fresh = isFresh(contact, awareness, tick_);
             const bool fellow = isZombie(contact.id);
             if (fresh && contact.seen && !fellow) {
                 prey = &contact; // контакты — ближние вперёд
@@ -286,6 +289,9 @@ private:
         zombie.target = prey.id;
         zombie.alerted = tick_;
         zombie.until = 0;
+        if (started) {
+            wake(world_, entity_); // погоня — полный уровень сразу (этап 6а)
+        }
         if (started && (zombie.lastGroan == 0 || tick_ >= zombie.lastGroan + kCallCooldownTicks)) {
             world_.emitSound(position_.x, position_.y, kCallLoudness, SoundKind::Groan, id_);
             zombie.lastGroan = tick_;
@@ -312,6 +318,9 @@ private:
             distance(cellX(goal), cellY(goal), cellX(zombie.goal), cellY(zombie.goal)) <=
                 kInvestigateRegoal) {
             return;
+        }
+        if (zombie.state != ZombieState::Investigate) {
+            wake(world_, entity_); // пошёл на шум — полный уровень сразу (этап 6а)
         }
         zombie.state = ZombieState::Investigate;
         zombie.target = kInvalidId;
@@ -702,6 +711,8 @@ Threat threatOf(const World& world, entt::entity person) {
     const std::uint64_t tick = world.tick();
     const auto* own = registry.try_get<Person>(person);
     const auto* relations = registry.try_get<Relations>(person);
+    // Полицейский на службе заступается за любого, на кого напали первым (этап 7.4).
+    const bool policing = policeOnDuty(world, person);
     // Дорог ли человек: товарищ по группе или близкий (этап 6.5).
     const auto dear = [&](EntityId other) {
         const entt::entity entity = world.find(other);
@@ -720,7 +731,7 @@ Threat threatOf(const World& world, entt::entity person) {
     float ay = 0.0f;
     for (std::size_t i = 0; i < awareness->count; ++i) {
         const Contact& contact = awareness->contacts[i];
-        if (!isFresh(contact, tick)) {
+        if (!isFresh(contact, *awareness, tick)) {
             continue;
         }
         const entt::entity entity = world.find(contact.id);
@@ -746,7 +757,8 @@ Threat threatOf(const World& world, entt::entity person) {
                 level = std::max(contact.seen ? 1.0f - d / kThreatSightRange : 0.0f,
                                  d <= kHuntedRange ? kHuntedThreat : 0.0f);
                 threat.assailant = contact.id;
-            } else if (contact.seen && dear(combat->target)) {
+            } else if (contact.seen && (dear(combat->target) ||
+                                        (policing && isAssault(world, entity, combat->target)))) {
                 level = kDefendThreat * (1.0f - d / kThreatSightRange);
             }
         }
@@ -848,19 +860,39 @@ void updateZombies(World& world) {
     ZombieBrain brain(world, rng);
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по
     // ходу не добавляются и не удаляются.
+    //
+    // Думает за тик двадцатая часть зомби, а view из шести компонентов
+    // проверял бы все хранилища у каждого (этап 2а.1). Поэтому обход — по
+    // ведущему хранилищу того же view (handle: порядок тот же, что у view), id —
+    // у всех, остальные компоненты — только у тех, чья очередь.
     auto view = world.registry()
                     .view<const Id, Zombie, Walker, const Position, const Awareness, Combat>();
-    for (const auto [entity, id, zombie, walker, position, awareness, combat] : view.each()) {
-        if ((tick + id.value) % kZombieThinkTicks == 0) {
-            brain.think(entity, id.value, zombie, walker, position, awareness, combat);
+    const auto& ids = world.registry().storage<Id>();
+    // Уровень детализации (этап 6а): спокойные и дремлющие думают в 4 и 16 раз
+    // реже. Расписания вложены: уровень смотрится только в тик ритма полного.
+    const DetailLookup detail(std::as_const(world.registry()));
+    if (const auto* leading = view.handle(); leading != nullptr) {
+        for (const entt::entity entity : *leading) {
+            const EntityId id = ids.get(entity).value;
+            if ((tick + id) % kZombieThinkTicks != 0 || !view.contains(entity) ||
+                !due(tick, id, kZombieThinkTicks, detail.of(entity))) {
+                continue;
+            }
+            auto [zombie, walker, position, awareness, combat] =
+                view.get<Zombie, Walker, const Position, const Awareness, Combat>(entity);
+            brain.think(entity, id, zombie, walker, position, awareness, combat);
         }
     }
     if (tick % kHordeUpdateTicks == 0) {
         updateHordes(world);
     }
-    // Приток: упокоенных заменяют пришедшие издалека, не больше орды в сутки.
-    if ((tick + kStartGameTick) % kTicksPerGameDay == 0) {
-        const int target = static_cast<int>(kArrivalBelow * static_cast<float>(world.config().zombies));
+    // Приток: упокоенных заменяют пришедшие издалека — орда в сутки, а по ходу
+    // катастрофы (этап 7.4) — и чаще, до числа, которое держит фаза мира.
+    const int arrivals = arrivalsPerDay(world);
+    const std::uint64_t every =
+        arrivals > 0 ? kTicksPerGameDay / static_cast<std::uint64_t>(arrivals) : 0;
+    if (every > 0 && (tick + kStartGameTick) % every == 0) {
+        const int target = static_cast<int>(kArrivalBelow * static_cast<float>(zombieTarget(world)));
         const int missing = target - static_cast<int>(world.registry().view<const Zombie>().size());
         if (missing > 0) {
             spawnZombieGroup(world, std::min(missing, rng.rangeInt(kArrivalMin, kArrivalMax)), rng);

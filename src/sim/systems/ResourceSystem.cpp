@@ -25,6 +25,12 @@ std::uint16_t rainBarrel(BuildingKind kind) {
         return 2;
     case BuildingKind::Shop:
         return 0; // воду в магазине только завезённую
+    case BuildingKind::Hospital:
+        return 10;
+    case BuildingKind::PoliceStation:
+        return 4;
+    case BuildingKind::School:
+        return 6;
     }
     return 0;
 }

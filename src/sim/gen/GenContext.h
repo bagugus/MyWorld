@@ -4,6 +4,7 @@
 
 #include "sim/Grid.h"
 #include "sim/Map.h"
+#include "sim/Profiler.h"
 #include "sim/Rng.h"
 #include "sim/gen/MapGenerator.h"
 
@@ -24,10 +25,11 @@ inline constexpr std::uint16_t kFar = 0xFFFF;
 inline constexpr int kRoadStep = 4;
 
 struct Context {
-    Context(Map& targetMap, Rng& random, GeneratedMap& result)
+    Context(Map& targetMap, Rng& random, GeneratedMap& result, Profiler* stepProfiler = nullptr)
         : map(targetMap),
           rng(random),
           out(result),
+          profiler(stepProfiler),
           width(targetMap.width()),
           height(targetMap.height()),
           slope(width, height),
@@ -44,6 +46,8 @@ struct Context {
     Map& map;
     Rng& rng;
     GeneratedMap& out;
+    // Куда писать время частей шага (этап 2а.2); nullptr — не замерять.
+    Profiler* profiler;
     int width;
     int height;
 
@@ -61,6 +65,17 @@ struct Context {
     Grid<std::uint8_t> occupied;
 };
 
+// Часть шага с замером времени (если есть куда писать).
+template <typename Step>
+void timed(Context& ctx, const char* name, Step&& step) {
+    if (ctx.profiler == nullptr) {
+        step();
+        return;
+    }
+    const StartupScope scope(*ctx.profiler, name);
+    step();
+}
+
 // Шаги генерации в порядке выполнения.
 void generateElevation(Context& ctx);
 void generateWater(Context& ctx);
@@ -71,6 +86,7 @@ void buildRoads(Context& ctx);
 void buildStreets(Context& ctx);
 void placeBuildings(Context& ctx);
 void clearRoadsides(Context& ctx);
+void assignBuildingRoles(Context& ctx);
 
 // Кладёт дорогу на клетку: покрытие не ухудшает, лес убирает.
 inline void setRoad(Map& map, int x, int y, Road type) {

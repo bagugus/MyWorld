@@ -1,6 +1,7 @@
 #include "sim/Death.h"
 
 #include "sim/Hash.h"
+#include "sim/Infection.h"
 #include "sim/World.h"
 #include "sim/systems/ZombieSystem.h"
 
@@ -48,9 +49,10 @@ void die(World& world, entt::entity entity, DeathCause cause, EntityId killer) {
     if (corpse.kind == CorpseKind::Human) {
         world.record(ChronicleKind::Died, id, killer, static_cast<std::int32_t>(cause),
                      static_cast<std::int32_t>(corpse.kind));
-        // Укушенный встанет: когда — из хеша id, без рандома (смерть случается
-        // в разных системах, а время подъёма не должно зависеть от того, в какой).
-        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && wounds->bites > 0) {
+        // Заражённый встанет — укушенный и заразившийся от больного (этап 7.5):
+        // когда — из хеша id, без рандома (смерть случается в разных системах,
+        // а время подъёма не должно зависеть от того, в какой).
+        if (const auto* wounds = registry.try_get<Wounds>(entity); wounds != nullptr && isInfected(*wounds)) {
             Hasher hasher;
             hasher.add(id);
             const auto span = static_cast<std::uint64_t>(kTurnMaxMinutes - kTurnMinMinutes + 1);
@@ -61,8 +63,9 @@ void die(World& world, entt::entity entity, DeathCause cause, EntityId killer) {
 
     // Поведение снимается; позиция, черты, ноша и оружие остаются при теле.
     registry.remove<Person, Mind, Needs, Wounds, Zombie, Animal>(entity);
-    // Отношения и память — тоже: память о погибшем хранят живые, а не он сам.
-    registry.remove<Walker, Senses, Awareness, Combat, Relations, Memories>(entity);
+    // Отношения, память и вести — тоже: память о погибшем хранят живые, а не он сам.
+    // Уровня детализации у тела нет (этап 6а); вставший зомби — на полном до пересчёта.
+    registry.remove<Walker, Senses, Awareness, Lod, Combat, Relations, Memories, Leads>(entity);
     if (auto* velocity = registry.try_get<Velocity>(entity)) {
         *velocity = {};
     }

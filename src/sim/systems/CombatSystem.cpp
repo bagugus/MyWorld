@@ -1,6 +1,7 @@
 #include "sim/systems/CombatSystem.h"
 
 #include "sim/Death.h"
+#include "sim/Lod.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Weapons.h"
@@ -105,8 +106,36 @@ void updateCombat(World& world) {
 
     // Порядок — порядок хранения в реестре: он детерминирован. Погибшие
     // становятся телами после обхода: компоненты по ходу не снимаются.
+    //
+    // Бьёт за тик горстка существ, а view проверял бы Id и Position у каждого
+    // (этап 2а.1). Если ведущее хранилище view — Combat (так почти всегда),
+    // обход идёт по нему в том же порядке, и чужие хранилища смотрятся только
+    // у тех, у кого есть цель и готов удар. Кто готов, отбирается до ударов:
+    // Combat в этом цикле меняет только сам ударивший, так что список тот же,
+    // что получился бы по ходу.
     auto view = registry.view<const Id, Combat, const Position>();
-    for (const auto [entity, id, combat, position] : view.each()) {
+    auto& combats = registry.storage<Combat>();
+    const bool fast = view.handle() == &combats;
+    const auto& ids = registry.storage<Id>();
+    const auto& positions = registry.storage<Position>();
+    std::vector<std::pair<entt::entity, Combat*>> ready;
+    if (fast) {
+        for (const auto [entity, combat] : combats.each()) {
+            if (combat.target != kInvalidId && tick >= combat.ready && view.contains(entity)) {
+                ready.emplace_back(entity, &combat);
+            }
+        }
+    } else {
+        for (const auto [entity, id, combat, position] : view.each()) {
+            if (combat.target != kInvalidId && tick >= combat.ready) {
+                ready.emplace_back(entity, &combat);
+            }
+        }
+    }
+    for (const auto& [entity, combatPtr] : ready) {
+        Combat& combat = *combatPtr;
+        const Id& id = ids.get(entity);
+        const Position& position = positions.get(entity);
         if (combat.target == kInvalidId || tick < combat.ready) {
             continue;
         }
@@ -166,6 +195,11 @@ void updateCombat(World& world) {
             continue;
         }
 
+        // Попадание будит обоих (этап 6а): бой — на полном уровне детализации
+        // сразу, не дожидаясь пересчёта.
+        wake(world, entity);
+        wake(world, target);
+
         // В голову — только зомби и дичи: людей пока никто не убивает с одного удара.
         const bool person = registry.all_of<Person>(target);
         const bool crit = !person && rng.chance(spec->critChance);
@@ -181,6 +215,12 @@ void updateCombat(World& world) {
             if (registry.all_of<Zombie>(entity) && rng.chance(kBiteChance)) {
                 ++wounds.bites;
                 wounds.bleeding += kBiteBleeding;
+                // Первое заражение — укусом (этап 7.5): путь и от кого.
+                if (wounds.infection <= 0.0f) {
+                    wounds.route = InfectionRoute::Bite;
+                    wounds.infectedBy = id.value;
+                    wounds.infectedAt = tick;
+                }
                 wounds.infection = std::min(1.0f, wounds.infection + kBiteInfection);
                 world.record(ChronicleKind::Bitten, combat.target, id.value);
             }

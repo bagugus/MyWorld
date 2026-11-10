@@ -1,9 +1,12 @@
 #include "sim/systems/PerceptionSystem.h"
 
 #include "sim/Components.h"
+#include "sim/Lod.h"
+#include "sim/Parallel.h"
 #include "sim/World.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <optional>
 #include <utility>
@@ -98,8 +101,21 @@ public:
 
         // Сначала дешёвые проверки: расстояние, заметность, шум.
         const float radius = std::max(range, kMaxNoiseLoudness * hearing);
+        // Заметность не больше 1, шум не громче kMaxNoiseLoudness: дальше
+        // дальности зрения соседа не увидеть, дальше kMaxNoiseLoudness × слух —
+        // не услышать. Такие соседи отсеиваются по расстоянию, до поиска
+        // компонентов (этап 2а.1: днём в круге зрения 150 м почти все соседи
+        // дальше 35 м, и шум у них считать незачем). Результат тот же: и при
+        // подсчёте он бы не прошёл сравнение с расстоянием.
+        const float audible = kMaxNoiseLoudness * hearing;
         spatial_.forEachInRadius(position.x, position.y, radius, [&](const SpatialHit& hit) {
-            if (hit.id == self || !lookup_.perceivable(hit.entity)) {
+            if (hit.id == self) {
+                return;
+            }
+            const float distance = std::sqrt(hit.distanceSq);
+            const bool inSight = range > 0.0f && distance <= range;
+            const bool inEarshot = distance <= audible;
+            if ((!inSight && !inEarshot) || !lookup_.perceivable(hit.entity)) {
                 return;
             }
             const Interest interest = interestOf(lookup_, entity, hit.entity);
@@ -109,13 +125,17 @@ public:
             Candidate candidate;
             candidate.hit = hit;
             candidate.interest = interest;
-            candidate.distance = std::sqrt(hit.distanceSq);
-            if (range > 0.0f) {
+            candidate.distance = distance;
+            if (inSight) {
                 candidate.reach = range * bodyVisibility(lookup_, hit.entity);
             }
-            const Noise noise = noiseOf(lookup_, hit.entity);
-            if (noise.kind != SoundKind::None && candidate.distance <= noise.loudness * hearing) {
-                candidate.heard = noise.kind;
+            if (inEarshot) {
+                const Cell under = Map::cellAt(hit.x, hit.y);
+                const Road surface = map_.contains(under) ? map_.road.at(under.x, under.y) : Road::None;
+                const Noise noise = noiseOf(lookup_, hit.entity, surface);
+                if (noise.kind != SoundKind::None && candidate.distance <= noise.loudness * hearing) {
+                    candidate.heard = noise.kind;
+                }
             }
             if (candidate.heard != SoundKind::None ||
                 (candidate.reach > 0.0f && candidate.distance <= candidate.reach)) {
@@ -149,9 +169,17 @@ public:
         }
 
         // Разовые звуки: услышанный источник — контакт там, где прозвучало, если
-        // самого его не видно.
+        // самого его не видно. Слушатель берёт звуки с прошлого своего
+        // обновления (этап 6а): редко смотрящий слышит и то, что прозвучало
+        // между его обновлениями, а при смене уровня — когда окно между
+        // обновлениями меняется — ни один звук не теряется и не слышится
+        // дважды. Первое обновление — за окно. Без LOD это ровно звуки последних
+        // kPerceptionIntervalTicks тиков: других в мире и нет.
+        const std::uint64_t since =
+            awareness.updated != 0 ? awareness.updated
+                                   : (tick_ > awareness.window ? tick_ - awareness.window : 0);
         for (const Sound& sound : world_.sounds()) {
-            if (sound.source == self || sound.source == kInvalidId) {
+            if (sound.source == self || sound.source == kInvalidId || sound.tick < since) {
                 continue;
             }
             const float dx = sound.x - position.x;
@@ -178,6 +206,7 @@ public:
         }
 
         merge(awareness, fresh_, tick_);
+        awareness.updated = tick_;
     }
 
 private:
@@ -203,22 +232,79 @@ void perceive(World& world, entt::entity entity, const SenseConditions& conditio
 
 void updatePerception(World& world) {
     const std::uint64_t tick = world.tick();
-    world.forgetSounds(tick > kSoundLifetimeTicks ? tick - kSoundLifetimeTicks : 0);
+    const std::uint64_t lifetime = soundLifetime(world);
+    world.forgetSounds(tick > lifetime ? tick - lifetime : 0);
 
     entt::registry& registry = world.registry();
-    std::optional<Perceiver> perceiver;
-    // Порядок — порядок хранения в реестре: каждое существо меняет только своё
-    // Awareness, а читает снимок индекса, поэтому порядок на результат не влияет.
-    for (const auto [entity, id, senses, position, awareness] :
-         registry.view<const Id, const Senses, const Position, Awareness>().each()) {
-        if ((tick + id.value) % kPerceptionIntervalTicks != 0) {
-            continue;
+    // Чья очередь в этом тике. Обход — по одному хранилищу Awareness: за тик
+    // обновляется десятая часть существ, а view из четырёх компонентов
+    // проверял бы у каждого три чужих хранилища (этап 2а.1). Id есть у всех
+    // сущностей; Senses и Position проверяются только у тех, чья очередь.
+    struct Turn {
+        entt::entity entity;
+        EntityId id;
+        const Senses* senses;
+        const Position* position;
+        Awareness* awareness;
+    };
+    // Буфер живёт между тиками. Внутри параллельного прохода — только через
+    // ссылку: thread_local в рабочем потоке — это его собственный экземпляр.
+    static thread_local std::vector<Turn> buffer;
+    std::vector<Turn>& turns = buffer;
+    turns.clear();
+    const auto& ids = registry.storage<Id>();
+    const auto& senses = registry.storage<Senses>();
+    const auto& positions = registry.storage<Position>();
+    if (world.config().lod) {
+        // Уровень детализации (этап 6а): спокойный и дремлющий смотрят в 4 и
+        // 16 раз реже. У каждого, кто воспринимает мир, есть Lod (attachLod) с
+        // копией id: очередь — обходом этого плотного хранилища, без поиска Id.
+        // Расписания вложены: сначала — ритм полного уровня (деление на
+        // константу), потом свой. Порядок очереди на результат не влияет.
+        auto& awarenesses = registry.storage<Awareness>();
+        for (const auto [entity, lod] : registry.view<const Lod>().each()) {
+            if ((tick + lod.id) % kPerceptionIntervalTicks != 0 ||
+                !due(tick, lod.id, kPerceptionIntervalTicks, lod.level) || !awarenesses.contains(entity) ||
+                !senses.contains(entity) || !positions.contains(entity)) {
+                continue;
+            }
+            turns.push_back({entity, lod.id, &senses.get(entity), &positions.get(entity),
+                             &awarenesses.get(entity)});
         }
-        if (!perceiver) {
-            perceiver.emplace(world, senseConditions(world));
+    } else {
+        for (const auto [entity, awareness] : registry.view<Awareness>().each()) {
+            const EntityId id = ids.get(entity).value;
+            if ((tick + id) % kPerceptionIntervalTicks != 0 || !senses.contains(entity) ||
+                !positions.contains(entity)) {
+                continue;
+            }
+            turns.push_back({entity, id, &senses.get(entity), &positions.get(entity), &awareness});
         }
-        perceiver->perceive(entity, id.value, senses, position, awareness);
     }
+    if (turns.empty()) {
+        return;
+    }
+
+    // Каждое существо меняет только своё Awareness, а читает снимок индекса и
+    // компоненты, которых восприятие не трогает, — поэтому порядок, а значит и
+    // число потоков, на результат не влияют: обновления идут параллельно
+    // (sim/Parallel.h), у каждого потока свой Perceiver с рабочими буферами.
+    const SenseConditions conditions = senseConditions(world);
+    std::array<std::optional<Perceiver>, kMaxParallelThreads> perceivers;
+    const int threads = std::min(parallelThreads(), kMaxParallelThreads);
+    for (int i = 0; i < threads; ++i) {
+        perceivers[static_cast<std::size_t>(i)].emplace(world, conditions);
+    }
+    // Кусок — несколько существ: в городе одно обновление стоит около 1,5 мкс.
+    constexpr std::size_t kChunk = 6;
+    constexpr std::size_t kMinParallel = 24;
+    parallelFor(turns.size(), kChunk, kMinParallel, [&](std::size_t begin, std::size_t end, int worker) {
+        Perceiver& perceiver = *perceivers[static_cast<std::size_t>(worker)];
+        for (std::size_t i = begin; i < end; ++i) {
+            const Turn& turn = turns[i];
+            perceiver.perceive(turn.entity, turn.id, *turn.senses, *turn.position, *turn.awareness);
+        }
+    });
 }
 
 } // namespace lw

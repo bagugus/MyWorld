@@ -61,15 +61,15 @@ void WeatherRenderer::update(float realDt, bool running) {
     }
 }
 
-void WeatherRenderer::draw(const Environment& environment, const Weather& weather) const {
+void WeatherRenderer::draw(const Environment& environment, const Weather& weather, bool lit, bool indoors) const {
     const float light = environment.light;
 
-    if (weather.precipitation > 0.02f) {
+    if (weather.precipitation > 0.02f && !indoors) {
         drawPrecipitation(weather, isSnowing(environment.temperature));
     }
 
     // Туман светлый днём и почти не виден в темноте.
-    if (weather.fog > 0.01f) {
+    if (!lit && weather.fog > 0.01f) {
         const float brightness = std::min(1.0f, 0.1f + 1.6f * light);
         const Color fog = {static_cast<unsigned char>(kFogColor.r * brightness),
                            static_cast<unsigned char>(kFogColor.g * brightness),
@@ -77,12 +77,14 @@ void WeatherRenderer::draw(const Environment& environment, const Weather& weathe
         fillScreen(withAlpha(fog, weather.fog * 0.6f));
     }
 
-    fillScreen(withAlpha(kNightColor, std::pow(1.0f - light, kDarknessCurve) * kMaxDarkness));
+    if (!lit) {
+        fillScreen(withAlpha(kNightColor, std::pow(1.0f - light, kDarknessCurve) * kMaxDarkness));
 
-    // Тёплый оттенок, пока солнце низко: от −6° до +8°, сильнее всего у горизонта.
-    const float elevation = environment.sun.elevation;
-    const float dusk = std::max(0.0f, 1.0f - std::abs(elevation - 1.0f) / 7.0f);
-    fillScreen(withAlpha(kDuskColor, dusk * 0.16f * (1.0f - 0.8f * weather.cloudCover)));
+        // Тёплый оттенок, пока солнце низко: от −6° до +8°, сильнее всего у горизонта.
+        const float elevation = environment.sun.elevation;
+        const float dusk = std::max(0.0f, 1.0f - std::abs(elevation - 1.0f) / 7.0f);
+        fillScreen(withAlpha(kDuskColor, dusk * 0.16f * (1.0f - 0.8f * weather.cloudCover)));
+    }
 
     // Молнии: в сильную грозу иногда вспышка, гаснущая за долю секунды.
     if (weather.kind == WeatherKind::Storm && weather.precipitation > 0.6f) {

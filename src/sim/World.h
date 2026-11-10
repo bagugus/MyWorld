@@ -2,8 +2,11 @@
 
 #include "sim/Chronicle.h"
 #include "sim/Id.h"
+#include "sim/Lod.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
+#include "sim/Roads.h"
+#include "sim/Profiler.h"
 #include "sim/Resources.h"
 #include "sim/Rng.h"
 #include "sim/Sound.h"
@@ -36,17 +39,65 @@ enum class RngStream : std::uint8_t {
     Zombies,  // зомби: расселение, решения, орды
     Animals,  // животные и птицы: расселение, решения
     Combat,   // бой: оружие при рождении, попадания и урон
+    Events,   // ивенты: когда и где, что в грузе, кто заметил знак (этап 7.1)
+    Names,    // имена людей при рождении
+    Jobs,     // профессии и сбережения при рождении (этап 7.2)
+    Scenario, // сценарий: первые заражённые в начале вспышки (этап 7.4)
+    Families, // семьи при рождении мира: состав домов, возраст, родня, прошлое (этап 7.3)
+    Outbreak, // заражение от больных и тел: кто заразился рядом с ними (этап 7.5)
+    Society,  // реакция общества: кто услышал передачу, солдаты (этап 7.6)
     Count
 };
 
+// Сторона карты по умолчанию в клетках: 16 × 16 км (этап 2а.2; до него — 8 × 8).
+inline constexpr int kDefaultMapCells = 4096;
+
 struct WorldConfig {
-    int mapWidth = 2048;  // клетки (по Map::kCellSize метров)
-    int mapHeight = 2048; // клетки
-    int people = 300;     // люди; живут в жилых домах
-    int zombies = 400;    // зомби: одиночки в поселениях и на природе, орды
-    int animals = 160;    // олени, кабаны, зайцы — вдали от поселений
-    int flocks = 24;      // стаи ворон
+    int mapWidth = kDefaultMapCells;  // клетки (по Map::kCellSize метров)
+    int mapHeight = kDefaultMapCells; // клетки
+    // Люди, звери и стаи по умолчанию — на карту по умолчанию; на карте другого
+    // размера с той же плотностью — populationFor.
+    int people = 1200;    // люди; живут в жилых домах
+    // Зомби при создании мира: одиночки в поселениях и на природе, орды. Мир
+    // начинается с мирной жизни (этап 7.2), поэтому по умолчанию их нет; от
+    // этого же числа считается приток издалека (этап 5.7).
+    int zombies = 0;
+    int animals = 640;    // олени, кабаны, зайцы — вдали от поселений
+    int flocks = 96;      // стаи ворон
+    // Ивенты по временному расписанию (до рассказчика, этап 7.9). В мирное
+    // время грузы с неба не падают, поэтому по умолчанию выключено. Вручную
+    // (интерфейс, тесты) ивент можно начать и без него: startEvent.
+    bool events = false;
+    // Ивенты по фазам сценария (этап 7.7, PhaseRules::eventsPerDay): с паники
+    // падают грузы, застревают колонны, разбиваются вертолёты. Только у мира
+    // со сценарием; выключено — ивенты только вручную (и по events).
+    bool phaseEvents = true;
+    // Мирная жизнь (этап 7.2): у людей профессии и деньги, магазины открыты и
+    // получают завоз, в больнице лечат, в домах водопровод. Выключено — все
+    // сами по себе, как в этапах 4–7.1 (так устроены старые тесты).
+    bool peacetime = true;
+    // Сценарий (этап 7.4): через сколько игровых суток от начала мира
+    // начинается вспышка, если её не начали раньше (интерфейс, --phase, позже
+    // рассказчик); 0 — не по расписанию. Только у мира с мирной жизнью: без
+    // неё катастрофа уже случилась и мир сразу живёт по правилам выживания.
+    double outbreakDays = 7.0;
+    // Уровни детализации симуляции, LOD (этап 6а, sim/Lod.h): вдали от
+    // встреч людей и зомби существа смотрят по сторонам и решают реже. Уровень
+    // — от состояния мира, не от камеры: мир тот же в окне и без него.
+    // Выключено — все на полном уровне, мир тот же, что до этапа 6а (для
+    // сравнения и отладки: lw_headless --lod off).
+    bool lod = true;
 };
+
+// Сколько людей, зверей и стай на карте width × height клеток при той же
+// плотности, что у карты по умолчанию (этап 2а.2): для --map-size без явных
+// --people, --animals, --flocks. На 8 × 8 км — 300, 160 и 24, как до этапа 2а.2.
+struct Population {
+    int people = 0;
+    int animals = 0;
+    int flocks = 0;
+};
+Population populationFor(int width, int height);
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
 // Один seed и одно число тиков дают одно и то же состояние.
@@ -64,12 +115,15 @@ public:
     // Продвигает мир ровно на один тик.
     void step();
 
-    // Замер времени по шагам тика (для поиска узких мест; на мир не влияет).
-    static constexpr int kStepPhases = 14;
-    static const char* stepPhaseName(int phase);
-    void setProfiling(bool enabled) { profiling_ = enabled; }
-    // Накопленные секунды на каждый шаг тика с включения замера.
-    double stepPhaseSeconds(int phase) const { return phaseSeconds_[phase]; }
+    // Замер времени по системам тика и шагам старта (этап 2а.1; на мир не
+    // влияет): sim/Profiler.h. Шаги старта пишутся всегда, тик — после
+    // setProfiling(true).
+    void setProfiling(bool enabled) { profiler_.setEnabled(enabled); }
+    Profiler& profiler() { return profiler_; }
+    const Profiler& profiler() const { return profiler_; }
+    // Сколько памяти занимают крупные структуры мира (оценка по ёмкости
+    // контейнеров; для замеров, этап 2а.1).
+    std::vector<MemoryItem> memoryReport() const;
 
     // Сущности создавать и удалять только здесь — так у каждой есть стабильный Id.
     entt::entity create();
@@ -96,6 +150,10 @@ public:
     std::size_t entityCount() const { return idToEntity_.size(); }
     // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
     const SpatialIndex& spatial() const { return spatial_; }
+    // Карта активности — где люди, зомби, бой (этап 6а, sim/Lod.h): по ней
+    // LodSystem ставит уровни детализации. Производные данные, в хеш не входят.
+    const ActivityMap& activityMap() const { return activity_; }
+    ActivityMap& activityMap() { return activity_; }
     // Привести индекс к текущим позициям — после того, как сущности переставили
     // вне тика (тесты, будущий редактор). Тик делает это сам.
     void syncSpatial() { spatial_.sync(registry_); }
@@ -108,6 +166,9 @@ public:
     Pathfinder& pathfinder() { return pathfinder_; }
     // Поселения, здания, места для питья и сбора — справочник для решений людей.
     const Places& places() const { return places_; }
+    // Сеть дорог между поселениями (этап 2а.3): шоссе, трассы, просёлки,
+    // развязки, мосты. Производные данные генерации, в хеш не входят.
+    const RoadNetwork& roads() const { return roads_; }
     // Возобновляемые ресурсы: ягоды и грибы в лесу, дождевая вода.
     Resources& resources() { return resources_; }
     const Resources& resources() const { return resources_; }
@@ -134,8 +195,8 @@ public:
     std::uint64_t stateHash() const;
 
 private:
-    bool profiling_ = false;
-    std::array<double, kStepPhases> phaseSeconds_{};
+    // Первым: старт мира (генерация в конструкторе) пишется уже в него.
+    Profiler profiler_;
     // Генерирует карту, создаёт сущности поселений и зданий, строит навигацию.
     void generate();
 
@@ -157,7 +218,9 @@ private:
     NavGraph graph_;
     Pathfinder pathfinder_{nav_, graph_};
     Places places_;
+    RoadNetwork roads_;
     Resources resources_;
+    ActivityMap activity_;
 
     // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
     SpatialIndex spatial_;

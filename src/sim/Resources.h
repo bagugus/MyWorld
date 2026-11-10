@@ -49,6 +49,7 @@ public:
     std::uint32_t rainPortions() const { return rainPortions_; }
 
     std::uint64_t hash() const;
+    std::size_t memoryBytes() const { return forest_.memoryBytes() + isForest_.memoryBytes(); }
 
 private:
     Grid<std::uint8_t> forest_;

@@ -42,15 +42,6 @@ float clampUnit(float value) {
     return std::clamp(value, -1.0f, 1.0f);
 }
 
-// Начальная связь: знакомство и симпатия как у давних знакомых.
-void befriendAtStart(Bond& bond, float familiarity, float affinityShare) {
-    bond.familiarity = familiarity;
-    bond.affinity = clampUnit(affinityShare * bond.chemistry);
-    bond.trust = std::max(0.0f, bond.affinity) * bond.familiarity;
-    // Начальные отметки — без летописи: они знакомы давно.
-    updateBondFlags(bond);
-}
-
 } // namespace
 
 float chemistry(EntityId self, const Traits& mine, EntityId other, const Traits& theirs) {
@@ -109,14 +100,16 @@ Bond* acquireBond(Relations& relations, EntityId other, float chemistry, std::ui
     }
     std::size_t slot = relations.count;
     if (relations.count == Relations::kMaxBonds) {
-        // Самая слабая, при равных — первая.
-        slot = 0;
-        for (std::size_t i = 1; i < relations.count; ++i) {
-            if (bondStrength(relations.bonds[i]) < bondStrength(relations.bonds[slot])) {
+        // Самая слабая не родня, при равных — первая.
+        slot = relations.count;
+        for (std::size_t i = 0; i < relations.count; ++i) {
+            if (relations.bonds[i].origin != BondOrigin::Kin &&
+                (slot == relations.count ||
+                 bondStrength(relations.bonds[i]) < bondStrength(relations.bonds[slot]))) {
                 slot = i;
             }
         }
-        if (bondStrength(relations.bonds[slot]) >= kForgettable) {
+        if (slot == relations.count || bondStrength(relations.bonds[slot]) >= kForgettable) {
             return nullptr;
         }
     } else {
@@ -132,6 +125,34 @@ Bond* acquireBond(Relations& relations, EntityId other, float chemistry, std::ui
         *created = true;
     }
     return &bond;
+}
+
+Bond* meetAtStart(World& world, entt::entity self, EntityId selfId, entt::entity other,
+                  EntityId otherId, float familiarity, float affinityShare, float chemistryBonus,
+                  BondOrigin origin) {
+    entt::registry& registry = world.registry();
+    auto* relations = registry.try_get<Relations>(self);
+    if (relations == nullptr || selfId == otherId) {
+        return nullptr;
+    }
+    static const Traits kAverage{};
+    const auto* mine = registry.try_get<Traits>(self);
+    const auto* theirs = registry.try_get<Traits>(other);
+    const float chem = clampUnit(chemistry(selfId, mine != nullptr ? *mine : kAverage, otherId,
+                                           theirs != nullptr ? *theirs : kAverage) +
+                                 chemistryBonus);
+    bool created = false;
+    Bond* bond = acquireBond(*relations, otherId, chem, world.tick(), &created);
+    if (!created) {
+        return nullptr;
+    }
+    bond->origin = origin;
+    bond->familiarity = familiarity;
+    bond->affinity = clampUnit(affinityShare * bond->chemistry);
+    bond->trust = std::max(0.0f, bond->affinity) * bond->familiarity;
+    // Начальные отметки — без летописи: они знакомы давно.
+    updateBondFlags(*bond);
+    return bond;
 }
 
 std::uint8_t updateBondFlags(Bond& bond) {
@@ -209,12 +230,6 @@ void introduceNeighbours(World& world) {
     std::sort(residents.begin(), residents.end(), [](const Resident& a, const Resident& b) {
         return std::tie(a.settlement, a.id) < std::tie(b.settlement, b.id);
     });
-    static const Traits kAverage{};
-    const auto traitsOf = [&](entt::entity entity) -> const Traits& {
-        const Traits* traits = registry.try_get<Traits>(entity);
-        return traits != nullptr ? *traits : kAverage;
-    };
-    const std::uint64_t tick = world.tick();
     std::vector<std::pair<float, std::size_t>> nearby;
     for (std::size_t begin = 0; begin < residents.size();) {
         std::size_t end = begin;
@@ -223,16 +238,10 @@ void introduceNeighbours(World& world) {
         }
         for (std::size_t i = begin; i < end; ++i) {
             const Resident& self = residents[i];
-            Relations& relations = registry.get<Relations>(self.entity);
-            const Traits& mine = traitsOf(self.entity);
             const auto meet = [&](const Resident& other, float familiarity, float affinityShare,
-                                  float bonus) {
-                const float chem =
-                    clampUnit(chemistry(self.id, mine, other.id, traitsOf(other.entity)) + bonus);
-                bool created = false;
-                if (Bond* bond = acquireBond(relations, other.id, chem, tick, &created); created) {
-                    befriendAtStart(*bond, familiarity, affinityShare);
-                }
+                                  float bonus, BondOrigin origin) {
+                meetAtStart(world, self.entity, self.id, other.entity, other.id, familiarity,
+                            affinityShare, bonus, origin);
             };
             // Соседи по дому — первыми: им места хватит всегда.
             nearby.clear();
@@ -242,7 +251,8 @@ void introduceNeighbours(World& world) {
                     continue;
                 }
                 if (other.home == self.home) {
-                    meet(other, kHousemateFamiliarity, kHousemateAffinity, kHousemateChemistry);
+                    meet(other, kHousemateFamiliarity, kHousemateAffinity, kHousemateChemistry,
+                         BondOrigin::Housemate);
                     continue;
                 }
                 const float d = std::hypot(other.x - self.x, other.y - self.y);
@@ -255,7 +265,8 @@ void introduceNeighbours(World& world) {
             std::partial_sort(nearby.begin(), nearby.begin() + static_cast<std::ptrdiff_t>(known),
                               nearby.end());
             for (std::size_t k = 0; k < known; ++k) {
-                meet(residents[nearby[k].second], kNeighbourFamiliarity, kNeighbourAffinity, 0.0f);
+                meet(residents[nearby[k].second], kNeighbourFamiliarity, kNeighbourAffinity, 0.0f,
+                     BondOrigin::Neighbour);
             }
         }
         begin = end;

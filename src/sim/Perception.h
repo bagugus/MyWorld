@@ -1,6 +1,7 @@
 #pragma once
 
 #include "sim/Components.h"
+#include "sim/Map.h"
 #include "sim/Sound.h"
 #include "sim/TimeScale.h"
 
@@ -32,9 +33,14 @@ struct Weather;
 // ветер глушат. Стены звук пока не глушат.
 
 // Как часто существо обновляет восприятие: раз в 0,5 с симуляции. Существа
-// обновляются вразнобой (по id), за тик — десятая часть.
+// обновляются вразнобой (по id), за тик — десятая часть. С LOD (этап 6а)
+// спокойные и дремлющие — в 4 и 16 раз реже (sim/Lod.h).
 inline constexpr std::uint64_t kPerceptionIntervalTicks = 10;
-// Разовый звук слышен столько тиков: каждый слушатель успевает обновиться.
+static_assert(Awareness{}.window == kPerceptionIntervalTicks);
+// Разовый звук слышен столько тиков: каждый слушатель полного уровня успевает
+// обновиться. С LOD звук живёт дольше — до самого редкого обновления
+// (soundLifetime в sim/Lod.h), а слушатель берёт звуки с прошлого своего
+// обновления (Awareness::updated).
 inline constexpr std::uint64_t kSoundLifetimeTicks = kPerceptionIntervalTicks;
 // Сколько помнится потерянный контакт: 30 с симуляции, 6 игровых минут.
 inline constexpr std::uint64_t kContactMemoryTicks = 30 * kTicksPerSecond;
@@ -47,10 +53,11 @@ inline constexpr float kForestVisibility = 0.6f; // в лесу — ещё ра�
 float animalVisibility(AnimalKind kind);
 
 // Контакт подтверждён последним обновлением восприятия (иначе только помнится).
-// Обновление было не раньше чем kPerceptionIntervalTicks тиков назад: в тик
-// tick оно для этого существа ещё может быть впереди.
-inline bool isFresh(const Contact& contact, std::uint64_t tick) {
-    return contact.tick + kPerceptionIntervalTicks >= tick;
+// Обновление было не раньше чем окно наблюдателя (Awareness::window) тиков
+// назад: в тик tick оно для этого существа ещё может быть впереди. Окно — по
+// уровню детализации наблюдателя (этап 6а): без LOD — kPerceptionIntervalTicks.
+inline bool isFresh(const Contact& contact, const Awareness& awareness, std::uint64_t tick) {
+    return contact.tick + awareness.window >= tick;
 }
 
 // Лишние метры луча за каждую клетку леса между глазами и целью.
@@ -163,7 +170,9 @@ struct Noise {
     SoundKind kind = SoundKind::None;
     float loudness = 0.0f; // метры в тихую погоду
 };
-Noise noiseOf(const SenseLookup& lookup, entt::entity entity);
-Noise noiseOf(const entt::registry& registry, entt::entity entity);
+// surface — покрытие под существом: по асфальту шаги звонче (этап 2а.3,
+// footstepLoudness), шаги не громче kMaxNoiseLoudness.
+Noise noiseOf(const SenseLookup& lookup, entt::entity entity, Road surface = Road::None);
+Noise noiseOf(const entt::registry& registry, entt::entity entity, Road surface = Road::None);
 
 } // namespace lw

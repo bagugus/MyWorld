@@ -17,15 +17,16 @@ class World;
 //
 // Вызывать вне обхода видов с компонентами погибшего: компоненты снимаются.
 // Летопись: смерть человека — Died (кто убил, причина); зомби и животных
-// отмечает тот, кто убил (KilledZombie, Hunted). Укушенный человек встанет
-// зомби (updateBodies).
+// отмечает тот, кто убил (KilledZombie, Hunted). Заражённый человек —
+// укушенный или заразившийся от больного (этап 7.5) — встанет зомби
+// (updateBodies).
 void die(World& world, entt::entity entity, DeathCause cause, EntityId killer);
 
 // Порций мяса в туше животного этого вида.
 int carcassMeat(AnimalKind kind);
 
 // Тела (этап 5.5), раз в игровую минуту:
-// - укушенный погибший встаёт зомби (Corpse::turnsAt) — той же сущностью, с
+// - заражённый погибший встаёт зомби (Corpse::turnsAt) — той же сущностью, с
 //   тем же id; оружие и ноша остаются при нём;
 // - мясо в туше портится через kMeatSpoilTicks;
 // - тела разлагаются и исчезают: человека и зомби — через kBodyDecayTicks,
@@ -33,7 +34,10 @@ int carcassMeat(AnimalKind kind);
 inline constexpr std::uint64_t kMeatSpoilTicks = kTicksPerGameDay;
 inline constexpr std::uint64_t kCarcassDecayTicks = 3 * kTicksPerGameDay;
 inline constexpr std::uint64_t kBodyDecayTicks = 6 * kTicksPerGameDay;
-// Укушенный встаёт через столько игровых минут после смерти.
+// Заражение от укуса доходит до предела (смерть) за столько игровых часов
+// (NeedsSystem; от больного — дольше, sim/Infection.h); заражённый встаёт через
+// столько игровых минут после смерти.
+inline constexpr float kInfectionHours = 30.0f;
 inline constexpr int kTurnMinMinutes = 10;
 inline constexpr int kTurnMaxMinutes = 40;
 void updateBodies(World& world);

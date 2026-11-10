@@ -100,6 +100,9 @@ public:
     // при равных расстояниях — верхняя, затем левая.
     std::optional<Cell> nearestPassable(Cell cell, int maxRadius) const;
 
+    // Память сетки, байты (для замеров).
+    std::size_t memoryBytes() const { return cost_.memoryBytes() + region_.memoryBytes(); }
+
 private:
     void labelRegions();
 

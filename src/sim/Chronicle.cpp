@@ -25,6 +25,17 @@ std::uint64_t mix(std::uint64_t accumulated, const ChronicleEvent& event) {
 
 } // namespace
 
+std::size_t Chronicle::memoryBytes() const {
+    // Узел unordered_map — пара, указатель на следующий и хеш; плюс корзины.
+    std::size_t bytes = events_.capacity() * sizeof(ChronicleEvent) +
+                        byId_.bucket_count() * sizeof(void*) +
+                        byId_.size() * (sizeof(EntityId) + sizeof(std::vector<std::uint32_t>) + 2 * sizeof(void*));
+    for (const auto& [id, list] : byId_) {
+        bytes += list.capacity() * sizeof(std::uint32_t);
+    }
+    return bytes;
+}
+
 void Chronicle::add(const ChronicleEvent& event) {
     const auto index = static_cast<std::uint32_t>(events_.size());
     events_.push_back(event);
@@ -63,7 +74,15 @@ const char* chronicleKindName(ChronicleKind kind) {
                                       "reconciled", "group formed", "joined group",
                                       "left group", "expelled", "led group",
                                       "group disbanded", "shared", "traded", "stole",
-                                      "deserted", "betrayed by", "assaulted by", "avenged"};
+                                      "deserted", "betrayed by", "assaulted by", "avenged",
+                                      "event began", "learned of event", "salvaged",
+                                      "event ended", "employed", "bought", "sold out",
+                                      "saw doctor", "phase began", "left work", "orphaned", "took in",
+                                      "patient zero", "infected", "alarmed", "broadcast",
+                                      "quarantine declared", "quarantine lifted", "broke quarantine",
+                                      "evacuation opened", "evacuated", "evacuation refused",
+                                      "convoy left", "evacuation ended", "stayed behind", "reunited",
+                                      "event crew"};
     static_assert(std::size(kNames) == static_cast<std::size_t>(ChronicleKind::Count));
     const auto index = static_cast<std::size_t>(kind);
     return index < std::size(kNames) ? kNames[index] : "?";

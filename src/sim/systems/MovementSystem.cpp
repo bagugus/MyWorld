@@ -1,6 +1,9 @@
 #include "sim/systems/MovementSystem.h"
 
+#include "sim/Climate.h"
 #include "sim/Components.h"
+#include "sim/Parallel.h"
+#include "sim/Roads.h"
 #include "sim/World.h"
 #include "sim/nav/NavGrid.h"
 
@@ -72,48 +75,107 @@ bool startWalkDirect(World& world, entt::entity entity, Cell goal) {
     return startWalk(world, entity, goal);
 }
 
+namespace {
+
+// Шаг одного идущего за тик: меняет только его позицию, скорость и путь.
+// Грязь (этап 2а.3): грунтовка и пашня в дождь медленнее; wetness — из
+// mudWetness, ноль — сухо, и карту не читаем.
+struct Mud {
+    const Map& map;
+    float wetness = 0.0f;
+
+    float factor(Cell cell) const {
+        if (wetness <= 0.0f || !map.contains(cell)) {
+            return 1.0f;
+        }
+        return mudSpeedFactor(map.road.at(cell.x, cell.y), map.ground.at(cell.x, cell.y), wetness);
+    }
+};
+
+void advance(const NavGrid& nav, const Mud& mud, float dt, Position& position, Velocity& velocity,
+             Walker& walker) {
+    const Position before = position;
+    float remaining = dt;
+    while (remaining > 0.0f && walker.moving()) {
+        const Cell target = walker.waypoints[walker.next];
+        const float tx = Map::cellCenter(target.x);
+        const float ty = Map::cellCenter(target.y);
+        const float dx = tx - position.x;
+        const float dy = ty - position.y;
+        const float distance = std::sqrt(dx * dx + dy * dy);
+
+        // Скорость — по клетке, где сущность сейчас; сойти с непроходимой
+        // клетки (не бывает, но на всякий случай) можно со скоростью вплавь.
+        const Cell here = Map::cellAt(position.x, position.y);
+        float factor = walkSpeedFactor(nav.cost(here));
+        if (factor <= 0.0f) {
+            factor = kSwimFactor;
+        }
+        factor *= mud.factor(here);
+        const float speed = walker.speed * walker.pace * factor;
+        const float step = speed * remaining;
+        if (step >= distance) {
+            position = {tx, ty};
+            remaining -= distance / speed;
+            ++walker.next;
+        } else {
+            position.x += dx / distance * step;
+            position.y += dy / distance * step;
+            remaining = 0.0f;
+        }
+    }
+    if (!walker.moving()) {
+        // clear не отдаёт память: в параллельном проходе куча не трогается.
+        walker.waypoints.clear();
+        walker.next = 0;
+    }
+    velocity = {(position.x - before.x) / dt, (position.y - before.y) / dt};
+}
+
+} // namespace
+
 void updateMovement(World& world, float dt) {
     const NavGrid& nav = world.nav();
+    const Weather& weather = world.weather();
+    const Mud mud{world.map(), mudWetness(weather.precipitation,
+                                          isSnowing(seaLevelTemperature(calendarAt(world.tick()), weather)))};
+    // Каждый идущий меняет только свои компоненты, а читает неизменную сетку
+    // навигации — шаги не зависят друг от друга и порядка, поэтому идут
+    // параллельно (sim/Parallel.h, этап 2а.1). Куски — по ведущему хранилищу
+    // view: сам обход (поиск компонентов в трёх хранилищах) дороже шага.
     auto view = world.registry().view<Position, Velocity, Walker>();
-    for (const auto [entity, position, velocity, walker] : view.each()) {
-        if (!walker.moving()) {
-            velocity = {};
-            continue;
-        }
-        const Position before = position;
-        float remaining = dt;
-        while (remaining > 0.0f && walker.moving()) {
-            const Cell target = walker.waypoints[walker.next];
-            const float tx = Map::cellCenter(target.x);
-            const float ty = Map::cellCenter(target.y);
-            const float dx = tx - position.x;
-            const float dy = ty - position.y;
-            const float distance = std::sqrt(dx * dx + dy * dy);
-
-            // Скорость — по клетке, где сущность сейчас; сойти с непроходимой
-            // клетки (не бывает, но на всякий случай) можно со скоростью вплавь.
-            float factor = walkSpeedFactor(nav.cost(Map::cellAt(position.x, position.y)));
-            if (factor <= 0.0f) {
-                factor = kSwimFactor;
-            }
-            const float speed = walker.speed * walker.pace * factor;
-            const float step = speed * remaining;
-            if (step >= distance) {
-                position = {tx, ty};
-                remaining -= distance / speed;
-                ++walker.next;
-            } else {
-                position.x += dx / distance * step;
-                position.y += dy / distance * step;
-                remaining = 0.0f;
-            }
-        }
-        if (!walker.moving()) {
-            walker.waypoints.clear();
-            walker.next = 0;
-        }
-        velocity = {(position.x - before.x) / dt, (position.y - before.y) / dt};
+    const auto* leading = view.handle();
+    if (leading == nullptr) {
+        return;
     }
+    constexpr std::size_t kChunk = 256;
+    constexpr std::size_t kMinParallel = 1024;
+    if (leading->size() < kMinParallel || parallelThreads() <= 1) {
+        // В одном потоке обход view дешевле: компоненты ведущего хранилища —
+        // без поиска.
+        for (const auto [entity, position, velocity, walker] : view.each()) {
+            if (!walker.moving()) {
+                velocity = {};
+                continue;
+            }
+            advance(nav, mud, dt, position, velocity, walker);
+        }
+        return;
+    }
+    parallelFor(leading->size(), kChunk, kMinParallel, [&](std::size_t begin, std::size_t end, int) {
+        for (std::size_t i = begin; i < end; ++i) {
+            const entt::entity entity = leading->data()[i];
+            if (!view.contains(entity)) {
+                continue;
+            }
+            auto [position, velocity, walker] = view.get(entity);
+            if (!walker.moving()) {
+                velocity = {};
+                continue;
+            }
+            advance(nav, mud, dt, position, velocity, walker);
+        }
+    });
 }
 
 } // namespace lw

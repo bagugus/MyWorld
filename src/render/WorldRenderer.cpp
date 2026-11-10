@@ -1,10 +1,13 @@
 #include "render/WorldRenderer.h"
 
+#include "render/Palette.h"
+
 #include "sim/Components.h"
+#include "sim/Family.h"
+#include "sim/Infection.h"
+#include "sim/Society.h"
 #include "sim/TimeScale.h"
 #include "sim/World.h"
-
-#include "sim/Hash.h"
 
 #include <algorithm>
 #include <cmath>
@@ -14,128 +17,52 @@ namespace lw {
 namespace {
 
 constexpr Color kBorderColor = {190, 190, 190, 255};
-constexpr Color kEntityColor = {236, 200, 92, 255};   // в пути
-constexpr Color kRestingColor = {150, 205, 225, 255};  // на месте
-constexpr Color kSleepingColor = {70, 84, 140, 255};
-constexpr Color kEatingColor = {120, 210, 110, 255};   // ест, пьёт
-constexpr Color kSearchingColor = {232, 132, 64, 255}; // ищет припасы, собирает в лесу
-constexpr Color kSocialColor = {226, 128, 196, 255};
-constexpr Color kFleeingColor = {255, 255, 255, 255};
-constexpr Color kAvengingColor = {190, 30, 40, 255}; // идёт мстить (этап 6.5)
-// Зомби: спокойные — болотные, идущие на шум — жёлто-зелёные, в погоне — красные.
-constexpr Color kZombieColor = {92, 128, 64, 255};
-constexpr Color kZombieAlertColor = {170, 190, 60, 255};
-constexpr Color kZombieChaseColor = {214, 58, 46, 255};
-// Животные — по виду, бегущие — светлее; птицы — чёрные точки.
-constexpr Color kDeerColor = {150, 98, 52, 255};
-constexpr Color kBoarColor = {86, 70, 60, 255};
-constexpr Color kHareColor = {176, 166, 150, 255};
-constexpr Color kBirdColor = {24, 24, 28, 255};
-// Тела — тёмные квадратики: человек — бурый, зомби — тёмно-болотный, туша — тёмно-коричневая.
-constexpr Color kHumanBodyColor = {110, 40, 36, 255};
-constexpr Color kZombieBodyColor = {52, 62, 36, 255};
-constexpr Color kCarcassColor = {84, 56, 36, 255};
-constexpr Color kBuildingOutline = {40, 34, 30, 255};
 
 constexpr float kEntityRadiusMeters = 0.4f;
 constexpr float kEntityMinRadiusPx = 3.0f;
 constexpr float kOutlineMinZoom = 1.5f; // пикселей на метр: мельче контур здания не виден
 
-Color buildingColor(BuildingKind kind) {
-    switch (kind) {
-    case BuildingKind::House:
-        return {198, 164, 124, 255};
-    case BuildingKind::Barn:
-        return {142, 104, 74, 255};
-    case BuildingKind::Apartment:
-        return {176, 178, 186, 255};
-    case BuildingKind::Shop:
-        return {204, 132, 92, 255};
+// Знак ивента — столб дыма: клубы сносит по ветру, они растут и тают. На общем
+// плане — ещё и кольцо в несколько пикселей, чтобы место было видно издалека.
+void drawSmoke(const World& world, const WorldEvent& event, float zoom) {
+    const float x = Map::cellCenter(event.site.x);
+    const float y = Map::cellCenter(event.site.y);
+    const Weather& weather = world.weather();
+    // Откуда дует (0 — север, 90 — восток): дым идёт в обратную сторону, ось y — на юг.
+    const float radians = weather.windFrom * DEG2RAD;
+    const float toX = -std::sin(radians);
+    const float toY = std::cos(radians);
+    const float drift = 4.0f + 2.5f * weather.windSpeed;
+    const float rise = static_cast<float>(std::fmod(GetTime() * 0.4, 1.0));
+    constexpr int kPuffs = 7;
+    for (int i = kPuffs - 1; i >= 0; --i) {
+        const float t = (static_cast<float>(i) + rise) / static_cast<float>(kPuffs);
+        const float along = t * drift * static_cast<float>(kPuffs);
+        Color color = kSmokeColor;
+        color.a = static_cast<unsigned char>(170.0f * (1.0f - t));
+        DrawCircleV({x + toX * along, y + toY * along}, 3.0f + 9.0f * t, color);
     }
-    return {198, 164, 124, 255};
+    const float ring = std::max(6.0f, 9.0f / zoom);
+    DrawRing({x, y}, ring, ring + 2.0f / zoom, 0.0f, 360.0f, 32, kSmokeColor);
 }
 
-// Люди в пути — жёлтые (бегущие — белые), на месте — по занятию; зомби — по
-// состоянию.
-Color entityColor(const entt::registry& registry, entt::entity entity) {
-    if (const auto* animal = registry.try_get<Animal>(entity)) {
-        Color color = animal->kind == AnimalKind::Deer   ? kDeerColor
-                      : animal->kind == AnimalKind::Boar ? kBoarColor
-                                                         : kHareColor;
-        if (animal->state == AnimalState::Flee) {
-            color = ColorBrightness(color, 0.35f);
-        }
-        return color;
-    }
-    if (const auto* zombie = registry.try_get<Zombie>(entity)) {
-        switch (zombie->state) {
-        case ZombieState::Chase:
-            return kZombieChaseColor;
-        case ZombieState::Investigate:
-            return kZombieAlertColor;
-        default:
-            return kZombieColor;
-        }
-    }
-    const auto* mind = registry.try_get<Mind>(entity);
-    if (mind != nullptr && mind->action == Action::Flee) {
-        return kFleeingColor;
-    }
-    if (mind != nullptr && mind->action == Action::Avenge) {
-        return kAvengingColor;
-    }
-    const auto* walker = registry.try_get<Walker>(entity);
-    if (walker == nullptr || walker->moving()) {
-        return kEntityColor;
-    }
-    if (mind == nullptr || mind->phase == ActionPhase::Travel) {
-        return kRestingColor;
-    }
-    switch (mind->action) {
-    case Action::Sleep:
-        return kSleepingColor;
-    case Action::Eat:
-    case Action::Drink:
-        return kEatingColor;
-    case Action::Scavenge:
-    case Action::Forage:
-    case Action::Steal:
-        return kSearchingColor;
-    case Action::Socialize:
-    case Action::Share:
-    case Action::Trade:
-        return kSocialColor;
-    default:
-        return kRestingColor;
-    }
-}
-
-// Стая — россыпь точек вокруг её позиции: место каждой птицы — из хеша id
-// стаи, в полёте стая растягивается, а птицы машут крыльями (чисто визуально).
+// Стая — россыпь точек вокруг её позиции (birdOffset), в полёте стая
+// растягивается, а птицы машут крыльями (чисто визуально).
 void drawFlock(const Flock& flock, EntityId id, Vector2 at, float zoom) {
     const int shown = std::min<int>(flock.birds, 16);
     const float spread = flock.flying ? 7.0f : 3.0f;
     const float dot = std::max(0.25f, 1.5f / zoom);
     const float flap = flock.flying ? static_cast<float>(GetTime()) * 9.0f : 0.0f;
     for (int i = 0; i < shown; ++i) {
-        Hasher hasher;
-        hasher.add(id);
-        hasher.add(i);
-        // У FNV младшие биты соседних i похожи: перемешать, иначе птицы встают в линию.
-        std::uint64_t bits = hasher.value();
-        bits ^= bits >> 33;
-        bits *= 0xFF51AFD7ED558CCDULL;
-        bits ^= bits >> 33;
-        const float ox = (static_cast<float>(bits & 0xFFFu) / 4095.0f * 2.0f - 1.0f) * spread;
-        const float oy = (static_cast<float>((bits >> 12) & 0xFFFu) / 4095.0f * 2.0f - 1.0f) * spread;
+        const Vector2 offset = birdOffset(id, i);
         const float bob = flock.flying ? std::sin(flap + static_cast<float>(i)) * 0.6f : 0.0f;
-        DrawCircleV({at.x + ox, at.y + oy + bob}, dot, kBirdColor);
+        DrawCircleV({at.x + offset.x * spread, at.y + offset.y * spread + bob}, dot, kBirdColor);
     }
 }
 
 } // namespace
 
-WorldRenderer::WorldRenderer(const World& world) : map_(world.map()) {}
+WorldRenderer::WorldRenderer(const World& world) : map_(world.map()), roads_(world) {}
 
 void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha) {
     const float zoom = camera.zoom;
@@ -151,6 +78,7 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
     map_.draw(visible, zoom);
     // Даже полный покров оставляет карту читаемой.
     map_.drawSnow(visible, world.weather().snowCover * 0.85f);
+    roads_.draw(world.map(), visible, zoom);
     DrawRectangleLinesEx(bounds, 2.0f / zoom, kBorderColor);
 
     for (const auto [entity, building] : world.registry().view<const Building>().each()) {
@@ -165,6 +93,36 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
         if (zoom >= kOutlineMinZoom) {
             DrawRectangleLinesEx(rect, 1.0f / zoom, kBuildingOutline);
         }
+    }
+
+    for (const auto [entity, event] : world.registry().view<const WorldEvent>().each()) {
+        if (world.tick() < event.signalUntil) {
+            drawSmoke(world, event, zoom);
+        }
+    }
+
+    // Реакция общества (этап 7.6): кордон карантина — пунктир по краю, пункт
+    // эвакуации — рамка вокруг здания и кольцо у двери, видное издалека.
+    for (const auto [entity, settlement, quarantine] :
+         world.registry().view<const Settlement, const Quarantine>().each()) {
+        const Vector2 center = {Map::cellCenter(settlement.center.x), Map::cellCenter(settlement.center.y)};
+        const float r = static_cast<float>(settlement.radius) * Map::kCellSize + kCordonMargin;
+        const float width = std::max(1.5f, 3.0f / zoom);
+        constexpr int kDashes = 36;
+        for (int i = 0; i < kDashes; i += 2) {
+            const float from = 360.0f * static_cast<float>(i) / kDashes;
+            DrawRing(center, r, r + width, from, from + 360.0f / kDashes, 4, kQuarantineColor);
+        }
+    }
+    for (const auto [entity, building, point] : world.registry().view<const Building, const EvacuationPoint>().each()) {
+        const Rectangle rect = {static_cast<float>(building.origin.x) * Map::kCellSize - 2.0f,
+                                static_cast<float>(building.origin.y) * Map::kCellSize - 2.0f,
+                                static_cast<float>(building.width) * Map::kCellSize + 4.0f,
+                                static_cast<float>(building.height) * Map::kCellSize + 4.0f};
+        DrawRectangleLinesEx(rect, std::max(0.6f, 2.0f / zoom), kEvacuationColor);
+        const Vector2 door = {Map::cellCenter(building.door.x), Map::cellCenter(building.door.y)};
+        const float ring = std::max(6.0f, 9.0f / zoom);
+        DrawRing(door, ring, ring + 2.0f / zoom, 0.0f, 360.0f, 32, kEvacuationColor);
     }
 
     // Радиус в метрах, но не меньше нескольких пикселей — чтобы существа
@@ -187,16 +145,34 @@ void WorldRenderer::draw(const World& world, const Camera2D& camera, float alpha
             drawFlock(*flock, registry.get<Id>(entity).value, at, zoom);
             continue;
         }
+        if (registry.all_of<Cache>(entity)) {
+            const auto* stock = registry.try_get<Inventory>(entity);
+            const bool empty = stock == nullptr || stock->empty();
+            const float half = radius * 1.1f;
+            const Rectangle crate = {at.x - half, at.y - half, 2.0f * half, 2.0f * half};
+            DrawRectangleRec(crate, empty ? kEmptyCacheColor : kCacheColor);
+            DrawRectangleLinesEx(crate, std::max(0.1f, 1.0f / zoom), kCacheOutline);
+            continue;
+        }
         if (const auto* corpse = registry.try_get<Corpse>(entity)) {
-            const Color color = corpse->kind == CorpseKind::Human    ? kHumanBodyColor
-                                : corpse->kind == CorpseKind::Zombie ? kZombieBodyColor
-                                                                     : kCarcassColor;
+            const Color color = corpseColor(corpse->kind);
             const float half = radius * 0.7f;
             DrawRectangleV({at.x - half, at.y - half}, {2.0f * half, 2.0f * half}, color);
             continue;
         }
-        const float size = registry.all_of<Animal>(entity) ? radius * 0.8f : radius;
-        DrawCircleV(at, size, entityColor(registry, entity));
+        // Звери и дети (этап 7.3) — кружком поменьше.
+        const float size = registry.all_of<Animal>(entity)                               ? radius * 0.8f
+                           : registry.all_of<Age>(entity) && isMinor(registry, entity) ? radius * 0.7f
+                                                                                       : radius;
+        DrawCircleV(at, size, creatureColor(registry, entity));
+        // Больной в лихорадке (этап 7.5) — оранжевым кольцом: это видно и
+        // соседям. Скрытый период на карте не виден — его показывает инспектор
+        // сценария.
+        if (const auto* wounds = registry.try_get<Wounds>(entity);
+            wounds != nullptr && registry.all_of<Person>(entity) && isFeverish(*wounds)) {
+            const float ring = std::max(0.25f, 1.5f / zoom);
+            DrawRing(at, size + 0.5f * ring, size + 1.5f * ring, 0.0f, 360.0f, 20, kFeverRingColor);
+        }
     }
 }
 

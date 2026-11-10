@@ -68,8 +68,11 @@ void PathTool::handleInput(const CameraController& camera, bool mouseFree) {
     if (!enabled_ || !mouseFree || !ctrl || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) {
         return;
     }
-    const Vector2 point = GetScreenToWorld2D(GetMousePosition(), camera.camera());
-    const std::optional<Cell> cell = pick(point.x, point.y);
+    const std::optional<Vector2> point = camera.screenToWorld(GetMousePosition());
+    if (!point) {
+        return;
+    }
+    const std::optional<Cell> cell = pick(point->x, point->y);
     if (!cell) {
         return;
     }

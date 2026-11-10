@@ -1,5 +1,6 @@
 // Природная часть карты: рельеф, вода, поверхность, растительность.
 
+#include "sim/Parallel.h"
 #include "sim/gen/GenContext.h"
 
 #include <FastNoiseLite.h>
@@ -447,29 +448,62 @@ void findMainland(Context& ctx) {
     }
 }
 
-// Расстояние в клетках (по сторонам) до ближайшей клетки, для которой isSource истинно.
+// Расстояние в клетках (по сторонам) до ближайшей клетки, для которой isSource
+// истинно; нет таких — kFar. Без препятствий обход в ширину по сторонам даёт
+// манхэттенское расстояние min(|dx| + |dy|), а оно разделимо (этап 2а.2): сначала
+// в каждой строке — до ближайшего источника в ней, затем по столбцам —
+// min(строчное + |dy|). Строки и столбцы независимы и идут параллельно; ответ —
+// тот же, что у обхода в ширину, а на 16 км вместо двух третей секунды — сотые.
 template <typename IsSource>
 void measureDistance(const Context& ctx, Grid<std::uint16_t>& distance, IsSource isSource) {
-    std::vector<Cell> queue;
-    for (int y = 0; y < ctx.height; ++y) {
-        for (int x = 0; x < ctx.width; ++x) {
-            if (isSource(ctx.map.water.at(x, y))) {
-                distance.at(x, y) = 0;
-                queue.push_back({x, y});
+    const int width = ctx.width;
+    const int height = ctx.height;
+    constexpr std::int32_t kNone = 1 << 30;
+    std::vector<std::int32_t> row(static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    const auto at = [width](int x, int y) {
+        return static_cast<std::size_t>(y) * static_cast<std::size_t>(width) + static_cast<std::size_t>(x);
+    };
+    parallelFor(static_cast<std::size_t>(height), 64, 128, [&](std::size_t begin, std::size_t end, int) {
+        for (std::size_t yy = begin; yy < end; ++yy) {
+            const int y = static_cast<int>(yy);
+            std::int32_t run = kNone;
+            for (int x = 0; x < width; ++x) {
+                run = isSource(ctx.map.water.at(x, y)) ? 0 : std::min(run + 1, kNone);
+                row[at(x, y)] = run;
+            }
+            run = kNone;
+            for (int x = width - 1; x >= 0; --x) {
+                run = std::min(std::min(run + 1, kNone), row[at(x, y)]);
+                row[at(x, y)] = run;
             }
         }
-    }
-    for (std::size_t i = 0; i < queue.size(); ++i) {
-        const Cell cell = queue[i];
-        const auto next = static_cast<std::uint16_t>(distance.at(cell.x, cell.y) + 1);
-        for (int d = 0; d < 4; ++d) {
-            const Cell neighbor{cell.x + kDx[d], cell.y + kDy[d]};
-            if (ctx.map.contains(neighbor) && distance.at(neighbor.x, neighbor.y) == kFar) {
-                distance.at(neighbor.x, neighbor.y) = next;
-                queue.push_back(neighbor);
+    });
+    // По столбцам — полосами в kStrip столбцов: строки полосы идут подряд в памяти.
+    constexpr int kStrip = 64;
+    const int strips = (width + kStrip - 1) / kStrip;
+    parallelFor(static_cast<std::size_t>(strips), 1, 4, [&](std::size_t begin, std::size_t end, int) {
+        std::int32_t run[kStrip];
+        for (std::size_t strip = begin; strip < end; ++strip) {
+            const int x0 = static_cast<int>(strip) * kStrip;
+            const int x1 = std::min(x0 + kStrip, width);
+            std::fill(run, run + kStrip, kNone);
+            for (int y = 0; y < height; ++y) {
+                for (int x = x0; x < x1; ++x) {
+                    std::int32_t& r = run[x - x0];
+                    r = std::min(std::min(r + 1, kNone), row[at(x, y)]);
+                    row[at(x, y)] = r;
+                }
+            }
+            std::fill(run, run + kStrip, kNone);
+            for (int y = height - 1; y >= 0; --y) {
+                for (int x = x0; x < x1; ++x) {
+                    std::int32_t& r = run[x - x0];
+                    r = std::min(std::min(r + 1, kNone), row[at(x, y)]);
+                    distance.at(x, y) = r >= static_cast<std::int32_t>(kFar) ? kFar : static_cast<std::uint16_t>(r);
+                }
             }
         }
-    }
+    });
 }
 
 } // namespace
@@ -497,43 +531,50 @@ void generateElevation(Context& ctx) {
     const FastNoiseLite coast = makeFbm(rng, kCoastWavelength, 3);
     const FastNoiseLite hills = makeFbm(rng, kHillWavelength, 5);
 
-    for (int y = 0; y < ctx.height; ++y) {
-        const float wy = Map::cellCenter(y);
-        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(ctx.height) - 0.5f;
-        for (int x = 0; x < ctx.width; ++x) {
-            const float wx = Map::cellCenter(x);
-            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(ctx.width) - 0.5f;
+    // Клетка зависит только от своих координат и шума (GetNoise ничего не
+    // меняет), поэтому ряды считаются параллельно (этап 2а.1): карта та же.
+    parallelFor(static_cast<std::size_t>(ctx.height), 16, 64, [&](std::size_t begin, std::size_t end, int) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y) {
+            const float wy = Map::cellCenter(y);
+            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(ctx.height) - 0.5f;
+            for (int x = 0; x < ctx.width; ++x) {
+                const float wx = Map::cellCenter(x);
+                const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(ctx.width) - 0.5f;
 
-            const float toSea = (u * seaX + v * seaY) / extent;
-            const float c = kCoastline - toSea + kCoastWarp * coast.GetNoise(wx, wy);
-            const float relief = hills.GetNoise(wx, wy);
+                const float toSea = (u * seaX + v * seaY) / extent;
+                const float c = kCoastline - toSea + kCoastWarp * coast.GetNoise(wx, wy);
+                const float relief = hills.GetNoise(wx, wy);
 
-            float meters = 0.0f;
-            if (c < 0.0f) {
-                meters = c * kSeaSlope + relief * kShoreRelief;
-            } else {
-                // У берега равнина, дальше нагорье с холмами.
-                meters = c * kPlainRise + kUplandHeight * smoothstep(c / kUplandAt) +
-                         relief * (kShoreRelief + kHillRelief * smoothstep(c / kHillsFullAt));
+                float meters = 0.0f;
+                if (c < 0.0f) {
+                    meters = c * kSeaSlope + relief * kShoreRelief;
+                } else {
+                    // У берега равнина, дальше нагорье с холмами.
+                    meters = c * kPlainRise + kUplandHeight * smoothstep(c / kUplandAt) +
+                             relief * (kShoreRelief + kHillRelief * smoothstep(c / kHillsFullAt));
+                }
+                const float units = std::round(meters / Map::kElevationStep);
+                map.elevation.at(x, y) = static_cast<std::int16_t>(std::clamp(units, -30000.0f, 30000.0f));
             }
-            const float units = std::round(meters / Map::kElevationStep);
-            map.elevation.at(x, y) = static_cast<std::int16_t>(std::clamp(units, -30000.0f, 30000.0f));
         }
-    }
+    });
 }
 
 void generateWater(Context& ctx) {
-    floodSea(ctx);
-    const Drainage drainage = computeDrainage(ctx);
-    fillDepressions(ctx, drainage);
+    timed(ctx, "world/map/water/sea", [&] { floodSea(ctx); });
+    Drainage drainage;
+    timed(ctx, "world/map/water/drainage", [&] { drainage = computeDrainage(ctx); });
+    timed(ctx, "world/map/water/lakes", [&] { fillDepressions(ctx, drainage); });
     // Уклон считаем до рек: врезанные русла не должны выглядеть обрывами.
-    computeSlope(ctx);
-    carveRivers(ctx, drainage);
+    timed(ctx, "world/map/water/slope", [&] { computeSlope(ctx); });
+    timed(ctx, "world/map/water/rivers", [&] { carveRivers(ctx, drainage); });
 
-    findMainland(ctx);
-    measureDistance(ctx, ctx.seaDistance, [](Water water) { return water == Water::Sea; });
-    measureDistance(ctx, ctx.freshDistance,
-                    [](Water water) { return water == Water::Lake || water == Water::River; });
+    timed(ctx, "world/map/water/mainland", [&] { findMainland(ctx); });
+    timed(ctx, "world/map/water/distance", [&] {
+        measureDistance(ctx, ctx.seaDistance, [](Water water) { return water == Water::Sea; });
+        measureDistance(ctx, ctx.freshDistance,
+                        [](Water water) { return water == Water::Lake || water == Water::River; });
+    });
 }
 
 void generateGround(Context& ctx) {
@@ -610,29 +651,32 @@ void generateVegetation(Context& ctx) {
     // Край вырубки вокруг поселения неровный: где-то лес подходит к домам,
     // где-то отступает дальше.
     const FastNoiseLite edge = makeFbm(ctx.rng, kClearingWavelength, 3);
-    for (int y = 0; y < ctx.height; ++y) {
-        for (int x = 0; x < ctx.width; ++x) {
-            if (map.water.at(x, y) != Water::None || map.ground.at(x, y) != Ground::Grass ||
-                ctx.slope.at(x, y) > kForestMaxSlope) {
-                continue;
-            }
-            const float wx = Map::cellCenter(x);
-            const float wy = Map::cellCenter(y);
-            if (proximity.at(x, y) != 255) {
-                const float cleared = static_cast<float>(kClearingEdge) +
-                                      static_cast<float>(kClearingRagged) * edge.GetNoise(wx, wy);
-                if (static_cast<float>(proximity.at(x, y)) < cleared) {
+    // Лес в клетке — только от её слоёв и шума: ряды параллельно (этап 2а.1).
+    parallelFor(static_cast<std::size_t>(ctx.height), 16, 64, [&](std::size_t begin, std::size_t end, int) {
+        for (int y = static_cast<int>(begin); y < static_cast<int>(end); ++y) {
+            for (int x = 0; x < ctx.width; ++x) {
+                if (map.water.at(x, y) != Water::None || map.ground.at(x, y) != Ground::Grass ||
+                    ctx.slope.at(x, y) > kForestMaxSlope) {
                     continue;
                 }
-            }
-            const float upland =
-                std::clamp(map.elevationMeters({x, y}) / kForestUplandHeight, 0.0f, 1.0f);
-            const float density = forest.GetNoise(wx, wy) + kForestBias + kForestUplandBias * upland;
-            if (density > 0.0f) {
-                map.cover.at(x, y) = Cover::Forest;
+                const float wx = Map::cellCenter(x);
+                const float wy = Map::cellCenter(y);
+                if (proximity.at(x, y) != 255) {
+                    const float cleared = static_cast<float>(kClearingEdge) +
+                                          static_cast<float>(kClearingRagged) * edge.GetNoise(wx, wy);
+                    if (static_cast<float>(proximity.at(x, y)) < cleared) {
+                        continue;
+                    }
+                }
+                const float upland =
+                    std::clamp(map.elevationMeters({x, y}) / kForestUplandHeight, 0.0f, 1.0f);
+                const float density = forest.GetNoise(wx, wy) + kForestBias + kForestUplandBias * upland;
+                if (density > 0.0f) {
+                    map.cover.at(x, y) = Cover::Forest;
+                }
             }
         }
-    }
+    });
 }
 
 } // namespace lw::gen

@@ -1,5 +1,6 @@
 // Выбор мест для городов и деревень.
 
+#include "sim/Parallel.h"
 #include "sim/gen/GenContext.h"
 
 #include <algorithm>
@@ -151,70 +152,88 @@ void placeSettlements(Context& ctx) {
 
     // Оценка каждого блока как центра поселения данного вида; непригодные отброшены.
     const auto findCandidates = [&](const KindRules& rules) {
-        std::vector<Candidate> candidates;
         const int radius = rules.maxRadius;
         const int reach = (radius + kBlock - 1) / kBlock;
-        for (int by = 0; by < blocksY; ++by) {
-            for (int bx = 0; bx < blocksX; ++bx) {
-                const Cell center{bx * kBlock + kBlock / 2, by * kBlock + kBlock / 2};
-                // Случайная добавка тянется для каждого блока, чтобы оценка
-                // одного не зависела от пригодности остальных.
-                const float jitter = ctx.rng.unit() * rules.jitter;
+        // Случайная добавка тянется для каждого блока по порядку, чтобы оценка
+        // одного не зависела от пригодности остальных; заранее — оценка блоков
+        // затем идёт параллельно (этап 2а.2).
+        std::vector<float> jitters(static_cast<std::size_t>(blocksX) * static_cast<std::size_t>(blocksY));
+        for (float& jitter : jitters) {
+            jitter = ctx.rng.unit() * rules.jitter;
+        }
+        std::vector<Candidate> scored(jitters.size());
+        std::vector<std::uint8_t> fits(jitters.size(), 0);
+        parallelFor(static_cast<std::size_t>(blocksY), 4, 8, [&](std::size_t begin, std::size_t end, int) {
+            for (std::size_t row = begin; row < end; ++row) {
+                const int by = static_cast<int>(row);
+                for (int bx = 0; bx < blocksX; ++bx) {
+                    const std::size_t slot = static_cast<std::size_t>(by) * static_cast<std::size_t>(blocksX) +
+                                             static_cast<std::size_t>(bx);
+                    const Cell center{bx * kBlock + kBlock / 2, by * kBlock + kBlock / 2};
+                    const float jitter = jitters[slot];
 
-                const int margin = radius + kEdgeMargin;
-                if (center.x < margin || center.y < margin || center.x >= ctx.width - margin ||
-                    center.y >= ctx.height - margin) {
-                    continue;
-                }
-                if (!ctx.mainland.at(center.x, center.y) ||
-                    map.water.at(center.x, center.y) != Water::None) {
-                    continue;
-                }
-
-                int cells = 0;
-                int blocked = 0;
-                int river = 0;
-                int slopeSum = 0;
-                float low = blocks.at(bx, by).elevation;
-                float high = low;
-                bool inside = true;
-                for (int dy = -reach; dy <= reach && inside; ++dy) {
-                    for (int dx = -reach; dx <= reach; ++dx) {
-                        if (dx * dx + dy * dy > reach * reach) {
-                            continue;
-                        }
-                        if (!blocks.contains(bx + dx, by + dy)) {
-                            inside = false;
-                            break;
-                        }
-                        const Block& block = blocks.at(bx + dx, by + dy);
-                        cells += kBlock * kBlock;
-                        blocked += block.blocked;
-                        river += block.river;
-                        slopeSum += block.slopeSum;
-                        low = std::min(low, block.elevation);
-                        high = std::max(high, block.elevation);
+                    const int margin = radius + kEdgeMargin;
+                    if (center.x < margin || center.y < margin || center.x >= ctx.width - margin ||
+                        center.y >= ctx.height - margin) {
+                        continue;
                     }
-                }
-                if (!inside) {
-                    continue;
-                }
+                    if (!ctx.mainland.at(center.x, center.y) ||
+                        map.water.at(center.x, center.y) != Water::None) {
+                        continue;
+                    }
 
-                const float total = static_cast<float>(cells);
-                const float water = (static_cast<float>(blocked) + 0.5f * static_cast<float>(river)) / total;
-                const float slope = static_cast<float>(slopeSum) / total;
-                if (water > rules.maxWater || slope > rules.maxSlope || high - low > rules.maxRelief) {
-                    continue;
-                }
+                    int cells = 0;
+                    int blocked = 0;
+                    int river = 0;
+                    int slopeSum = 0;
+                    float low = blocks.at(bx, by).elevation;
+                    float high = low;
+                    bool inside = true;
+                    for (int dy = -reach; dy <= reach && inside; ++dy) {
+                        for (int dx = -reach; dx <= reach; ++dx) {
+                            if (dx * dx + dy * dy > reach * reach) {
+                                continue;
+                            }
+                            if (!blocks.contains(bx + dx, by + dy)) {
+                                inside = false;
+                                break;
+                            }
+                            const Block& block = blocks.at(bx + dx, by + dy);
+                            cells += kBlock * kBlock;
+                            blocked += block.blocked;
+                            river += block.river;
+                            slopeSum += block.slopeSum;
+                            low = std::min(low, block.elevation);
+                            high = std::max(high, block.elevation);
+                        }
+                    }
+                    if (!inside) {
+                        continue;
+                    }
 
-                // Вода рядом — плюс, а городу особенно нужен берег моря (порт).
-                const float toSea = static_cast<float>(ctx.seaDistance.at(center.x, center.y) - radius);
-                const float toWater = std::min(
-                    toSea, static_cast<float>(ctx.freshDistance.at(center.x, center.y) - radius));
-                float score = 1.0f - slope / rules.maxSlope;
-                score += 0.6f * (1.0f - std::clamp(toWater / kWaterNear, 0.0f, 1.0f));
-                score += rules.coastBonus * (1.0f - std::clamp(toSea / kCoastNear, 0.0f, 1.0f));
-                candidates.push_back({center, score + jitter});
+                    const float total = static_cast<float>(cells);
+                    const float water = (static_cast<float>(blocked) + 0.5f * static_cast<float>(river)) / total;
+                    const float slope = static_cast<float>(slopeSum) / total;
+                    if (water > rules.maxWater || slope > rules.maxSlope || high - low > rules.maxRelief) {
+                        continue;
+                    }
+
+                    // Вода рядом — плюс, а городу особенно нужен берег моря (порт).
+                    const float toSea = static_cast<float>(ctx.seaDistance.at(center.x, center.y) - radius);
+                    const float toWater = std::min(
+                        toSea, static_cast<float>(ctx.freshDistance.at(center.x, center.y) - radius));
+                    float score = 1.0f - slope / rules.maxSlope;
+                    score += 0.6f * (1.0f - std::clamp(toWater / kWaterNear, 0.0f, 1.0f));
+                    score += rules.coastBonus * (1.0f - std::clamp(toSea / kCoastNear, 0.0f, 1.0f));
+                    scored[slot] = {center, score + jitter};
+                    fits[slot] = 1;
+                }
+            }
+        });
+        std::vector<Candidate> candidates;
+        for (std::size_t slot = 0; slot < scored.size(); ++slot) {
+            if (fits[slot] != 0) {
+                candidates.push_back(scored[slot]);
             }
         }
         return candidates;
@@ -231,26 +250,39 @@ void placeSettlements(Context& ctx) {
             return;
         }
         const std::vector<Candidate> candidates = findCandidates(rules);
+        // У кандидата — можно ли (не ближе допустимого ни к одному месту) и
+        // расстояние до ближайшего места; с каждым новым местом — только сверка
+        // с ним, а не со всеми (этап 2а.2: на 16 км кандидатов сотни тысяч).
+        std::vector<float> nearest(candidates.size(), kSpreadDistance);
+        std::vector<std::uint8_t> allowed(candidates.size(), 1);
+        const auto account = [&](const SettlementSite& site) {
+            const float limit = static_cast<float>(spacing(rules.kind, site.kind));
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                if (allowed[i] == 0) {
+                    continue;
+                }
+                const float dx = static_cast<float>(candidates[i].center.x - site.center.x);
+                const float dy = static_cast<float>(candidates[i].center.y - site.center.y);
+                const float distance = std::sqrt(dx * dx + dy * dy);
+                if (distance < limit) {
+                    allowed[i] = 0;
+                    continue;
+                }
+                nearest[i] = std::min(nearest[i], distance);
+            }
+        };
+        for (const SettlementSite& site : ctx.out.settlements) {
+            account(site);
+        }
         for (int n = 0; n < wanted; ++n) {
             const Candidate* best = nullptr;
             float bestScore = 0.0f;
-            for (const Candidate& candidate : candidates) {
-                float nearest = kSpreadDistance;
-                bool allowed = true;
-                for (const SettlementSite& site : ctx.out.settlements) {
-                    const float dx = static_cast<float>(candidate.center.x - site.center.x);
-                    const float dy = static_cast<float>(candidate.center.y - site.center.y);
-                    const float distance = std::sqrt(dx * dx + dy * dy);
-                    if (distance < static_cast<float>(spacing(rules.kind, site.kind))) {
-                        allowed = false;
-                        break;
-                    }
-                    nearest = std::min(nearest, distance);
-                }
-                if (!allowed) {
+            for (std::size_t i = 0; i < candidates.size(); ++i) {
+                if (allowed[i] == 0) {
                     continue;
                 }
-                const float score = candidate.score + kSpreadWeight * nearest / kSpreadDistance;
+                const Candidate& candidate = candidates[i];
+                const float score = candidate.score + kSpreadWeight * nearest[i] / kSpreadDistance;
                 if (best == nullptr || score > bestScore) {
                     best = &candidate;
                     bestScore = score;
@@ -266,6 +298,7 @@ void placeSettlements(Context& ctx) {
             site.radius = ctx.rng.rangeInt(rules.minRadius, rules.maxRadius);
             site.name = names.take(ctx.rng);
             ctx.out.settlements.push_back(std::move(site));
+            account(ctx.out.settlements.back());
         }
     };
 

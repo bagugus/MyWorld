@@ -54,7 +54,7 @@ enum class ChronicleKind : std::uint8_t {
     GroupFormed,   // собрал группу object и возглавил её (этап 6.4)
     JoinedGroup,   // вступил в группу object (вожак — third); a = 1 — переехал на её базу
     LeftGroup,     // ушёл из группы object (вожак — third)
-    Expelled,      // изгнал object из группы third
+    Expelled,      // изгнал object из группы third; a = 1 — за то, что заражён (этап 7.6)
     LedGroup,      // возглавил группу object вместо third: a = 0 — тот погиб, 1 — сместил его
     GroupDisbanded, // группа распалась (subject — группа); object — кто остался
     Shared,        // поделился с object: a — что (ItemKind) и вернул ли долг (+256), b — сколько (этап 6.5)
@@ -64,6 +64,33 @@ enum class ChronicleKind : std::uint8_t {
     BetrayedBy,    // его предал object: обокрал (a вещей) или сбежал из группы
     AssaultedBy,   // на него напал object
     Avenged,       // отомстил object: a = 1 — убил, 0 — избил
+    EventBegan,    // ивент (subject) начался у поселения object: a — вид (EventKind), b — грузов (этап 7.1)
+    LearnedOfEvent, // узнал об ивенте object: a — как (EventClue); third — кто рассказал
+    Salvaged,      // забрал из груза object (или, если груза нет, пришёл к ивенту object): еды a, воды b
+    EventEnded,    // ивент (subject) закончился: a — грузов с добром осталось
+    Employed,      // получил работу в object: a — профессия (Profession) (этап 7.2)
+    Bought,        // купил в магазине object еды a, воды b (оба 0 — полки пусты); third — продавец
+    SoldOut,       // в магазине (subject) кончилась еда; object — кто купил последнюю
+    SawDoctor,     // лечился в больнице object: здоровья +a %, b = 1 — остановили кровь; third — врач
+    PhaseBegan,    // сценарий (subject) перешёл в фазу a (WorldPhase); b — пострадавших к этому часу (этап 7.4)
+    LeftWork,      // бросил работу в object: в фазе a (WorldPhase) на работу больше не выходит
+    Orphaned,      // ребёнок остался без родителей: object — кто погиб последним (этап 7.3)
+    TookIn,        // взял к себе ребёнка object: a — кем он ему (kinCode), b = 1 — в дом группы
+    PatientZero,   // заразился неизвестно где — нулевой пациент сценария object (a = 0) или новый завозной случай (a = 1) (этап 7.5)
+    Infected,      // заразился от object (больного или тела): a — как (InfectionRoute)
+    Alarmed,       // встревожился до стадии a (AlarmStage): b — как узнал (AlarmClue); object — кто рассказал или кого видел (этап 7.6)
+    Broadcast,     // сценарий (subject) передал по радио и телевизору сообщение a (BroadcastKind); object — поселение, если о нём
+    QuarantineDeclared, // в поселении (subject) объявлен карантин: a — случаев; object — сценарий
+    QuarantineLifted,   // в поселении (subject) снят карантин: a = 0 — случаев нет сутки, 1 — власти не стало
+    BrokeQuarantine,    // прорвался через кордон карантина поселения object: вышел или зашёл
+    EvacuationOpened,   // в здании (subject) открыт пункт эвакуации поселения object: a — солдат прибыло
+    Evacuated,     // уехал с колонной из пункта object: a = 1 — солдат (армия уходит)
+    EvacuationRefused, // не пустили в колонну в пункте object: a — почему (0 — заметно болен); third — солдат
+    ConvoyLeft,    // из пункта (subject) ушла колонна: a — увезла людей, b — осталось ждать
+    EvacuationEnded, // пункт (subject) закрыт: a — всего увезли
+    StayedBehind,  // солдат остался, когда армия ушла из пункта object
+    Reunited,      // добрался до своих — object: a — кем он ему (kinCode), b = 1 — переехал к нему, 0 — забрал ребёнка
+    EventCrew,     // был среди экипажа ивента object (этап 7.7): a = 1 — выжил, 0 — погиб; b = 1 — укушен
     Count
 };
 
@@ -98,6 +125,8 @@ public:
     }
     // Накопленный хеш всех записей: считать заново при каждом stateHash дорого.
     std::uint64_t hash() const { return hash_; }
+    // Память журнала и индекса по id, байты (оценка; для замеров).
+    std::size_t memoryBytes() const;
 
 private:
     std::vector<ChronicleEvent> events_;

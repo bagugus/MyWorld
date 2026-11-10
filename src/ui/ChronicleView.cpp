@@ -1,6 +1,8 @@
 ﻿#include "ui/ChronicleView.h"
 
 #include "sim/Calendar.h"
+#include "sim/Events.h"
+#include "sim/Family.h"
 #include "sim/World.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
@@ -8,6 +10,8 @@
 #include <imgui.h>
 
 #include <cstdio>
+#include <string>
+#include <unordered_map>
 
 namespace lw::ui {
 
@@ -22,8 +26,24 @@ struct Phrase {
     bool withThird = false;
     // Третий участник — тот, чью биографию смотрят: вместо ссылки на него самого.
     const char* thirdSelf = "его";
-    char tail[64] = "";
+    char tail[96] = "";
 };
+
+// Склеенная строка с постоянным адресом: глагол события с родством («нашёл
+// тело сына») — Phrase хранит только указатели.
+const char* joined(const char* head, const char* word) {
+    static std::unordered_map<std::string, std::string> cache; // узлы не переезжают
+    std::string key = std::string(head) + word;
+    const auto [it, inserted] = cache.try_emplace(key, key);
+    return it->second.c_str();
+}
+
+// Кем приходится по коду родства (sim/Family.h), в падеже; nullptr — не родня.
+const char* kinOfCode(std::int32_t code, Case grammaticalCase) {
+    KinKind kind = KinKind::Count;
+    bool female = false;
+    return decodeKin(code, kind, female) ? kinWord(kind, female, grammaticalCase) : nullptr;
+}
 
 // Поступок для «видел, как X …» и «узнал, что X …» (MemoryKind).
 const char* deedVerb(std::int32_t kind) {
@@ -195,7 +215,7 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.verb = "встал зомби";
         break;
     case ChronicleKind::Feverish:
-        phrase.verb = "слёг в лихорадке от укуса";
+        phrase.verb = "слёг в лихорадке";
         break;
     case ChronicleKind::FoundWeapon:
         phrase.verb = "нашёл оружие:";
@@ -235,7 +255,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— заступился в схватке с зомби");
         break;
     case ChronicleKind::AbandonedBy:
-        phrase.verb = "не простит";
+        if (const char* kin = kinOfCode(event.b, Case::Accusative)) {
+            phrase.verb = joined("не простит ", kin);
+        } else {
+            phrase.verb = "не простит";
+        }
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— убежал, бросив его зомби");
         break;
@@ -245,7 +269,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         std::snprintf(phrase.tail, sizeof(phrase.tail), "— взято вещей: %d", event.a);
         break;
     case ChronicleKind::Mourned:
-        phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
+        if (const char* kin = kinOfCode(event.b, Case::Genitive)) {
+            phrase.verb = joined(event.a == 1 ? "нашёл тело " : "узнал о гибели ", kin);
+        } else {
+            phrase.verb = event.a == 1 ? "нашёл тело близкого" : "узнал о гибели близкого";
+        }
         phrase.withObject = true;
         if (event.third != kInvalidId) {
             phrase.middle = "— рассказал";
@@ -254,7 +282,11 @@ Phrase phraseOf(const ChronicleEvent& event) {
         }
         break;
     case ChronicleKind::SawTurned:
-        phrase.verb = "узнал в зомби близкого";
+        if (const char* kin = kinOfCode(event.b, Case::Accusative)) {
+            phrase.verb = joined("узнал в зомби ", kin);
+        } else {
+            phrase.verb = "узнал в зомби близкого";
+        }
         phrase.withObject = true;
         break;
     case ChronicleKind::Witnessed:
@@ -298,6 +330,9 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.withObject = true;
         phrase.middle = "из группы";
         phrase.withThird = true;
+        if (event.a == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— заражён");
+        }
         break;
     case ChronicleKind::LedGroup:
         phrase.verb = "возглавил группу";
@@ -358,6 +393,211 @@ Phrase phraseOf(const ChronicleEvent& event) {
         phrase.withObject = true;
         std::snprintf(phrase.tail, sizeof(phrase.tail), "%s", event.a == 1 ? "— убил" : "— избил");
         break;
+    case ChronicleKind::EventBegan:
+        phrase.verb = event.object != kInvalidId ? "— ивент у поселения" : "— ивент:";
+        phrase.withObject = event.object != kInvalidId;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%s%s, грузов: %d",
+                      event.object != kInvalidId ? "— " : "",
+                      eventKindName(static_cast<EventKind>(event.a)), event.b);
+        break;
+    case ChronicleKind::LearnedOfEvent:
+        phrase.verb = "узнал об ивенте";
+        phrase.withObject = true;
+        if (static_cast<EventClue>(event.a) == EventClue::Told && event.third != kInvalidId) {
+            phrase.middle = "— рассказал";
+            phrase.withThird = true;
+            phrase.thirdSelf = "он";
+        } else {
+            phrase.middle = static_cast<EventClue>(event.a) == EventClue::Heard ? "— услышал гул"
+                                                                                 : "— увидел дым";
+        }
+        break;
+    case ChronicleKind::Salvaged:
+        phrase.verb = "добрался до груза";
+        phrase.withObject = true;
+        if (event.a == 0 && event.b == 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— пусто, опоздал");
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        }
+        break;
+    case ChronicleKind::EventEnded:
+        phrase.verb = "— ивент закончился";
+        if (event.a > 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "; грузов с добром осталось: %d",
+                          event.a);
+        }
+        break;
+    case ChronicleKind::Employed:
+        phrase.verb = "получил работу:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      professionName(static_cast<Profession>(event.a)));
+        break;
+    case ChronicleKind::Bought:
+        phrase.verb = "купил в магазине";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "у";
+            phrase.withThird = true;
+            phrase.thirdSelf = "него";
+        }
+        if (event.a == 0 && event.b == 0) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— ничего: полки пусты");
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— еды %d, воды %d", event.a, event.b);
+        }
+        break;
+    case ChronicleKind::SoldOut:
+        phrase.verb = "— кончилась еда, последнюю купил";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::SawDoctor:
+        phrase.verb = "лечился в больнице";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "у";
+            phrase.withThird = true;
+            phrase.thirdSelf = "него";
+        }
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— здоровья +%d %%%s", event.a,
+                      event.b == 1 ? ", остановили кровь" : "");
+        break;
+    case ChronicleKind::PhaseBegan:
+        phrase.verb = "— началась фаза:";
+        if (static_cast<WorldPhase>(event.a) == WorldPhase::Peace) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
+                          phaseName(static_cast<WorldPhase>(event.a)));
+        } else {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "%s; пострадавших: %d",
+                          phaseName(static_cast<WorldPhase>(event.a)), event.b);
+        }
+        break;
+    case ChronicleKind::LeftWork:
+        phrase.verb = "бросил работу:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      phaseName(static_cast<WorldPhase>(event.a)));
+        break;
+    case ChronicleKind::Orphaned:
+        phrase.verb = "остался сиротой: не стало";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::TookIn:
+        if (const char* kin = kinOfCode(event.a, Case::Accusative)) {
+            phrase.verb = joined("взял к себе ", kin);
+        } else {
+            phrase.verb = "взял к себе ребёнка";
+        }
+        phrase.withObject = true;
+        if (event.b == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— в дом своей группы");
+        }
+        break;
+    case ChronicleKind::PatientZero:
+        phrase.verb = event.a == 1 ? "заразился неизвестно где — новый завозной случай"
+                                   : "заразился первым — нулевой пациент; где, неизвестно";
+        break;
+    case ChronicleKind::Infected:
+        phrase.verb = "заразился от";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s",
+                      infectionRouteText(static_cast<InfectionRoute>(event.a)));
+        break;
+    case ChronicleKind::Alarmed: {
+        const auto clue = static_cast<AlarmClue>(event.b);
+        switch (clue) {
+        case AlarmClue::Told:
+            phrase.verb = "узнал о беде от";
+            break;
+        case AlarmClue::Broadcast:
+            phrase.verb = "услышал по радио и телевизору:";
+            break;
+        case AlarmClue::Fever:
+            phrase.verb = "слёг в жару, не зная чем:";
+            break;
+        default:
+            phrase.verb = joined(alarmClueText(clue), ":");
+            break;
+        }
+        phrase.withObject = clue != AlarmClue::Broadcast && clue != AlarmClue::Fever && event.object != kInvalidId;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%s%s", phrase.withObject ? "— " : "",
+                      alarmStageText(static_cast<AlarmStage>(event.a)));
+        break;
+    }
+    case ChronicleKind::Broadcast:
+        if (event.object != kInvalidId) {
+            phrase.verb = "— передача: карантин в поселении";
+            phrase.withObject = true;
+        } else {
+            phrase.verb = "— передача по радио и телевизору:";
+        }
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "«%s»", broadcastText(static_cast<BroadcastKind>(event.a)));
+        break;
+    case ChronicleKind::QuarantineDeclared:
+        phrase.verb = "— объявлен карантин";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— случаев: %d", event.a);
+        break;
+    case ChronicleKind::QuarantineLifted:
+        phrase.verb = "— снят карантин";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "%s",
+                      event.a == 1 ? "— власти больше нет" : "— сутки без новых случаев");
+        break;
+    case ChronicleKind::BrokeQuarantine:
+        phrase.verb = "прорвался через кордон карантина:";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::EvacuationOpened:
+        phrase.verb = "— открыт пункт эвакуации:";
+        phrase.withObject = true;
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— прибыло солдат: %d", event.a);
+        break;
+    case ChronicleKind::Evacuated:
+        phrase.verb = event.a == 1 ? "ушёл с армией из пункта" : "эвакуирован — уехал с колонной из пункта";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::EvacuationRefused:
+        phrase.verb = "не пустили в колонну в пункте";
+        phrase.withObject = true;
+        if (event.third != kInvalidId) {
+            phrase.middle = "— не пустил";
+            phrase.withThird = true;
+        }
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "— заметно болен");
+        break;
+    case ChronicleKind::ConvoyLeft:
+        phrase.verb = "— ушла колонна:";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "увезла %d, осталось ждать %d", event.a, event.b);
+        break;
+    case ChronicleKind::EvacuationEnded:
+        phrase.verb = "— пункт эвакуации закрыт:";
+        std::snprintf(phrase.tail, sizeof(phrase.tail), "всего увезли %d", event.a);
+        break;
+    case ChronicleKind::StayedBehind:
+        phrase.verb = "остался, когда армия ушла из пункта";
+        phrase.withObject = true;
+        break;
+    case ChronicleKind::Reunited:
+        if (event.b == 1) {
+            phrase.verb = "переехал к своим:";
+            phrase.withObject = true;
+            if (const char* kin = kinOfCode(event.a, Case::Nominative)) {
+                std::snprintf(phrase.tail, sizeof(phrase.tail), "— %s", kin);
+            }
+        } else {
+            const char* kin = kinOfCode(event.a, Case::Accusative);
+            phrase.verb = kin != nullptr ? joined("забрал ", kin) : "забрал ребёнка";
+            phrase.withObject = true;
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— домой");
+        }
+        break;
+    case ChronicleKind::EventCrew:
+        phrase.verb = event.a == 1 ? "выжил — ивент" : "погиб — ивент";
+        phrase.withObject = true;
+        if (event.b == 1) {
+            std::snprintf(phrase.tail, sizeof(phrase.tail), "— укушен");
+        }
+        break;
     case ChronicleKind::Count:
         break;
     }
@@ -404,6 +644,33 @@ EntityId drawChronicleEvent(const ChronicleEvent& event, EntityId self) {
         ImGui::TextUnformatted(phrase.tail);
     }
     return clicked;
+}
+
+std::string chronicleEventText(const ChronicleEvent& event, EntityId self) {
+    const Phrase phrase = phraseOf(event);
+    std::string text;
+    const auto add = [&text](const std::string& part) {
+        if (part.empty()) {
+            return;
+        }
+        if (!text.empty()) {
+            text += ' ';
+        }
+        text += part;
+    };
+    if (event.subject != self) {
+        add(idLabel(event.subject));
+    }
+    add(phrase.verb);
+    if (phrase.withObject && event.object != self) {
+        add(idLabel(event.object));
+    }
+    add(phrase.middle);
+    if (phrase.withThird && event.third != kInvalidId) {
+        add(event.third == self ? std::string(phrase.thirdSelf) : idLabel(event.third));
+    }
+    add(phrase.tail);
+    return text;
 }
 
 void drawChroniclePanel(const World& world, Inspector& inspector) {

@@ -1,7 +1,9 @@
 #include "sim/Memory.h"
 
+#include "sim/Family.h"
 #include "sim/Perception.h"
 #include "sim/Relations.h"
+#include "sim/Scenario.h"
 #include "sim/World.h"
 
 #include <algorithm>
@@ -52,6 +54,9 @@ constexpr float kBystanderConcern = 0.1f;
 constexpr float kWitnessMemory = 0.5f;
 // Товарищ по группе (этап 6.4) небезразличен ещё на столько.
 constexpr float kGroupConcern = 0.3f;
+// Пока кража и нападение — преступление (фаза мира, этап 7.4), пострадавший
+// небезразличен свидетелю не меньше чем на столько.
+constexpr float kLawConcern = 0.3f;
 // Ради меньших долга и обиды незнакомца не запоминают в лицо.
 constexpr float kMinBondEffect = 0.05f;
 // Сколько вещей взял вор, по слухам неизвестно: считается столько.
@@ -152,6 +157,11 @@ const Traits& traitsOf(const entt::registry& registry, entt::entity entity) {
 
 bool isDeed(MemoryKind kind) {
     return kind != MemoryKind::Bereaved && kind != MemoryKind::Turned;
+}
+
+bool isCrime(MemoryKind kind) {
+    return kind == MemoryKind::Robbed || kind == MemoryKind::Betrayed ||
+           kind == MemoryKind::Assaulted || kind == MemoryKind::Killed;
 }
 
 bool remember(Memories& memories, const Memory& memory) {
@@ -257,8 +267,13 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
     const Traits& traits = traitsOf(registry, self);
     const Impression impression = impressionOf(kind, traits, close, mourned, a);
     // Чужой поступок весит столько, насколько небезразличен пострадавший;
-    // слух — меньше и по доверию к рассказчику.
-    const float concern = own ? 1.0f : concernFor(world, self, account.victim);
+    // слух — меньше и по доверию к рассказчику. Пока есть закон (этап 7.4),
+    // кража, нападение и убийство — преступление: их осуждают и тогда, когда
+    // пострадал чужой (но не недруг).
+    float concern = own ? 1.0f : concernFor(world, self, account.victim);
+    if (!own && concern > 0.0f && isCrime(kind) && rulesOf(world).lawful) {
+        concern = std::max(concern, kLawConcern);
+    }
     const float belief = heard ? kHearsay * clamp01(account.credibility) : 1.0f;
     const float effect = concern * belief;
     const float strength =
@@ -272,7 +287,8 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
 
     if (!heard && own) {
         if (impression.chronicle != ChronicleKind::Count) {
-            world.record(impression.chronicle, id, who, a);
+            // b — кем он ему (этап 7.3): «нашёл тело сына», «бросил брат».
+            world.record(impression.chronicle, id, who, a, kinCode(world, self, who));
         }
     } else if (!heard) {
         // Видел, как обидели (или выручили) близкого.
@@ -281,7 +297,7 @@ bool experience(World& world, entt::entity self, MemoryKind kind, EntityId who, 
                          account.victim);
         }
     } else if (!deed) {
-        world.record(ChronicleKind::Mourned, id, who, 0, 0, account.source);
+        world.record(ChronicleKind::Mourned, id, who, 0, kinCode(world, self, who), account.source);
     } else if (own) {
         world.record(ChronicleKind::HeardOf, id, who, static_cast<std::int32_t>(kind), 0,
                      account.source);
@@ -349,7 +365,7 @@ void witnessDeed(World& world, MemoryKind kind, entt::entity doer, EntityId vict
             return;
         }
         const Contact* contact = awareness->find(doerId);
-        if (contact == nullptr || !contact->seen || !isFresh(*contact, tick)) {
+        if (contact == nullptr || !contact->seen || !isFresh(*contact, *awareness, tick)) {
             return;
         }
         // Уже запомнил как сделанное с ним самим: хозяин дома.
@@ -419,7 +435,7 @@ void witnessAttack(World& world, entt::entity victim, EntityId attacker) {
     std::vector<std::pair<MemoryKind, EntityId>> seen;
     for (std::size_t i = 0; i < awareness->count; ++i) {
         const Contact& contact = awareness->contacts[i];
-        if (!contact.seen || !isFresh(contact, tick) ||
+        if (!contact.seen || !isFresh(contact, *awareness, tick) ||
             distance(position.x, position.y, contact.x, contact.y) > kWitnessRange) {
             continue;
         }
@@ -428,8 +444,9 @@ void witnessAttack(World& world, entt::entity victim, EntityId attacker) {
         if (mind == nullptr || !registry.all_of<Person>(other)) {
             continue;
         }
-        if (mind->action == Action::Flee) {
-            // Бросил близкий или товарищ по группе (этап 6.4).
+        if (mind->action == Action::Flee && !isMinor(registry, other)) {
+            // Бросил близкий или товарищ по группе (этап 6.4); ребёнку бежать
+            // не стыдно (этап 7.3).
             const Bond* bond = relations != nullptr ? relations->find(contact.id) : nullptr;
             const Person& theirs = registry.get<Person>(other);
             const bool mate = group != kInvalidId && theirs.group == group;
@@ -466,6 +483,21 @@ bool retaliates(const World& world, entt::entity self, EntityId selfId, EntityId
 }
 
 } // namespace
+
+bool isAssault(const World& world, entt::entity attacker, EntityId victim) {
+    const entt::registry& registry = world.registry();
+    const entt::entity target = world.find(victim);
+    if (target == entt::null || !registry.all_of<Person>(target)) {
+        return false;
+    }
+    const auto* combat = registry.try_get<Combat>(target);
+    const EntityId victimTarget = combat != nullptr ? combat->target : kInvalidId;
+    if (retaliates(world, attacker, registry.get<Id>(attacker).value, victim, victimTarget)) {
+        return false; // отбивается
+    }
+    const entt::entity protegee = world.find(victimTarget);
+    return protegee == entt::null || !registry.all_of<Person>(protegee); // не заступается
+}
 
 void witnessAssault(World& world, entt::entity attacker, entt::entity victim) {
     entt::registry& registry = world.registry();
@@ -528,7 +560,7 @@ void witnessTheft(World& world, entt::entity thief, EntityId building, int items
         bool noticed = person.indoors; // дома: вор пришёл к нему
         if (const auto* awareness = registry.try_get<Awareness>(entity); !noticed && awareness) {
             const Contact* contact = awareness->find(thiefId);
-            noticed = contact != nullptr && contact->seen && isFresh(*contact, tick);
+            noticed = contact != nullptr && contact->seen && isFresh(*contact, *awareness, tick);
         }
         if (noticed) {
             owners.push_back(entity);

@@ -1,6 +1,8 @@
 #include "sim/Population.h"
 
 #include "sim/Components.h"
+#include "sim/Family.h"
+#include "sim/Names.h"
 #include "sim/Relations.h"
 #include "sim/Traits.h"
 #include "sim/World.h"
@@ -10,6 +12,9 @@
 #include <algorithm>
 #include <iterator>
 #include <optional>
+#include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -22,6 +27,17 @@ constexpr std::uint32_t kHouseWeight = 1;
 constexpr std::uint32_t kApartmentWeight = 4;
 // Попыток найти проходимую клетку для бездомного.
 constexpr int kSpawnAttempts = 200;
+// Сколько раз перевыбирать имя (и фамилию рода), пока не найдётся незанятое.
+constexpr int kNameAttempts = 50;
+// Семьи (этап 7.3): квартир в многоэтажке; сколько раз перевыбирать занятый дом.
+constexpr int kFlatsPerApartment = 8;
+constexpr int kHomeAttempts = 20;
+// Возраст: младше kSlowChildAge и с kSlowElderAge ходят медленнее; младше
+// kYoungChildAge — маленькие дети (рано спят); младше kArmedAge оружия нет.
+constexpr int kSlowChildAge = 10;
+constexpr int kSlowElderAge = 72;
+constexpr int kYoungChildAge = 13;
+constexpr int kArmedAge = 16;
 // Первое решение — в течение стольких игровых минут: люди думают не в один тик.
 constexpr int kFirstThinkMinutes = 10;
 
@@ -96,6 +112,12 @@ SupplyRange supplyRange(BuildingKind kind) {
         return {20, 80, 15, 50};
     case BuildingKind::Barn:
         return {0, 15, 0, 0};
+    case BuildingKind::Hospital:
+        return {5, 15, 10, 30};
+    case BuildingKind::PoliceStation:
+        return {3, 8, 4, 10};
+    case BuildingKind::School:
+        return {2, 8, 4, 12};
     }
     return {0, 0, 0, 0};
 }
@@ -131,6 +153,16 @@ std::vector<LootRoll> lootTable(BuildingKind kind) {
         return {{K::Axe, 0.35f, 1, 1},            {K::Knife, 0.15f, 1, 1},
                 {K::Shotgun, 0.06f, 1, 1},        {K::Rifle, 0.05f, 1, 1},
                 {K::ShotgunShells, 0.1f, 3, 10},  {K::RifleAmmo, 0.08f, 3, 10}};
+    // Этап 7.2: больница — бинты и лекарства, полиция — оружейная, школа — аптечка.
+    case BuildingKind::Hospital:
+        return {{K::Bandage, 0.95f, 10, 30}, {K::Medicine, 0.95f, 6, 20}};
+    case BuildingKind::PoliceStation:
+        return {{K::Pistol, 0.8f, 1, 3},           {K::PistolAmmo, 0.9f, 20, 60},
+                {K::Shotgun, 0.4f, 1, 2},          {K::ShotgunShells, 0.6f, 10, 30},
+                {K::Rifle, 0.15f, 1, 1},           {K::RifleAmmo, 0.2f, 5, 15},
+                {K::Bandage, 0.6f, 2, 6},          {K::Knife, 0.3f, 1, 1}};
+    case BuildingKind::School:
+        return {{K::Bandage, 0.6f, 1, 4}, {K::Medicine, 0.2f, 1, 2}, {K::Axe, 0.1f, 1, 1}};
     }
     return {};
 }
@@ -247,6 +279,8 @@ void spawnPeople(World& world, int count) {
     Rng& rng = world.rng(RngStream::Spawn);
     Rng& character = world.rng(RngStream::Traits);
     Rng& gear = world.rng(RngStream::Combat);
+    Rng& naming = world.rng(RngStream::Names);
+    Rng& families = world.rng(RngStream::Families);
     entt::registry& registry = world.registry();
     const NavGrid& nav = world.nav();
 
@@ -254,6 +288,7 @@ void spawnPeople(World& world, int count) {
         EntityId id;
         Cell door;
         std::uint32_t weightEnd; // накопленный вес: дом выбирается по нему
+        int capacity;            // сколько домохозяйств: дом — одно, многоэтажка — квартиры
     };
     std::vector<std::pair<EntityId, const Building*>> buildings;
     for (const auto [entity, id, building] : registry.view<const Id, const Building>().each()) {
@@ -266,21 +301,63 @@ void spawnPeople(World& world, int count) {
     std::vector<Home> homes;
     std::uint32_t totalWeight = 0;
     for (const auto& [id, building] : buildings) {
-        totalWeight += building->kind == BuildingKind::Apartment ? kApartmentWeight : kHouseWeight;
-        homes.push_back({id, building->door, totalWeight});
+        const bool apartment = building->kind == BuildingKind::Apartment;
+        totalWeight += apartment ? kApartmentWeight : kHouseWeight;
+        homes.push_back({id, building->door, totalWeight, apartment ? kFlatsPerApartment : 1});
     }
 
-    for (int i = 0; i < count; ++i) {
-        Person person;
-        std::optional<Cell> cell;
-        if (!homes.empty()) {
+    // Состав домов (этап 7.3): кто с кем живёт, возраст, пол, родство.
+    const HouseholdPlan plan = planHouseholds(families, count);
+
+    // Дом каждому домохозяйству — по весу; занятый (в многоэтажке — все
+    // квартиры) перевыбирается.
+    std::vector<int> homeOf(plan.households.size(), -1);
+    std::vector<int> occupied(homes.size(), 0);
+    for (std::size_t h = 0; h < plan.households.size() && !homes.empty(); ++h) {
+        for (int attempt = 0; attempt < kHomeAttempts; ++attempt) {
             const std::uint32_t roll = rng.below(totalWeight);
             const auto home = std::upper_bound(
                 homes.begin(), homes.end(), roll,
-                [](std::uint32_t value, const Home& h) { return value < h.weightEnd; });
-            person.home = home->id;
+                [](std::uint32_t value, const Home& candidate) { return value < candidate.weightEnd; });
+            const auto index = static_cast<std::size_t>(home - homes.begin());
+            if (occupied[index] < home->capacity || attempt + 1 == kHomeAttempts) {
+                homeOf[h] = static_cast<int>(index);
+                ++occupied[index];
+                break;
+            }
+        }
+    }
+
+    // Фамилия рода: у разных родов по возможности разные.
+    std::vector<std::string> surnames(static_cast<std::size_t>(plan.lineages));
+    std::unordered_set<std::string> takenSurnames;
+    for (const PlannedPerson& planned : plan.people) {
+        std::string& surname = surnames[static_cast<std::size_t>(planned.lineage)];
+        if (!surname.empty()) {
+            continue;
+        }
+        for (int attempt = 0; attempt < kNameAttempts && (surname.empty() || takenSurnames.contains(surname));
+             ++attempt) {
+            surname = randomLastName(naming);
+        }
+        takenSurnames.insert(surname);
+    }
+    // Полное имя у каждого своё, чтобы людей было легко различать.
+    std::unordered_set<std::string> takenNames;
+    for (const auto [entity, name] : registry.view<const Name>().each()) {
+        takenNames.insert(name.first + " " + name.last);
+    }
+
+    std::vector<entt::entity> created(plan.people.size(), entt::entity{entt::null});
+    for (std::size_t i = 0; i < plan.people.size(); ++i) {
+        const PlannedPerson& planned = plan.people[i];
+        Person person;
+        std::optional<Cell> cell;
+        const int home = homeOf[static_cast<std::size_t>(planned.household)];
+        if (home >= 0) {
+            person.home = homes[static_cast<std::size_t>(home)].id;
             person.indoors = true; // утро застаёт дома
-            cell = home->door;
+            cell = homes[static_cast<std::size_t>(home)].door;
         } else {
             for (int attempt = 0; attempt < kSpawnAttempts && !cell; ++attempt) {
                 const Cell candidate{
@@ -291,12 +368,15 @@ void spawnPeople(World& world, int count) {
                 }
             }
             if (!cell) {
-                return; // суши нет — селить некуда
+                break; // суши нет — селить некуда
             }
         }
 
+        const int age = planned.age;
         Walker walker;
-        walker.speed = rng.range(1.2f, 1.6f);
+        // Дети и старики ходят медленнее.
+        walker.speed = age < kSlowChildAge || age >= kSlowElderAge ? rng.range(0.9f, 1.25f)
+                                                                     : rng.range(1.2f, 1.6f);
         // Утро: кто-то давно не ел, кто-то не выспался.
         Needs needs;
         needs.hunger = rng.range(0.0f, 0.4f);
@@ -309,13 +389,44 @@ void spawnPeople(World& world, int count) {
                                             kFirstThinkMinutes * kTicksPerGameMinute));
         mind.until = mind.nextThink;
 
+        Name name;
+        name.last = surnames[static_cast<std::size_t>(planned.lineage)];
+        for (int attempt = 0; attempt < kNameAttempts; ++attempt) {
+            name.first = randomFirstName(naming, planned.female);
+            if (!takenNames.contains(name.first + " " + name.last)) {
+                break;
+            }
+        }
+        takenNames.insert(name.first + " " + name.last);
+
+        // Характер: у детей — свой склад (рано ложатся, реже верховодят и
+        // лезут в драку), старики встают рано.
+        Traits traits = generateTraits(character);
+        if (age < kAdultAge) {
+            traits.leadership *= 0.6f;
+        }
+        if (age < kYoungChildAge) {
+            traits.chronotype *= 0.5f;
+            traits.aggression *= 0.7f;
+        } else if (age >= kSlowElderAge) {
+            traits.chronotype *= 0.6f;
+        }
+        Weapon weapon = startWeapon(gear);
+        if (age < kArmedAge) {
+            weapon = {}; // оружие у детей не держат
+        }
+
         const entt::entity entity = world.create();
+        created[i] = entity;
         registry.emplace<Position>(entity, Map::cellCenter(cell->x), Map::cellCenter(cell->y));
         registry.emplace<Velocity>(entity);
         registry.emplace<Person>(entity, person);
+        registry.emplace<Name>(entity, std::move(name));
+        registry.emplace<Age>(entity, Age{static_cast<std::uint8_t>(age)});
+        registry.emplace<Kin>(entity);
         registry.emplace<Walker>(entity, std::move(walker));
         registry.emplace<Needs>(entity, needs);
-        registry.emplace<Traits>(entity, generateTraits(character));
+        registry.emplace<Traits>(entity, traits);
         registry.emplace<Mind>(entity, mind);
         Inventory inventory;
         if (gear.chance(kStartBandageChance)) {
@@ -324,14 +435,37 @@ void spawnPeople(World& world, int count) {
         registry.emplace<Inventory>(entity, inventory);
         registry.emplace<Senses>(entity);
         registry.emplace<Awareness>(entity);
-        registry.emplace<Weapon>(entity, startWeapon(gear));
+        registry.emplace<Weapon>(entity, weapon);
         registry.emplace<Combat>(entity);
         registry.emplace<Wounds>(entity);
         registry.emplace<Relations>(entity);
         registry.emplace<Memories>(entity);
+        registry.emplace<Leads>(entity);
+        registry.emplace<Alarm>(entity); // о беде пока никто не знает (этап 7.6)
         world.record(ChronicleKind::Settled, registry.get<Id>(entity).value, person.home);
     }
+
+    // Родство и опекуны — по id появившихся.
+    const auto idOf = [&](int index) {
+        const entt::entity entity = created[static_cast<std::size_t>(index)];
+        return entity != entt::null ? registry.get<Id>(entity).value : kInvalidId;
+    };
+    for (const PlannedKin& link : plan.kin) {
+        const entt::entity self = created[static_cast<std::size_t>(link.a)];
+        if (self != entt::null && idOf(link.b) != kInvalidId) {
+            registry.get<Kin>(self).add(idOf(link.b), link.kind);
+        }
+    }
+    for (std::size_t i = 0; i < plan.people.size(); ++i) {
+        if (created[i] != entt::null && plan.guardian[i] >= 0) {
+            registry.get<Kin>(created[i]).guardian = idOf(plan.guardian[i]);
+        }
+    }
+
+    // Знакомства с начала мира: родня, соседи по дому и поселению, прошлое.
+    introduceFamilies(world);
     introduceNeighbours(world);
+    weavePast(world);
 }
 
 void spawnZombies(World& world, int count) {
