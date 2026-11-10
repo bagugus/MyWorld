@@ -49,6 +49,9 @@ public:
     std::uint32_t rainPortions() const { return rainPortions_; }
 
     std::uint64_t hash() const;
+    // Вернуть сохранённое состояние (загрузка мира, sim/Save.h) поверх build:
+    // запас по блокам того же размера, накопленный дождь. false — размер не тот.
+    bool restore(const std::vector<std::uint8_t>& forest, float rain, std::uint32_t rainPortions);
     std::size_t memoryBytes() const { return forest_.memoryBytes() + isForest_.memoryBytes(); }
 
 private:

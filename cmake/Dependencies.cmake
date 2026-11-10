@@ -6,6 +6,7 @@ set(LW_FASTNOISELITE_VERSION v1.1.1)
 set(LW_RAYLIB_VERSION  6.0)
 set(LW_IMGUI_VERSION   v1.92.9b-docking)
 set(LW_RLIMGUI_COMMIT  1550009359ad975927f7f0e4a3f47e3f27123ea9)
+set(LW_ZSTD_VERSION    1.5.7)
 
 # --- EnTT (ECS, только заголовки) ------------------------------------------
 FetchContent_Declare(entt
@@ -22,6 +23,25 @@ FetchContent_Declare(fastnoiselite
 FetchContent_MakeAvailable(fastnoiselite)
 add_library(lw_fastnoiselite INTERFACE)
 target_include_directories(lw_fastnoiselite SYSTEM INTERFACE ${fastnoiselite_SOURCE_DIR}/Cpp)
+
+# --- zstd (сжатие сохранений мира, этап С.1) ---------------------------------
+# Нужен симуляции (sim/Save.cpp), поэтому и сборке без окна. Только
+# статическая библиотека: без утилит, тестов, старых форматов и потоков.
+set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
+set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "" FORCE)
+set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(zstd
+    URL https://github.com/facebook/zstd/releases/download/v${LW_ZSTD_VERSION}/zstd-${LW_ZSTD_VERSION}.tar.gz
+    SOURCE_SUBDIR build/cmake
+)
+FetchContent_MakeAvailable(zstd)
+add_library(lw_zstd INTERFACE)
+target_link_libraries(lw_zstd INTERFACE libzstd_static)
+target_include_directories(lw_zstd SYSTEM INTERFACE ${zstd_SOURCE_DIR}/lib)
 
 if(NOT LW_BUILD_APP)
     return()

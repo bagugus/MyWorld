@@ -109,6 +109,16 @@ int Resources::forestEmpty() const {
     return empty;
 }
 
+bool Resources::restore(const std::vector<std::uint8_t>& forest, float rain, std::uint32_t rainPortions) {
+    if (forest.size() != forest_.cells().size()) {
+        return false;
+    }
+    forest_.cells() = forest;
+    rain_ = rain;
+    rainPortions_ = rainPortions;
+    return true;
+}
+
 std::uint64_t Resources::hash() const {
     Hasher hasher;
     for (const std::uint8_t stock : forest_.cells()) {

@@ -25,6 +25,9 @@
 //   lw_headless --seed 1 --map-size 2048                 карта 8 × 8 км (по умолчанию — 16 × 16 км,
 //                                                        клетки по 4 м); люди, звери и стаи — по площади
 //   lw_headless --seed 1 --threads 1                     без параллельных проходов (хеш тот же)
+//   lw_headless --seed 1 --ticks 6000 --save w.lwsave    после прогона сохранить мир (этап С.1)
+//   lw_headless --load w.lwsave --ticks 6000             загрузить и идти дальше: seed и настройки —
+//                                                        из файла; хеш тот же, что без перерыва
 
 #include "sim/Climate.h"
 #include "sim/Components.h"
@@ -38,6 +41,7 @@
 #include "sim/Perception.h"
 #include "sim/Relations.h"
 #include "sim/Rng.h"
+#include "sim/Save.h"
 #include "sim/Scenario.h"
 #include "sim/Society.h"
 #include "sim/Story.h"
@@ -59,6 +63,7 @@
 #include <cstring>
 #include <functional>
 #include <iterator>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -1899,9 +1904,36 @@ void printMemoryReport(const lw::World& world) {
     std::printf("  %-20s %8.1f MB\n", "total", static_cast<double>(sum) / (1024.0 * 1024.0));
 }
 
+// Сохранить мир с замером шагов (этап С.1): снимок, сжатие, запись.
+static bool saveTo(const lw::World& world, const char* path) {
+    using Clock = std::chrono::steady_clock;
+    const auto ms = [](Clock::duration d) { return std::chrono::duration<double, std::milli>(d).count(); };
+    std::string error;
+    const auto captureStart = Clock::now();
+    const std::optional<lw::SaveSnapshot> snapshot = lw::captureSave(world, &error);
+    const auto encodeStart = Clock::now();
+    const std::vector<std::uint8_t> bytes = snapshot ? lw::encodeSave(*snapshot, &error) : std::vector<std::uint8_t>{};
+    const auto writeStart = Clock::now();
+    const bool written = !bytes.empty() && lw::writeSaveFile(path, bytes, &error);
+    const auto end = Clock::now();
+    if (!written) {
+        std::printf("save failed: %s\n", error.c_str());
+        return false;
+    }
+    std::printf("saved %s: %.1f KB (state %.1f KB before compression), capture %.1f ms, compress %.1f ms, "
+                "write %.1f ms\n",
+                path, static_cast<double>(bytes.size()) / 1024.0,
+                static_cast<double>(snapshot->payload.size()) / 1024.0, ms(encodeStart - captureStart),
+                ms(writeStart - encodeStart), ms(end - writeStart));
+    return true;
+}
+
 int main(int argc, char** argv) {
     std::uint64_t seed = 1;
     std::uint64_t ticks = 1000;
+    // Сохранение и загрузка (этап С.1).
+    const char* savePath = nullptr;
+    const char* loadPath = nullptr;
     bool climate = false;
     int paths = 0;
     bool compare = false;
@@ -1992,6 +2024,10 @@ int main(int argc, char** argv) {
             flocksSet = true;
         } else if (std::strcmp(argv[i], "--lod") == 0 && hasValue) {
             config.lod = std::strcmp(argv[++i], "off") != 0; // LOD симуляции (этап 6а)
+        } else if (std::strcmp(argv[i], "--save") == 0 && hasValue) {
+            savePath = argv[++i];
+        } else if (std::strcmp(argv[i], "--load") == 0 && hasValue) {
+            loadPath = argv[++i];
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--map-size CELLS] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
@@ -1999,7 +2035,7 @@ int main(int argc, char** argv) {
                         "[--event drop|crash|convoy HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
                         "[--stories] [--foresight] [--cast] [--families] [--infections] [--society] "
-                        "[--profile] [--sample] [--threads N] [--lod on|off]\n");
+                        "[--profile] [--sample] [--threads N] [--lod on|off] [--save FILE] [--load FILE]\n");
             return 2;
         }
     }
@@ -2017,7 +2053,21 @@ int main(int argc, char** argv) {
     }
 
     const auto genStart = std::chrono::steady_clock::now();
-    lw::World world(seed, config);
+    // Загруженный мир: seed и настройки — из файла, мир идёт дальше с его тика.
+    std::unique_ptr<lw::World> owned;
+    if (loadPath != nullptr) {
+        std::string error;
+        owned = lw::loadWorld(loadPath, &error);
+        if (!owned) {
+            std::printf("load failed: %s\n", error.c_str());
+            return 1;
+        }
+        config = owned->config();
+        std::printf("loaded %s: tick %llu\n", loadPath, static_cast<unsigned long long>(owned->tick()));
+    } else {
+        owned = std::make_unique<lw::World>(seed, config);
+    }
+    lw::World& world = *owned;
     if (startPhase) {
         lw::enterPhase(world, *startPhase);
     }
@@ -2069,6 +2119,9 @@ int main(int argc, char** argv) {
     }
     const std::chrono::duration<double> elapsed = std::chrono::steady_clock::now() - start;
     sampler.stop();
+    if (savePath != nullptr && !saveTo(world, savePath)) {
+        return 1;
+    }
 
     std::printf("seed=%llu ticks=%llu map=%dx%d entities=%zu hash=%016llx\n",
                 static_cast<unsigned long long>(world.seed()),

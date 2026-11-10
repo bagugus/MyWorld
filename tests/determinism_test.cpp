@@ -4,7 +4,7 @@
 // животные и птицы, бой, смерть и тела, инвентарь и лут, дефицит, отношения,
 // память, долг и обида, чужие поступки и слухи, группы, социальные действия
 // (поделиться, обмен, предательство, месть), ивенты, мирная жизнь, сценарий и
-// фазы мира, сюжетные линии.
+// фазы мира, сюжетные линии, сохранение и загрузка.
 // Без фреймворка: CHECK печатает место сбоя, код возврата — число сбоев.
 
 #include "sim/BlockGrid.h"
@@ -30,7 +30,9 @@
 #include "sim/Resources.h"
 #include "sim/Roads.h"
 #include "sim/Rng.h"
+#include "sim/Save.h"
 #include "sim/Scenario.h"
+#include "sim/Schema.h"
 #include "sim/Society.h"
 #include "sim/SimDriver.h"
 #include "sim/SpatialIndex.h"
@@ -65,8 +67,12 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
+#include <string>
+#include <system_error>
 #include <utility>
 #include <vector>
 
@@ -8426,6 +8432,308 @@ void testObservationDoesNotChangeWorld() {
     CHECK(plain.stateHash() == watched.stateHash());
 }
 
+// --- Сохранение и загрузка (этап С.1) --------------------------------------
+
+// Порядок каждого хранилища (сущности и компоненты) один и тот же: системы
+// обходят реестр в порядке хранения.
+template <typename T>
+bool sameStorageOrder(const entt::registry& a, const entt::registry& b) {
+    const auto* left = a.storage<T>();
+    const auto* right = b.storage<T>();
+    const std::size_t leftSize = left != nullptr ? left->size() : 0;
+    const std::size_t rightSize = right != nullptr ? right->size() : 0;
+    if (leftSize != rightSize) {
+        return false;
+    }
+    return leftSize == 0 || std::equal(left->data(), left->data() + leftSize, right->data());
+}
+
+bool sameRegistryLayout(const lw::World& a, const lw::World& b) {
+    const auto* left = a.registry().storage<entt::entity>();
+    const auto* right = b.registry().storage<entt::entity>();
+    bool same = left->size() == right->size() && left->free_list() == right->free_list() &&
+                std::equal(left->data(), left->data() + left->size(), right->data());
+    same = same && sameStorageOrder<lw::Id>(a.registry(), b.registry());
+    lw::forEachType(lw::SavedComponents{}, [&](auto type) {
+        using T = typename decltype(type)::type;
+        same = same && sameStorageOrder<T>(a.registry(), b.registry());
+    });
+    return same;
+}
+
+std::vector<std::uint8_t> saveBytes(const lw::World& world) {
+    std::string error;
+    const std::optional<lw::SaveSnapshot> snapshot = lw::captureSave(world, &error);
+    CHECK(snapshot.has_value());
+    if (!snapshot) {
+        std::printf("  capture: %s\n", error.c_str());
+        return {};
+    }
+    std::vector<std::uint8_t> bytes = lw::encodeSave(*snapshot, &error);
+    CHECK(!bytes.empty());
+    return bytes;
+}
+
+// Смерти, удалённые сущности и снятые компоненты — как за долгую жизнь мира:
+// хранилища перемешиваются, в списке свободных ждут номера, у новых сущностей
+// будут новые версии.
+void shakeWorld(lw::World& world) {
+    entt::registry& registry = world.registry();
+    std::vector<entt::entity> victims;
+    int index = 0;
+    for (const entt::entity entity : registry.view<lw::Person>()) {
+        if (index++ % 6 == 0) {
+            victims.push_back(entity);
+        }
+    }
+    index = 0;
+    for (const entt::entity entity : registry.view<lw::Zombie>()) {
+        if (index++ % 4 == 0) {
+            victims.push_back(entity);
+        }
+    }
+    index = 0;
+    for (const entt::entity entity : registry.view<lw::Animal>()) {
+        if (index++ % 3 == 0) {
+            victims.push_back(entity);
+        }
+    }
+    for (const entt::entity entity : victims) {
+        lw::die(world, entity, lw::DeathCause::Wounds, lw::kInvalidId);
+    }
+    for (int i = 0; i < 5; ++i) {
+        const entt::entity temporary = world.create();
+        registry.emplace<lw::Position>(temporary, 10.0f * static_cast<float>(i), 10.0f);
+        world.destroy(temporary);
+    }
+}
+
+// N тиков → сохранить → загрузить: тот же хеш и тот же реестр; ещё M тиков —
+// тот же мир, что без перерыва; снова сохранить — те же байты состояния.
+void checkSaveLoadContinues(std::uint64_t seed, const lw::WorldConfig& config, int before, int after,
+                            bool shake = false) {
+    lw::World original(seed, config);
+    lw::World uninterrupted(seed, config);
+    for (int i = 0; i < before; ++i) {
+        original.step();
+        uninterrupted.step();
+    }
+    if (shake) {
+        shakeWorld(original);
+        shakeWorld(uninterrupted);
+        CHECK(original.registry().storage<entt::entity>().free_list() <
+              original.registry().storage<entt::entity>().size());
+    }
+    std::string error;
+    const std::optional<lw::SaveSnapshot> snapshot = lw::captureSave(original, &error);
+    CHECK(snapshot.has_value());
+    if (!snapshot) {
+        return;
+    }
+    const std::vector<std::uint8_t> bytes = lw::encodeSave(*snapshot, &error);
+    std::unique_ptr<lw::World> loaded = lw::decodeSave(bytes, &error);
+    CHECK(loaded != nullptr);
+    if (!loaded) {
+        std::printf("  load: %s\n", error.c_str());
+        return;
+    }
+    CHECK(loaded->stateHash() == original.stateHash());
+    CHECK(loaded->tick() == original.tick());
+    CHECK(loaded->entityCount() == original.entityCount());
+    CHECK(loaded->seed() == seed);
+    CHECK(sameRegistryLayout(*loaded, original));
+    CHECK(loaded->spatial().size() == original.spatial().size());
+    // Летопись: индекс по id восстановлен.
+    for (const auto [entity, id] : original.registry().view<const lw::Id>().each()) {
+        const auto a = original.chronicle().eventsOf(id.value);
+        const auto b = loaded->chronicle().eventsOf(id.value);
+        CHECK(std::equal(a.begin(), a.end(), b.begin(), b.end()));
+    }
+    // Загруженный мир сохраняется в те же байты состояния — поля вернулись все,
+    // и не входящие в хеш тоже.
+    const std::optional<lw::SaveSnapshot> again = lw::captureSave(*loaded, &error);
+    CHECK(again.has_value() && again->payload == snapshot->payload);
+
+    for (int i = 0; i < after; ++i) {
+        original.step();
+        uninterrupted.step();
+        loaded->step();
+    }
+    CHECK(original.stateHash() == uninterrupted.stateHash());
+    CHECK(loaded->stateHash() == uninterrupted.stateHash());
+    CHECK(sameRegistryLayout(*loaded, uninterrupted));
+}
+
+void testSaveLoadContinues() {
+    // Мирная жизнь со сценарием и ранней вспышкой: работа, семьи, тревога,
+    // заражение; LOD включён.
+    lw::WorldConfig peace = regionConfig();
+    peace.people = 90;
+    peace.peacetime = true;
+    peace.outbreakDays = 0.04;
+    peace.animals = 20;
+    peace.flocks = 4;
+    peace.lod = true;
+    checkSaveLoadContinues(21, peace, 7000, 3000, true);
+
+    // После катастрофы: зомби, бой, тела, туши — компоненты снимаются и
+    // хранилища перемешиваются; ивент по расписанию.
+    lw::WorldConfig collapse = regionConfig();
+    collapse.people = 80;
+    collapse.zombies = 160;
+    collapse.animals = 30;
+    collapse.flocks = 6;
+    collapse.events = true;
+    collapse.lod = true;
+    checkSaveLoadContinues(22, collapse, 4321, 2500, true);
+
+    // Без LOD: поля этапа 6а не в хеше, но в файле.
+    lw::WorldConfig plain = collapse;
+    plain.lod = false;
+    checkSaveLoadContinues(23, plain, 2000, 2000, true);
+
+    // Сразу после рождения мира.
+    checkSaveLoadContinues(24, smallConfig(40), 0, 500);
+}
+
+void testSaveInfo() {
+    lw::WorldConfig config = regionConfig();
+    config.people = 60;
+    config.peacetime = true;
+    config.outbreakDays = 0.0;
+    config.zombies = 25;
+    lw::World world(31, config);
+    for (int i = 0; i < 300; ++i) {
+        world.step();
+    }
+    std::string error;
+    std::optional<lw::SaveSnapshot> snapshot = lw::captureSave(world, &error);
+    CHECK(snapshot.has_value());
+    if (!snapshot) {
+        return;
+    }
+    snapshot->info.title = "Тест";
+    snapshot->info.thumbnail.width = 4;
+    snapshot->info.thumbnail.height = 2;
+    snapshot->info.thumbnail.rgb.assign(4 * 2 * 3, std::uint8_t{200});
+    const std::vector<std::uint8_t> bytes = lw::encodeSave(*snapshot, &error);
+    const std::optional<lw::SaveInfo> info = lw::decodeSaveInfo(bytes, &error);
+    CHECK(info.has_value());
+    if (!info) {
+        return;
+    }
+    CHECK(info->version == lw::kSaveFormatVersion);
+    CHECK(info->seed == 31);
+    CHECK(info->tick == world.tick());
+    CHECK(info->config.mapWidth == config.mapWidth && info->config.people == config.people &&
+          info->config.peacetime && info->config.lod == config.lod);
+    CHECK(info->hasScenario && info->phase == lw::WorldPhase::Peace);
+    CHECK(info->people == static_cast<std::int32_t>(world.registry().storage<lw::Person>().size()));
+    CHECK(info->zombies == static_cast<std::int32_t>(world.registry().storage<lw::Zombie>().size()));
+    CHECK(info->zombies > 0);
+    CHECK(info->title == "Тест");
+    CHECK(info->thumbnail.width == 4 && info->thumbnail.height == 2 &&
+          info->thumbnail.rgb == snapshot->info.thumbnail.rgb);
+    CHECK(info->stateHash == world.stateHash());
+    CHECK(info->savedAt > 0);
+    // Мир без сценария — фазы нет.
+    lw::World survival(32, smallConfig(20));
+    const std::optional<lw::SaveSnapshot> plain = lw::captureSave(survival, &error);
+    CHECK(plain.has_value() && !plain->info.hasScenario);
+}
+
+void testSaveRejectsBadFiles() {
+    lw::WorldConfig config = smallConfig(40);
+    config.zombies = 10;
+    lw::World world(41, config);
+    for (int i = 0; i < 200; ++i) {
+        world.step();
+    }
+    const std::vector<std::uint8_t> good = saveBytes(world);
+    if (good.empty()) {
+        return;
+    }
+    std::string error;
+    CHECK(lw::decodeSave(good, &error) != nullptr);
+
+    const auto rejects = [](const std::vector<std::uint8_t>& bytes) {
+        std::string error;
+        return lw::decodeSave(bytes, &error) == nullptr && !error.empty();
+    };
+    CHECK(rejects({}));
+    CHECK(rejects(std::vector<std::uint8_t>(64, std::uint8_t{7}))); // не сохранение
+    std::vector<std::uint8_t> version = good;
+    version[8] = static_cast<std::uint8_t>(version[8] + 1); // другая версия формата
+    CHECK(rejects(version));
+    std::string versionError;
+    CHECK(!lw::decodeSaveInfo(version, &versionError) && versionError.find("формата") != std::string::npos);
+    std::vector<std::uint8_t> schema = good;
+    schema[12] ^= 0x01; // другой отпечаток схемы
+    CHECK(rejects(schema));
+    std::vector<std::uint8_t> truncated = good;
+    truncated.resize(truncated.size() - 9);
+    CHECK(rejects(truncated));
+    std::vector<std::uint8_t> corrupted = good;
+    corrupted[corrupted.size() - 20] ^= 0x5A; // сжатое состояние: контрольная сумма zstd
+    CHECK(rejects(corrupted));
+    std::vector<std::uint8_t> tail = good;
+    tail.push_back(0);
+    CHECK(rejects(tail));
+
+    // Карта этой сборки из сохранённого seed другая — сохранение не того мира.
+    std::optional<lw::SaveSnapshot> snapshot = lw::captureSave(world, &error);
+    CHECK(snapshot.has_value());
+    if (snapshot) {
+        snapshot->info.seed = 42;
+        const std::vector<std::uint8_t> foreign = lw::encodeSave(*snapshot, &error);
+        std::string mapError;
+        CHECK(lw::decodeSave(foreign, &mapError) == nullptr);
+        CHECK(mapError.find("карта") != std::string::npos);
+    }
+}
+
+// Компонент, которого нет в схеме сохранения.
+struct UnsavedTestComponent {
+    int value = 0;
+};
+
+void testSaveRefusesUnknownComponent() {
+    lw::World world(51, smallConfig(10));
+    const entt::entity person = world.registry().view<lw::Person>().front();
+    world.registry().emplace<UnsavedTestComponent>(person, 5);
+    std::string error;
+    CHECK(!lw::captureSave(world, &error).has_value());
+    CHECK(error.find("UnsavedTestComponent") != std::string::npos);
+    world.registry().remove<UnsavedTestComponent>(person);
+    CHECK(lw::captureSave(world, &error).has_value()); // пустое хранилище не мешает
+    CHECK(lw::saveSchemaFingerprint() != 0 && lw::saveSchemaFingerprint() == lw::saveSchemaFingerprint());
+}
+
+void testSaveFile() {
+    lw::World world(61, smallConfig(30));
+    for (int i = 0; i < 150; ++i) {
+        world.step();
+    }
+    const std::filesystem::path path = std::filesystem::temp_directory_path() / "lw_save_test" / "slot.lwsave";
+    std::error_code code;
+    std::filesystem::remove_all(path.parent_path(), code);
+    std::string error;
+    CHECK(lw::saveWorld(world, path, &error));
+    CHECK(std::filesystem::exists(path));
+    CHECK(!std::filesystem::exists(std::filesystem::path(path).concat(".tmp")));
+    const std::optional<lw::SaveInfo> info = lw::readSaveInfo(path, &error);
+    CHECK(info.has_value() && info->tick == world.tick());
+    // Перезапись того же слота: прежний файл заменяется новым.
+    for (int i = 0; i < 50; ++i) {
+        world.step();
+    }
+    CHECK(lw::saveWorld(world, path, &error));
+    const std::unique_ptr<lw::World> loaded = lw::loadWorld(path, &error);
+    CHECK(loaded != nullptr && loaded->tick() == world.tick() && loaded->stateHash() == world.stateHash());
+    CHECK(lw::loadWorld(path.parent_path() / "missing.lwsave", &error) == nullptr && !error.empty());
+    std::filesystem::remove_all(path.parent_path(), code);
+}
+
 int main() {
     testRng();
     testStableIds();
@@ -8590,6 +8898,11 @@ int main() {
     testLodThreadsSameHash();
     testLodRemovedOnDeath();
     testObservationDoesNotChangeWorld();
+    testSaveLoadContinues();
+    testSaveInfo();
+    testSaveRejectsBadFiles();
+    testSaveRefusesUnknownComponent();
+    testSaveFile();
 
     if (failures == 0) {
         std::printf("all tests passed\n");
