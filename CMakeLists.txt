@@ -28,8 +28,8 @@ else()
 endif()
 
 # --- Симуляция -------------------------------------------------------------
-# Зависит только от EnTT. raylib и ImGui сюда не попадают намеренно:
-# include графики в src/sim/ не скомпилируется.
+# Зависит только от EnTT (и zstd — сжатие сохранений, этап С.1). raylib и ImGui
+# сюда не попадают намеренно: include графики в src/sim/ не скомпилируется.
 add_library(lw_sim STATIC
     src/sim/Calendar.cpp
     src/sim/Calendar.h
@@ -82,8 +82,11 @@ add_library(lw_sim STATIC
     src/sim/Roads.h
     src/sim/Rng.cpp
     src/sim/Rng.h
+    src/sim/Save.cpp
+    src/sim/Save.h
     src/sim/Scenario.cpp
     src/sim/Scenario.h
+    src/sim/Schema.h
     src/sim/Society.cpp
     src/sim/Society.h
     src/sim/SimDriver.cpp
@@ -158,7 +161,7 @@ add_library(lw_sim STATIC
     src/sim/systems/ZombieSystem.h
 )
 target_include_directories(lw_sim PUBLIC src)
-target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite)
+target_link_libraries(lw_sim PUBLIC EnTT::EnTT PRIVATE lw_options lw_fastnoiselite lw_zstd)
 
 # Память процесса по данным ОС — для замеров в обоих приложениях (этап 2а.1).
 # Там же — сэмплирующий профайлер для поиска горячих функций (lw_headless --sample).

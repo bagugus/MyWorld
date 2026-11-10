@@ -26,26 +26,16 @@ bool hasTarget(const Combat* combat) {
     return combat != nullptr && combat->target != kInvalidId;
 }
 
-} // namespace
-
-void updateLod(World& world) {
-    if (!world.config().lod) {
-        return;
-    }
-    const std::uint64_t tick = world.tick();
-    if (tick % kLodPeriodTicks != 0) {
-        return;
-    }
-    entt::registry& registry = world.registry();
+// Разметить карту активности по миру; существа, которым ставить уровень, — в
+// creatures.
+void markActivity(World& world, std::vector<Creature>& creatures) {
+    const entt::registry& registry = world.registry();
     ActivityMap& map = world.activityMap();
     map.clear();
+    creatures.clear();
 
     // Обход — в порядке хранения реестра (детерминирован), сам порядок на
     // результат не влияет: разметка — объединение битов, уровень у каждого свой.
-    static thread_local std::vector<Creature> buffer;
-    std::vector<Creature>& creatures = buffer;
-    creatures.clear();
-
     // 1. Кто где. Люди — все живые с позицией (у эвакуированного её нет);
     // больной в жару вот-вот может умереть и встать — он для встречи как зомби.
     for (const auto [entity, person, position] : registry.view<const Person, const Position>().each()) {
@@ -97,7 +87,32 @@ void updateLod(World& world) {
     map.dilate(ActivityMap::Undead, ActivityMap::UndeadNear, ActivityMap::kEncounterRegions);
     map.dilate(ActivityMap::Active, ActivityMap::ActiveNear, ActivityMap::kActiveRegions);
     map.dilate(ActivityMap::People, ActivityMap::PeopleFar, ActivityMap::kPopulatedRegions);
-    map.setUpdated(tick);
+    map.setUpdated(world.tick());
+}
+
+} // namespace
+
+void refreshActivityMap(World& world) {
+    if (!world.config().lod) {
+        return;
+    }
+    std::vector<Creature> creatures;
+    markActivity(world, creatures);
+}
+
+void updateLod(World& world) {
+    if (!world.config().lod) {
+        return;
+    }
+    const std::uint64_t tick = world.tick();
+    if (tick % kLodPeriodTicks != 0) {
+        return;
+    }
+    entt::registry& registry = world.registry();
+    const ActivityMap& map = world.activityMap();
+    static thread_local std::vector<Creature> buffer;
+    std::vector<Creature>& creatures = buffer;
+    markActivity(world, creatures);
 
     // 3. Уровни. Полный держится kFullHoldTicks после того, как причина ушла.
     for (const Creature& creature : creatures) {

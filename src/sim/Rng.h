@@ -35,6 +35,13 @@ public:
     std::uint64_t seed() const { return seed_; }
     std::uint64_t state() const { return state_; }
     std::uint64_t increment() const { return inc_; }
+    // Поток в сохранённом состоянии (загрузка мира, sim/Save.h).
+    static Rng restored(std::uint64_t seed, std::uint64_t state, std::uint64_t increment) {
+        Rng rng(seed);
+        rng.state_ = state;
+        rng.inc_ = increment;
+        return rng;
+    }
 
 private:
     std::uint64_t seed_;
