@@ -309,7 +309,7 @@ void evacuate(World& world, entt::entity entity, EntityId point, bool soldier) {
     }
     // Уехал со всем, что при себе; в мире его больше нет. Имя, возраст, родня,
     // работа и черты остаются — это его прошлое.
-    registry.remove<Person, Mind, Needs, Wounds, Walker, Senses, Awareness, Combat>(entity);
+    registry.remove<Person, Mind, Needs, Wounds, Walker, Senses, Awareness, Lod, Combat>(entity);
     registry.remove<Relations, Memories, Leads, Alarm, Inventory, Weapon, Wallet>(entity);
     registry.remove<Velocity, Position>(entity);
     registry.emplace<Evacuated>(entity, Evacuated{world.tick(), point});

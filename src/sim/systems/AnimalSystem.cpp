@@ -1,6 +1,7 @@
 #include "sim/systems/AnimalSystem.h"
 
 #include "sim/Calendar.h"
+#include "sim/Lod.h"
 #include "sim/Perception.h"
 #include "sim/Population.h"
 #include "sim/World.h"
@@ -141,7 +142,7 @@ public:
         }
         for (std::size_t i = 0; i < awareness.count; ++i) {
             const Contact& contact = awareness.contacts[i];
-            if (!isFresh(contact, tick_)) {
+            if (!isFresh(contact, awareness, tick_)) {
                 continue;
             }
             const entt::entity other = world_.find(contact.id);
@@ -174,6 +175,7 @@ public:
                     animal.state = AnimalState::Charge;
                     animal.threat = threat;
                     animal.until = tick_ + seconds(kChargeSeconds);
+                    wake(world_, entity_); // бросок — полный уровень сразу (этап 6а)
                     if (charge(spec)) {
                         return;
                     }
@@ -276,6 +278,7 @@ private:
                 animal_->threat = threat;
                 animal_->goal = *cell;
                 setSpeed(*walker_, spec.runSpeed);
+                wake(world_, entity_); // бегство — полный уровень сразу (этап 6а)
                 return;
             }
         }
@@ -365,6 +368,7 @@ std::optional<std::pair<float, float>> pickPerch(const World& world, const Posit
 
 void updateFlocks(World& world, Rng& rng) {
     const std::uint64_t tick = world.tick();
+    const DetailLookup detail(std::as_const(world.registry()));
     auto view = world.registry().view<const Id, Flock, Position, Velocity>();
     for (const auto [entity, id, flock, position, velocity] : view.each()) {
         if (flock.flying) {
@@ -384,7 +388,9 @@ void updateFlocks(World& world, Rng& rng) {
             continue;
         }
         velocity = {};
-        if ((tick + id.value) % kAnimalThinkTicks != 0) {
+        // С LOD (этап 6а) — реже, по уровню стаи; расписания вложены.
+        if ((tick + id.value) % kAnimalThinkTicks != 0 ||
+            !due(tick, id.value, kAnimalThinkTicks, detail.of(entity))) {
             continue;
         }
         const bool alarm = startled(world, position);
@@ -469,11 +475,30 @@ void updateAnimals(World& world) {
     // Порядок — порядок хранения в реестре: он детерминирован. Компоненты по
     // ходу не добавляются и не удаляются.
     entt::registry& registry = world.registry();
+    // Уровень детализации (этап 6а): спокойные и дремлющие решают реже.
+    // Расписания вложены: уровень смотрится только в тик ритма полного.
+    // Обход — по ведущему хранилищу того же view (порядок тот же): чья
+    // очередь, смотрится до поиска остальных компонентов (как у зомби, этап 2а.1).
+    const DetailLookup detail(std::as_const(registry));
     auto view = registry.view<const Id, Animal, Walker, const Position, const Awareness>();
-    for (const auto [entity, id, animal, walker, position, awareness] : view.each()) {
-        // Раненое решает сразу, а не в свой тик: иначе секунду стоит под выстрелами.
-        const bool hurt = animal.hurtAt > 0 && animal.hurtAt + 1 == tick; // ранили в прошлом тике
-        if ((tick + id.value) % kAnimalThinkTicks == 0 || (hurt && animal.state != AnimalState::Flee)) {
+    const auto& ids = registry.storage<Id>();
+    const auto& animals = registry.storage<Animal>();
+    if (const auto* leading = view.handle(); leading != nullptr) {
+        for (const entt::entity entity : *leading) {
+            if (!ids.contains(entity) || !animals.contains(entity)) {
+                continue;
+            }
+            const EntityId id = ids.get(entity).value;
+            const Animal& state = animals.get(entity);
+            // Раненое решает сразу, а не в свой тик: иначе секунду стоит под выстрелами.
+            const bool hurt = state.hurtAt > 0 && state.hurtAt + 1 == tick; // ранили в прошлом тике
+            const bool turn = (tick + id) % kAnimalThinkTicks == 0 &&
+                              due(tick, id, kAnimalThinkTicks, detail.of(entity));
+            if ((!turn && !(hurt && state.state != AnimalState::Flee)) || !view.contains(entity)) {
+                continue;
+            }
+            auto [animal, walker, position, awareness] =
+                view.get<Animal, Walker, const Position, const Awareness>(entity);
             brain.think(entity, animal, walker, position, awareness, registry.try_get<Combat>(entity));
         }
     }

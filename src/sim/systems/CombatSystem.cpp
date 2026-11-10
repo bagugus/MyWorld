@@ -1,6 +1,7 @@
 #include "sim/systems/CombatSystem.h"
 
 #include "sim/Death.h"
+#include "sim/Lod.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Weapons.h"
@@ -193,6 +194,11 @@ void updateCombat(World& world) {
         if (!rng.chance(chance)) {
             continue;
         }
+
+        // Попадание будит обоих (этап 6а): бой — на полном уровне детализации
+        // сразу, не дожидаясь пересчёта.
+        wake(world, entity);
+        wake(world, target);
 
         // В голову — только зомби и дичи: людей пока никто не убивает с одного удара.
         const bool person = registry.all_of<Person>(target);

@@ -644,7 +644,7 @@ void printPerception(const lw::World& world) {
         bool any = false;
         for (std::size_t i = 0; i < awareness.count; ++i) {
             const lw::Contact& contact = awareness.contacts[i];
-            if (!lw::isFresh(contact, world.tick())) {
+            if (!lw::isFresh(contact, awareness, world.tick())) {
                 ++remembered;
                 continue;
             }
@@ -663,6 +663,100 @@ void printPerception(const lw::World& world) {
                 conditions.sight, conditions.hearing, aware, creatures,
                 static_cast<double>(contacts) / static_cast<double>(creatures), seen, heard,
                 remembered, world.sounds().size());
+}
+
+// Уровни детализации (этап 6а): сколько существ на каждом — сейчас и в среднем
+// за прогон (по снимку после каждого пересчёта) — и во сколько раз реже
+// обновляется восприятие, чем если бы все были на полном уровне (решения
+// зомби, зверей и птиц — в том же ритме, люди решают каждый тик).
+struct LodLog {
+    static constexpr std::size_t kLevels = static_cast<std::size_t>(lw::Detail::Count);
+    double creatures[kLevels] = {};
+    double regionsFull = 0.0;
+    double regionsCalm = 0.0;
+    std::uint64_t samples = 0;
+
+    void sample(const lw::World& world) {
+        for (const auto [entity, lod] : world.registry().view<const lw::Lod>().each()) {
+            creatures[static_cast<std::size_t>(lod.level)] += 1.0;
+        }
+        const lw::ActivityMap& map = world.activityMap();
+        std::size_t full = 0;
+        std::size_t calm = 0;
+        for (int ry = 0; ry < map.height(); ++ry) {
+            for (int rx = 0; rx < map.width(); ++rx) {
+                if ((map.testRegion(lw::ActivityMap::PeopleNear, rx, ry) &&
+                     map.testRegion(lw::ActivityMap::UndeadNear, rx, ry)) ||
+                    map.testRegion(lw::ActivityMap::ActiveNear, rx, ry)) {
+                    ++full;
+                } else if (map.testRegion(lw::ActivityMap::PeopleFar, rx, ry)) {
+                    ++calm;
+                }
+            }
+        }
+        regionsFull += static_cast<double>(full);
+        regionsCalm += static_cast<double>(calm);
+        ++samples;
+    }
+};
+
+void printLod(const lw::World& world, const LodLog& log) {
+    if (!world.config().lod) {
+        std::printf("lod: off (everyone at full detail)\n");
+        return;
+    }
+    constexpr const char* kKinds[] = {"people", "zombies", "animals", "flocks"};
+    std::size_t now[LodLog::kLevels][std::size(kKinds)] = {};
+    std::size_t total = 0;
+    const entt::registry& registry = world.registry();
+    for (const auto [entity, lod] : registry.view<const lw::Lod>().each()) {
+        const std::size_t kind = registry.all_of<lw::Person>(entity)   ? 0
+                                 : registry.all_of<lw::Zombie>(entity) ? 1
+                                 : registry.all_of<lw::Animal>(entity) ? 2
+                                                                       : 3;
+        ++now[static_cast<std::size_t>(lod.level)][kind];
+        ++total;
+    }
+    std::printf("lod: on, period %llu ticks; now", static_cast<unsigned long long>(lw::kLodPeriodTicks));
+    constexpr const char* kLevelNames[] = {"full", "calm", "dormant"};
+    static_assert(std::size(kLevelNames) == LodLog::kLevels);
+    for (std::size_t level = 0; level < LodLog::kLevels; ++level) {
+        std::size_t sum = 0;
+        for (std::size_t kind = 0; kind < std::size(kKinds); ++kind) {
+            sum += now[level][kind];
+        }
+        std::printf("%s %s %zu (", level == 0 ? "" : ",", kLevelNames[level], sum);
+        bool first = true;
+        for (std::size_t kind = 0; kind < std::size(kKinds); ++kind) {
+            if (now[level][kind] > 0) {
+                std::printf("%s%s %zu", first ? "" : ", ", kKinds[kind], now[level][kind]);
+                first = false;
+            }
+        }
+        std::printf(")");
+    }
+    std::printf(" of %zu\n", total);
+    if (log.samples == 0) {
+        return;
+    }
+    double sum = 0.0;
+    double updates = 0.0; // восприятие: обновлений на тик относительно полного уровня
+    for (std::size_t level = 0; level < LodLog::kLevels; ++level) {
+        sum += log.creatures[level];
+        updates += log.creatures[level] / static_cast<double>(lw::strideOf(static_cast<lw::Detail>(level)));
+    }
+    if (sum <= 0.0) {
+        return;
+    }
+    const lw::ActivityMap& map = world.activityMap();
+    const double regions = static_cast<double>(map.width()) * static_cast<double>(map.height());
+    const double samples = static_cast<double>(log.samples);
+    std::printf("  run average (%llu samples): full %.1f%%, calm %.1f%%, dormant %.1f%% of creatures; "
+                "perception %.2fx of all-full; regions %dx%d: full %.1f%%, calm %.1f%%\n",
+                static_cast<unsigned long long>(log.samples), 100.0 * log.creatures[0] / sum,
+                100.0 * log.creatures[1] / sum, 100.0 * log.creatures[2] / sum, updates / sum,
+                map.width(), map.height(), 100.0 * log.regionsFull / samples / regions,
+                100.0 * log.regionsCalm / samples / regions);
 }
 
 // Зомби: чем заняты, сколько в ордах, какие орды.
@@ -1873,6 +1967,8 @@ int main(int argc, char** argv) {
             config.animals = std::atoi(argv[++i]);
         } else if (std::strcmp(argv[i], "--flocks") == 0 && hasValue) {
             config.flocks = std::atoi(argv[++i]);
+        } else if (std::strcmp(argv[i], "--lod") == 0 && hasValue) {
+            config.lod = std::strcmp(argv[++i], "off") != 0; // LOD симуляции (этап 6а)
         } else {
             std::printf("usage: lw_headless [--seed N] [--ticks N] [--climate] [--map-size CELLS] [--people N] "
                         "[--zombies N] [--animals N] [--flocks N] [--paths N [--optimal]] [--daily] "
@@ -1880,7 +1976,7 @@ int main(int argc, char** argv) {
                         "[--event drop|crash|convoy HOURS] [--no-peace] "
                         "[--outbreak DAYS] [--phase peace|outbreak|panic|collapse|survival] "
                         "[--stories] [--foresight] [--cast] [--families] [--infections] [--society] "
-                        "[--profile] [--sample] [--threads N]\n");
+                        "[--profile] [--sample] [--threads N] [--lod on|off]\n");
             return 2;
         }
     }
@@ -1920,6 +2016,7 @@ int main(int argc, char** argv) {
         printDailyHeader();
     }
     ForesightLog foresight;
+    LodLog lodLog;
     const auto manualTick =
         static_cast<std::uint64_t>(std::max(0.0, manualHour) * lw::kTicksPerGameHour);
     for (std::uint64_t i = 0; i < ticks; ++i) {
@@ -1929,6 +2026,10 @@ int main(int argc, char** argv) {
                         static_cast<unsigned long long>(world.tick()));
         }
         world.step();
+        // Уровни — сразу после пересчёта (он идёт в тике, кратном периоду).
+        if (config.lod && (world.tick() - 1) % lw::kLodPeriodTicks == 0) {
+            lodLog.sample(world);
+        }
         if (foresightLog && world.tick() % lw::kTicksPerGameMinute == 0) {
             foresight.sample(world);
         }
@@ -1957,6 +2058,7 @@ int main(int argc, char** argv) {
     printMemories(world);
     printGroups(world);
     printPerception(world);
+    printLod(world, lodLog);
     printZombies(world);
     printAnimals(world);
     printCombat(world);

@@ -2,6 +2,7 @@
 
 #include "sim/Hash.h"
 #include "sim/Calendar.h"
+#include "sim/Lod.h"
 #include "sim/Memory.h"
 #include "sim/Perception.h"
 #include "sim/Population.h"
@@ -194,7 +195,7 @@ public:
             if (zombie.checked != 0 && contact.tick <= zombie.checked) {
                 continue; // уже проверено
             }
-            const bool fresh = isFresh(contact, tick_);
+            const bool fresh = isFresh(contact, awareness, tick_);
             const bool fellow = isZombie(contact.id);
             if (fresh && contact.seen && !fellow) {
                 prey = &contact; // контакты — ближние вперёд
@@ -288,6 +289,9 @@ private:
         zombie.target = prey.id;
         zombie.alerted = tick_;
         zombie.until = 0;
+        if (started) {
+            wake(world_, entity_); // погоня — полный уровень сразу (этап 6а)
+        }
         if (started && (zombie.lastGroan == 0 || tick_ >= zombie.lastGroan + kCallCooldownTicks)) {
             world_.emitSound(position_.x, position_.y, kCallLoudness, SoundKind::Groan, id_);
             zombie.lastGroan = tick_;
@@ -314,6 +318,9 @@ private:
             distance(cellX(goal), cellY(goal), cellX(zombie.goal), cellY(zombie.goal)) <=
                 kInvestigateRegoal) {
             return;
+        }
+        if (zombie.state != ZombieState::Investigate) {
+            wake(world_, entity_); // пошёл на шум — полный уровень сразу (этап 6а)
         }
         zombie.state = ZombieState::Investigate;
         zombie.target = kInvalidId;
@@ -724,7 +731,7 @@ Threat threatOf(const World& world, entt::entity person) {
     float ay = 0.0f;
     for (std::size_t i = 0; i < awareness->count; ++i) {
         const Contact& contact = awareness->contacts[i];
-        if (!isFresh(contact, tick)) {
+        if (!isFresh(contact, *awareness, tick)) {
             continue;
         }
         const entt::entity entity = world.find(contact.id);
@@ -861,10 +868,14 @@ void updateZombies(World& world) {
     auto view = world.registry()
                     .view<const Id, Zombie, Walker, const Position, const Awareness, Combat>();
     const auto& ids = world.registry().storage<Id>();
+    // Уровень детализации (этап 6а): спокойные и дремлющие думают в 4 и 16 раз
+    // реже. Расписания вложены: уровень смотрится только в тик ритма полного.
+    const DetailLookup detail(std::as_const(world.registry()));
     if (const auto* leading = view.handle(); leading != nullptr) {
         for (const entt::entity entity : *leading) {
             const EntityId id = ids.get(entity).value;
-            if ((tick + id) % kZombieThinkTicks != 0 || !view.contains(entity)) {
+            if ((tick + id) % kZombieThinkTicks != 0 || !view.contains(entity) ||
+                !due(tick, id, kZombieThinkTicks, detail.of(entity))) {
                 continue;
             }
             auto [zombie, walker, position, awareness, combat] =

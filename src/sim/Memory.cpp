@@ -365,7 +365,7 @@ void witnessDeed(World& world, MemoryKind kind, entt::entity doer, EntityId vict
             return;
         }
         const Contact* contact = awareness->find(doerId);
-        if (contact == nullptr || !contact->seen || !isFresh(*contact, tick)) {
+        if (contact == nullptr || !contact->seen || !isFresh(*contact, *awareness, tick)) {
             return;
         }
         // Уже запомнил как сделанное с ним самим: хозяин дома.
@@ -435,7 +435,7 @@ void witnessAttack(World& world, entt::entity victim, EntityId attacker) {
     std::vector<std::pair<MemoryKind, EntityId>> seen;
     for (std::size_t i = 0; i < awareness->count; ++i) {
         const Contact& contact = awareness->contacts[i];
-        if (!contact.seen || !isFresh(contact, tick) ||
+        if (!contact.seen || !isFresh(contact, *awareness, tick) ||
             distance(position.x, position.y, contact.x, contact.y) > kWitnessRange) {
             continue;
         }
@@ -560,7 +560,7 @@ void witnessTheft(World& world, entt::entity thief, EntityId building, int items
         bool noticed = person.indoors; // дома: вор пришёл к нему
         if (const auto* awareness = registry.try_get<Awareness>(entity); !noticed && awareness) {
             const Contact* contact = awareness->find(thiefId);
-            noticed = contact != nullptr && contact->seen && isFresh(*contact, tick);
+            noticed = contact != nullptr && contact->seen && isFresh(*contact, *awareness, tick);
         }
         if (noticed) {
             owners.push_back(entity);

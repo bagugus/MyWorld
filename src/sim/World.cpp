@@ -14,6 +14,7 @@
 #include "sim/systems/FamilySystem.h"
 #include "sim/systems/GroupSystem.h"
 #include "sim/systems/InfectionSystem.h"
+#include "sim/systems/LodSystem.h"
 #include "sim/systems/MemorySystem.h"
 #include "sim/systems/MovementSystem.h"
 #include "sim/systems/NeedsSystem.h"
@@ -40,6 +41,12 @@ World::World(std::uint64_t seed, const WorldConfig& config)
       map_(std::max(1, config.mapWidth), std::max(1, config.mapHeight)),
       spatial_(map_.worldWidth(), map_.worldHeight()) {
     registry_.on_destroy<Position>().connect<&SpatialIndex::onPositionDestroyed>(spatial_);
+    activity_.reset(map_.worldWidth(), map_.worldHeight());
+    // С LOD (этап 6а) у каждого, кто воспринимает мир, с рождения есть уровень
+    // детализации — полный до первого пересчёта.
+    if (config_.lod) {
+        registry_.on_construct<Awareness>().connect<&attachLod>();
+    }
 
     const Rng root(seed);
     const auto streamCount = static_cast<std::size_t>(RngStream::Count);
@@ -197,6 +204,12 @@ void World::step() {
         updateBodies(*this);
     }
     {
+        // Уровни детализации (этап 6а) — до восприятия и решений: в этом тике
+        // все системы видят одни и те же уровни. Вставший из тела уже зомби.
+        LW_PROFILE(p, "lod");
+        updateLod(*this);
+    }
+    {
         // До решений и движения: восприятие видит мир на начало тика.
         LW_PROFILE(p, "perception");
         updatePerception(*this);
@@ -298,14 +311,15 @@ std::vector<MemoryItem> World::memoryReport() const {
     report.push_back({"places", places_.memoryBytes()});
     report.push_back({"resources", resources_.memoryBytes()});
     report.push_back({"spatial index", spatial_.memoryBytes()});
+    report.push_back({"activity map", activity_.memoryBytes()});
     report.push_back({"chronicle", chronicle_.memoryBytes()});
 
     std::size_t components =
         storagesBytes<Id, Name, Position, Velocity, Settlement, Building, Person, Needs, Traits, Age,
                       Kin, Inventory, Mind, Relations, Memories, Group, Job, Wallet, Workplace,
                       WorldEvent, Cache, Leads, Scenario, Alarm, Quarantine, EvacuationPoint,
-                      Evacuated, Senses, Awareness, Walker, Zombie, Horde, Animal, Flock, Weapon,
-                      Combat, Wounds, Corpse>(registry_);
+                      Evacuated, Senses, Awareness, Lod, Walker, Zombie, Horde, Animal, Flock,
+                      Weapon, Combat, Wounds, Corpse>(registry_);
     for (const auto [entity, walker] : registry_.view<const Walker>().each()) {
         components += walker.waypoints.capacity() * sizeof(Cell);
     }
@@ -597,6 +611,14 @@ std::uint64_t World::stateHash() const {
             hasher.add(senses->sight);
             hasher.add(senses->hearing);
         }
+        // Уровень детализации (этап 6а) — только с LOD: без него компонентов нет
+        // и хеш тот же, что до этапа. Причина (cause) и окно восприятия
+        // (Awareness::window — производное от уровня) на будущее не влияют.
+        if (const auto* lod = registry_.try_get<Lod>(entity)) {
+            hasher.add(std::uint64_t{41});
+            hasher.add(static_cast<std::uint8_t>(lod->level));
+            hasher.add(lod->fullUntil);
+        }
         if (const auto* awareness = registry_.try_get<Awareness>(entity)) {
             hasher.add(std::uint64_t{15});
             hasher.add(awareness->count);
@@ -608,6 +630,12 @@ std::uint64_t World::stateHash() const {
                 hasher.add(contact.tick);
                 hasher.add(static_cast<std::uint8_t>(contact.seen));
                 hasher.add(static_cast<std::uint8_t>(contact.heard));
+            }
+            // С какого тика слышны звуки (этап 6а) — только с LOD: без него
+            // обновления идут ровно через kPerceptionIntervalTicks, и это
+            // поле ничего не меняет, а хеш остаётся прежним.
+            if (config_.lod) {
+                hasher.add(awareness->updated);
             }
         }
         if (const auto* zombie = registry_.try_get<Zombie>(entity)) {

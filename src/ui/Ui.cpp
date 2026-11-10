@@ -13,6 +13,7 @@
 #include "sim/systems/EventSystem.h"
 #include "ui/Format.h"
 #include "ui/Inspector.h"
+#include "ui/LodOverlay.h"
 #include "util/ProcessMemory.h"
 
 #include <imgui.h>
@@ -648,6 +649,27 @@ void drawMeasurements(const World& world, const WorldRenderer& renderer, const W
                 props.buildMsLastFrame(), renderer3d.pending());
 }
 
+// Уровни детализации симуляции (этап 6а): сколько существ на каждом и флажок
+// слоя карты активности (только вид сверху).
+void drawLodControls(const World& world) {
+    if (!world.config().lod) {
+        ImGui::TextDisabled("Детализация (LOD): выключена — все на полном уровне");
+        return;
+    }
+    std::size_t counts[static_cast<std::size_t>(Detail::Count)] = {};
+    for (const auto [entity, lod] : world.registry().view<const Lod>().each()) {
+        ++counts[static_cast<std::size_t>(lod.level)];
+    }
+    ImGui::Text("Детализация: полная %zu, спокойная %zu, дремлющая %zu", counts[0], counts[1], counts[2]);
+    bool overlay = lodOverlay();
+    if (ImGui::Checkbox("Слой: детализация (вид сверху)", &overlay)) {
+        setLodOverlay(overlay);
+    }
+    if (overlay) {
+        ImGui::TextDisabled("красным — полная, жёлтым — спокойная, без заливки — дремлющая");
+    }
+}
+
 } // namespace
 
 void drawStatsPanel(const World& world, const Environment& environment, const SimDriver& driver,
@@ -823,6 +845,7 @@ void drawStatsPanel(const World& world, const Environment& environment, const Si
             ImGui::Text("Чанков карты в кадре: %d из %d", renderer.map().chunksDrawn(),
                         renderer.map().chunkCount());
         }
+        drawLodControls(world);
         ImGui::Text("Зум: %.2f пикс/м", camera.zoom());
         const std::optional<Vector2> cursor = camera.screenToWorld(GetMousePosition());
         if (!cursor) {

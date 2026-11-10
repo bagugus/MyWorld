@@ -235,6 +235,28 @@ const char* itemName(ItemKind kind) {
     return index < std::size(kNames) ? kNames[index] : "—";
 }
 
+const char* detailName(Detail level) {
+    constexpr const char* kNames[] = {"полная", "спокойная", "дремлющая"};
+    static_assert(std::size(kNames) == static_cast<std::size_t>(Detail::Count));
+    const auto index = static_cast<std::size_t>(level);
+    return index < std::size(kNames) ? kNames[index] : "—";
+}
+
+const char* lodCauseText(LodCause cause) {
+    constexpr const char* kTexts[] = {"появилось недавно, до пересчёта",
+                                      "рядом люди и зомби",
+                                      "само в бою, бежит, преследует, охотится или идёт на шум",
+                                      "рядом бой, бегство или погоня",
+                                      "разбужено: удар, начало боя или бегства",
+                                      "недавно было горячо",
+                                      "рядом люди, встречи с зомби нет",
+                                      "людей далеко",
+                                      "людей нет, рядом зомби — уходит от них"};
+    static_assert(std::size(kTexts) == static_cast<std::size_t>(LodCause::Count));
+    const auto index = static_cast<std::size_t>(cause);
+    return index < std::size(kTexts) ? kTexts[index] : "—";
+}
+
 void formatInventory(char* buffer, std::size_t size, const Inventory& inventory) {
     std::size_t used = 0;
     buffer[0] = '\0';

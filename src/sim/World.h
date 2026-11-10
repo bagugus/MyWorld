@@ -2,6 +2,7 @@
 
 #include "sim/Chronicle.h"
 #include "sim/Id.h"
+#include "sim/Lod.h"
 #include "sim/Map.h"
 #include "sim/Places.h"
 #include "sim/Profiler.h"
@@ -74,6 +75,12 @@ struct WorldConfig {
     // рассказчик); 0 — не по расписанию. Только у мира с мирной жизнью: без
     // неё катастрофа уже случилась и мир сразу живёт по правилам выживания.
     double outbreakDays = 7.0;
+    // Уровни детализации симуляции, LOD (этап 6а, sim/Lod.h): вдали от
+    // встреч людей и зомби существа смотрят по сторонам и решают реже. Уровень
+    // — от состояния мира, не от камеры: мир тот же в окне и без него.
+    // Выключено — все на полном уровне, мир тот же, что до этапа 6а (для
+    // сравнения и отладки: lw_headless --lod off).
+    bool lod = true;
 };
 
 // Весь мир симуляции. Не знает о графике и умеет работать без окна.
@@ -127,6 +134,10 @@ public:
     std::size_t entityCount() const { return idToEntity_.size(); }
     // Поиск соседей. Снимок позиций на начало тика: см. SpatialIndex.
     const SpatialIndex& spatial() const { return spatial_; }
+    // Карта активности — где люди, зомби, бой (этап 6а, sim/Lod.h): по ней
+    // LodSystem ставит уровни детализации. Производные данные, в хеш не входят.
+    const ActivityMap& activityMap() const { return activity_; }
+    ActivityMap& activityMap() { return activity_; }
     // Привести индекс к текущим позициям — после того, как сущности переставили
     // вне тика (тесты, будущий редактор). Тик делает это сам.
     void syncSpatial() { spatial_.sync(registry_); }
@@ -189,6 +200,7 @@ private:
     Pathfinder pathfinder_{nav_, graph_};
     Places places_;
     Resources resources_;
+    ActivityMap activity_;
 
     // Объявлен раньше реестра, чтобы пережить его: реестр шлёт индексу сигналы.
     SpatialIndex spatial_;

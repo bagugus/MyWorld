@@ -60,6 +60,10 @@ const char* alarmClueText(AlarmClue clue);
 const char* broadcastText(BroadcastKind kind);
 // Предмет: «бинт», «патроны к винтовке».
 const char* itemName(ItemKind kind);
+// Уровень детализации симуляции (этап 6а): «полная», «спокойная»,
+// «дремлющая»; почему такой: «рядом встреча людей и зомби».
+const char* detailName(Detail level);
+const char* lodCauseText(LodCause cause);
 // Строка «еда 3, вода 2, бинт 1» — непустые позиции инвентаря; «пусто».
 void formatInventory(char* buffer, std::size_t size, const Inventory& inventory);
 

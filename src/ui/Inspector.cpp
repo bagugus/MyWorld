@@ -351,7 +351,7 @@ void Inspector::drawOverlay(const Camera2D& camera, float alpha) const {
             const Contact& contact = awareness->contacts[i];
             Vector2 to = {contact.x, contact.y};
             Color color = kRememberedColor;
-            if (isFresh(contact, tick)) {
+            if (isFresh(contact, *awareness, tick)) {
                 color = contact.seen ? kSeenColor : kHeardColor;
                 // Видимого — к тому месту, где он нарисован сейчас.
                 if (const entt::entity other = world_.find(contact.id);
@@ -901,6 +901,25 @@ void Inspector::drawMovement(entt::entity entity) {
     }
 }
 
+void Inspector::drawDetail(entt::entity entity) {
+    if (!world_.config().lod) {
+        ImGui::TextDisabled("Детализация: полная (LOD выключен)");
+        return;
+    }
+    const auto* lod = world_.registry().try_get<Lod>(entity);
+    const Detail level = lod != nullptr ? lod->level : Detail::Full;
+    const LodCause cause = lod != nullptr ? lod->cause : LodCause::New;
+    const float look = static_cast<float>(senseWindow(level)) / static_cast<float>(World::kTicksPerSecond);
+    ImGui::Text("Детализация: %s — %s", detailName(level), lodCauseText(cause));
+    ImGui::TextDisabled("смотрит по сторонам раз в %.1f с симуляции", look);
+    if (lod != nullptr && lod->fullUntil > world_.tick()) {
+        char left[32];
+        formatGameDuration(left, sizeof(left), lod->fullUntil - world_.tick());
+        ImGui::SameLine();
+        ImGui::TextDisabled("; полная держится ещё %s", left);
+    }
+}
+
 bool Inspector::drawPerception(entt::entity entity) {
     const entt::registry& registry = world_.registry();
     const auto* senses = registry.try_get<Senses>(entity);
@@ -921,6 +940,7 @@ bool Inspector::drawPerception(entt::entity entity) {
     }
     ImGui::Text("Слышит шаги до %.0f м, обыск до %.0f м", kFootstepsLoudness * hearing,
                 kRummageLoudness * hearing);
+    drawDetail(entity);
     if (awareness->count == 0) {
         ImGui::TextDisabled("никого не замечает");
         return true;
@@ -939,7 +959,7 @@ bool Inspector::drawPerception(entt::entity entity) {
             clicked = contact.id;
         }
         ImGui::TableNextColumn();
-        if (!isFresh(contact, tick)) {
+        if (!isFresh(contact, *awareness, tick)) {
             formatGameDuration(ago, sizeof(ago), tick - contact.tick);
             ImGui::TextDisabled("помнит, %s назад", ago);
         } else if (contact.seen && contact.heard != SoundKind::None) {
